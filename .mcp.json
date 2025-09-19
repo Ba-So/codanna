@@ -8,7 +8,7 @@
       "type": "stdio",
       "command": "serena-stdio",
       "args": [
-        "/home/baso/dev/entropy_engine"
+        "/home/baso/dev/codanna"
       ]
     },
     "cargo": {

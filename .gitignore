@@ -13,3 +13,7 @@
 .vscode/.pg/
 .redis/
 .pg/
+.direnv
+.claude
+.serena
+.shrimp

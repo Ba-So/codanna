@@ -14,6 +14,7 @@ pub enum Language {
     TypeScript,
     Php,
     Go,
+    Nix,
 }
 
 impl Language {
@@ -30,6 +31,7 @@ impl Language {
             Language::TypeScript => super::LanguageId::new("typescript"),
             Language::Php => super::LanguageId::new("php"),
             Language::Go => super::LanguageId::new("go"),
+            Language::Nix => super::LanguageId::new("nix"),
         }
     }
 
@@ -45,6 +47,7 @@ impl Language {
             "typescript" => Some(Language::TypeScript),
             "php" => Some(Language::Php),
             "go" => Some(Language::Go),
+            "nix" => Some(Language::Nix),
             _ => None,
         }
     }
@@ -75,6 +78,7 @@ impl Language {
                 Some(Language::Php)
             }
             "go" | "go.mod" | "go.sum" => Some(Language::Go),
+            "nix" => Some(Language::Nix),
             _ => None,
         }
     }
@@ -97,6 +101,7 @@ impl Language {
                 "php", "php3", "php4", "php5", "php7", "php8", "phps", "phtml",
             ],
             Language::Go => &["go", "go.mod", "go.sum"],
+            Language::Nix => &["nix"],
         }
     }
 
@@ -109,6 +114,7 @@ impl Language {
             Language::TypeScript => "typescript",
             Language::Php => "php",
             Language::Go => "go",
+            Language::Nix => "nix",
         }
     }
 
@@ -121,6 +127,7 @@ impl Language {
             Language::TypeScript => "TypeScript",
             Language::Php => "PHP",
             Language::Go => "Go",
+            Language::Nix => "Nix",
         }
     }
 }

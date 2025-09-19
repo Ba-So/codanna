@@ -151,6 +151,13 @@ impl ParserFactory {
                 let parser = GoParser::new().map_err(|e| IndexError::General(e.to_string()))?;
                 Ok(Box::new(parser))
             }
+            Language::Nix => {
+                // TODO: Implement NixParser trait in Task 2
+                Err(IndexError::General(format!(
+                    "{} parser not yet fully implemented. Implementation in progress.",
+                    language.name()
+                )))
+            }
         }
     }
 
@@ -231,6 +238,12 @@ impl ParserFactory {
                     parser: Box::new(parser),
                     behavior: Box::new(GoBehavior::new()),
                 }
+            }
+            Language::Nix => {
+                return Err(IndexError::General(format!(
+                    "{} parser not yet fully implemented. Implementation in progress.",
+                    language.name()
+                )));
             }
         };
 

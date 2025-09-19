@@ -1,0 +1,277 @@
+{
+  "basic_bindings.nix": {
+    "expected_symbols": [
+      {
+        "name": "name",
+        "kind": "Variable",
+        "has_signature": true,
+        "has_doc": false
+      },
+      {
+        "name": "version",
+        "kind": "Variable",
+        "has_signature": true,
+        "has_doc": false
+      },
+      {
+        "name": "port",
+        "kind": "Variable",
+        "has_signature": true,
+        "has_doc": false
+      },
+      {
+        "name": "count",
+        "kind": "Variable",
+        "has_signature": true,
+        "has_doc": false
+      },
+      {
+        "name": "enabled",
+        "kind": "Variable",
+        "has_signature": true,
+        "has_doc": false
+      },
+      {
+        "name": "debug",
+        "kind": "Variable",
+        "has_signature": true,
+        "has_doc": false
+      },
+      {
+        "name": "dependencies",
+        "kind": "Variable",
+        "has_signature": true,
+        "has_doc": false
+      },
+      {
+        "name": "config",
+        "kind": "Variable",
+        "has_signature": true,
+        "has_doc": false
+      },
+      {
+        "name": "add",
+        "kind": "Function",
+        "has_signature": true,
+        "has_doc": false
+      },
+      {
+        "name": "greet",
+        "kind": "Function",
+        "has_signature": true,
+        "has_doc": false
+      }
+    ],
+    "min_total_symbols": 10,
+    "expected_functions": 2,
+    "expected_variables": 8
+  },
+  "functions.nix": {
+    "expected_symbols": [
+      {
+        "name": "identity",
+        "kind": "Function",
+        "has_signature": true,
+        "has_doc": false
+      },
+      {
+        "name": "compose",
+        "kind": "Function",
+        "has_signature": true,
+        "has_doc": false
+      },
+      {
+        "name": "add3",
+        "kind": "Function",
+        "has_signature": true,
+        "has_doc": false
+      },
+      {
+        "name": "processUser",
+        "kind": "Function",
+        "has_signature": true,
+        "has_doc": false
+      },
+      {
+        "name": "buildPackage",
+        "kind": "Function",
+        "has_signature": true,
+        "has_doc": false
+      },
+      {
+        "name": "factorial",
+        "kind": "Function",
+        "has_signature": true,
+        "has_doc": false
+      },
+      {
+        "name": "fibonacci",
+        "kind": "Function",
+        "has_signature": true,
+        "has_doc": false
+      }
+    ],
+    "min_total_symbols": 7,
+    "expected_functions": 7,
+    "expected_variables": 0
+  },
+  "attribute_sets.nix": {
+    "expected_symbols": [
+      {
+        "name": "simple",
+        "kind": "Variable",
+        "has_signature": true,
+        "has_doc": false
+      },
+      {
+        "name": "recursive",
+        "kind": "Variable",
+        "has_signature": true,
+        "has_doc": false
+      },
+      {
+        "name": "nested",
+        "kind": "Variable",
+        "has_signature": true,
+        "has_doc": false
+      },
+      {
+        "name": "inherited",
+        "kind": "Variable",
+        "has_signature": true,
+        "has_doc": false
+      },
+      {
+        "name": "inheritedFrom",
+        "kind": "Variable",
+        "has_signature": true,
+        "has_doc": false
+      },
+      {
+        "name": "dynamic",
+        "kind": "Variable",
+        "has_signature": true,
+        "has_doc": false
+      },
+      {
+        "name": "withFunctions",
+        "kind": "Variable",
+        "has_signature": true,
+        "has_doc": false
+      },
+      {
+        "name": "conditional",
+        "kind": "Variable",
+        "has_signature": true,
+        "has_doc": false
+      },
+      {
+        "name": "merged",
+        "kind": "Variable",
+        "has_signature": true,
+        "has_doc": false
+      }
+    ],
+    "min_total_symbols": 9,
+    "expected_functions": 0,
+    "expected_variables": 9
+  },
+  "complex_example.nix": {
+    "expected_symbols": [
+      {
+        "name": "pname",
+        "kind": "Variable",
+        "has_signature": true,
+        "has_doc": false
+      },
+      {
+        "name": "version",
+        "kind": "Variable",
+        "has_signature": true,
+        "has_doc": false
+      },
+      {
+        "name": "isDarwin",
+        "kind": "Variable",
+        "has_signature": true,
+        "has_doc": false
+      },
+      {
+        "name": "isx86_64",
+        "kind": "Variable",
+        "has_signature": true,
+        "has_doc": false
+      },
+      {
+        "name": "sslLibrary",
+        "kind": "Variable",
+        "has_signature": true,
+        "has_doc": false
+      },
+      {
+        "name": "buildInputs",
+        "kind": "Variable",
+        "has_signature": true,
+        "has_doc": false
+      },
+      {
+        "name": "nativeBuildInputs",
+        "kind": "Variable",
+        "has_signature": true,
+        "has_doc": false
+      },
+      {
+        "name": "features",
+        "kind": "Variable",
+        "has_signature": true,
+        "has_doc": false
+      },
+      {
+        "name": "mkFeatureFlags",
+        "kind": "Function",
+        "has_signature": true,
+        "has_doc": false
+      },
+      {
+        "name": "cargoFlags",
+        "kind": "Function",
+        "has_signature": true,
+        "has_doc": false
+      },
+      {
+        "name": "buildPackage",
+        "kind": "Function",
+        "has_signature": true,
+        "has_doc": false
+      }
+    ],
+    "min_total_symbols": 11,
+    "expected_functions": 3,
+    "expected_variables": 8
+  },
+  "flake.nix": {
+    "expected_symbols": [
+      {
+        "name": "description",
+        "kind": "Variable",
+        "has_signature": true,
+        "has_doc": false
+      },
+      {
+        "name": "inputs",
+        "kind": "Variable",
+        "has_signature": true,
+        "has_doc": false
+      },
+      {
+        "name": "outputs",
+        "kind": "Function",
+        "has_signature": true,
+        "has_doc": false
+      }
+    ],
+    "min_total_symbols": 3,
+    "expected_functions": 1,
+    "expected_variables": 2
+  }
+}
