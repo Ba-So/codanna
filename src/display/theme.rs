@@ -79,7 +79,8 @@ impl Theme {
 
     /// Check if color output should be disabled.
     pub fn should_disable_colors() -> bool {
-        std::env::var("NO_COLOR").is_ok() || !atty::is(atty::Stream::Stdout)
+        use is_terminal::IsTerminal;
+        std::env::var("NO_COLOR").is_ok() || !std::io::stdout().is_terminal()
     }
 
     /// Apply theme styling conditionally based on terminal support.

@@ -10,10 +10,18 @@
 
 # IDE
 .idea/
-.vscode/.pg/
 .redis/
 .pg/
 .direnv
 .claude
 .serena
 .shrimp
+.vscode/
+
+# Tree-sitter development
+/contributing/tree-sitter/grammars/
+/contributing/tree-sitter/node_modules/
+/contributing/tree-sitter/build/
+/contributing/tree-sitter/target/
+/contributing/tree-sitter/.cache/
+/contributing/tree-sitter/.env

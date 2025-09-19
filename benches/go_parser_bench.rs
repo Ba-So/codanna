@@ -6,7 +6,6 @@
 //! - Performance comparable to other language parsers
 //! - Scalability with large codebases
 
-use codanna::parsing::LanguageParser;
 use codanna::parsing::go::GoParser;
 use codanna::types::{FileId, SymbolCounter};
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};

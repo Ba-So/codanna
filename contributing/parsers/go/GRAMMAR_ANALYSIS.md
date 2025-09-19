@@ -1,0 +1,181 @@
+# Go Grammar Analysis
+
+*Generated: 2025-09-13 22:47:31 UTC*
+
+## Statistics
+- Total nodes in grammar JSON: 112
+- Nodes found in comprehensive.go: 115
+- Nodes handled by parser: 16
+- Symbol kinds extracted: 9
+
+## ✅ Successfully Handled Nodes
+These nodes are in examples and handled by parser:
+- block
+- const_declaration
+- const_spec
+- field_declaration
+- for_statement
+- function_declaration
+- if_statement
+- interface_type
+- method_declaration
+- parameter_declaration
+- short_var_declaration
+- struct_type
+- type_declaration
+- type_spec
+- var_declaration
+- var_spec
+
+## ⚠️ Implementation Gaps
+These nodes appear in comprehensive.go but aren't handled:
+- !=
+- "
+- &
+- (
+- )
+- *
+- ++
+- ,
+- .
+- :
+- :=
+- ;
+- <
+- <-
+- =
+- ==
+- [
+- ]
+- `
+- argument_list
+- assignment_statement
+- binary_expression
+- break
+- break_statement
+- call_expression
+- chan
+- channel_type
+- comment
+- composite_literal
+- const
+- defer
+- defer_statement
+- else
+- escape_sequence
+- expression_list
+- expression_statement
+- field_declaration_list
+- field_identifier
+- for
+- for_clause
+- func
+- func_literal
+- function_type
+- generic_type
+- go
+- go_statement
+- identifier
+- if
+- import
+- import_declaration
+- import_spec
+- import_spec_list
+- inc_statement
+- index_expression
+- int_literal
+- interface
+- interpreted_string_literal
+- interpreted_string_literal_content
+- iota
+- keyed_element
+- literal_element
+- literal_value
+- method_elem
+- negated_type
+- nil
+- package
+- package_clause
+- package_identifier
+- parameter_list
+- parenthesized_expression
+- pointer_type
+- qualified_type
+- range
+- range_clause
+- raw_string_literal
+- raw_string_literal_content
+- return
+- return_statement
+- selector_expression
+- send_statement
+- slice_type
+- source_file
+- statement_list
+- struct
+- true
+- type
+- type_alias
+- type_arguments
+- type_constraint
+- type_elem
+- type_identifier
+- type_parameter_declaration
+- type_parameter_list
+- unary_expression
+- var
+- var_spec_list
+- {
+- }
+- ~
+
+## 📝 Missing from Examples
+These grammar nodes aren't in comprehensive.go:
+- _expression
+- _simple_statement
+- _simple_type
+- _statement
+- _type
+- array_type
+- blank_identifier
+- communication_case
+- continue_statement
+- dec_statement
+- default_case
+- dot
+- empty_statement
+- expression_case
+- expression_switch_statement
+- fallthrough_statement
+- false
+- float_literal
+- goto_statement
+- imaginary_literal
+- implicit_length_array_type
+- label_name
+- labeled_statement
+- map_type
+- parenthesized_type
+- receive_statement
+- rune_literal
+- select_statement
+- slice_expression
+- type_assertion_expression
+- type_case
+- type_conversion_expression
+- type_instantiation_expression
+- type_switch_statement
+- variadic_argument
+- variadic_parameter_declaration
+
+## 🎯 Symbol Kinds Extracted
+- Constant
+- Field
+- Function
+- Interface
+- Method
+- Parameter
+- Struct
+- TypeAlias
+- Variable
+

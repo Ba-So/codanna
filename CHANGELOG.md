@@ -5,6 +5,108 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.13] - 2025-09-13
+
+### Fixed
+- Python parser: Module-level function calls and class instantiations now tracked (fixes #32)
+  - Module symbol created for each Python file to represent module scope
+  - Module-level calls tracked with `<module>` as caller, mapped to actual module path for queries
+  - `normalize_caller_name()` maps synthetic names to searchable module paths
+  - `configure_symbol()` renames module symbols for searchability
+  - Module type accepted as valid caller in relationship validation
+  - External symbol resolution handles unresolved import targets
+  - Method call resolution normalizes caller names for consistent matching
+
+### Added
+- Python parser: Module-level execution tracking for better code analysis
+- Tests: Module-level class instantiation detection verification
+
+## [0.5.12] - 2025-09-12
+
+### Fixed
+- MCP server: Fixed tool discovery issue after rmcp 0.6.4 upgrade (fixes #31)
+  - Tools without parameters now generate proper `{"type": "object"}` schema
+- Parser safety: Fixed UTF-8 string truncation panic when encountering emojis or multi-byte characters (fixes #29)
+  - Added `safe_truncate_str` and `truncate_for_display` utilities that respect UTF-8 boundaries
+  - Applied fix to Python and PHP parsers where manual truncation was used
+  - Zero-cost implementation returning string slices without allocation
+
+### Improved
+- MCP server instructions: Updated workflow guidance to emphasize semantic search first approach for better code exploration
+
+## [0.5.11] - 2025-09-11
+
+### Added
+- React example app under `examples/typescript/react` demonstrating call tracking for React hooks and component methods.
+
+### Fixed
+- TypeScript parser/indexer: Function call relationships correctly tracked in React projects (fixes #23)
+  - React hooks (`useState`, `useEffect`) and component methods properly detected
+  - Call relationships preserved during full project indexing
+  - External module symbols correctly resolved with unique IDs
+
+## [0.5.10] - 2025-09-11
+
+### Added
+- Parse command: output AST nodes in JSONL format for debugging
+- Parse command flags: --max-depth, --all-nodes, --output
+- Tree-sitter CLI detection in development scripts
+
+### Fixed
+- TypeScript parser: improved nested node extraction in arrow functions and JSDoc blocks (123/182 coverage)
+- Test parallel execution race conditions with unique temp files
+- CLI startup performance for non-index commands (parse, config, benchmark)
+
+### Changed
+- Parser audit reports now include timestamps
+- Parse command integration tests moved to proper test structure
+
+## [0.5.9] - 2025-09-07
+
+### Enhanced
+- **codanna-navigator agent**: Improved code research reports with quantified findings, investigation paths, and actionable insights
+
+### Added
+- C/C++ language support with tree-sitter parsing
+- Dynamic NodeTracker system for zero-maintenance parser auditing across all languages
+- TypeScript tsconfig.json path resolution infrastructure with persistence (.codanna/index/resolvers/)
+- Project-agnostic resolution foundation (ProjectResolutionProvider trait, not yet integrated)
+- Python parser extensions: assignment, decorated_definition, type_alias extraction
+- Parser API documentation for consistent resolution patterns across languages
+
+### Fixed
+- Semantic search: SymbolId persistence between embeddings and symbol index (addresses #23)
+- CI: clippy --all-targets --all-features compliance across all parsers
+
+### Changed
+- Test infrastructure: enable subfolder organization, removed 20k LOC obsolete tests, added ABI-15 audit (supports #20)
+- Memory optimization: symbol-cache candidate lookup with relationship deduplication
+
+### Breaking Changes
+- Existing codebases need reindexing with --force or clean new index
+
+## [0.5.8] - 2025-09-01
+
+### Security
+- Fixed critical slab vulnerability (RUSTSEC-2025-0047) by updating to v0.4.11
+- Replaced unmaintained atty (0.2.14) with is-terminal (0.4.16)
+- Resolved RUSTSEC-2024-0375 (atty unmaintained warning)
+- Resolved RUSTSEC-2021-0145 (atty potential unaligned read)
+
+### Documentation (internal)
+- Added security maintenance documentation
+- Created paste dependency analysis and monitoring strategy
+- Updated security sprint tracking and procedures
+
+### Changed
+- Terminal detection now uses is-terminal crate instead of atty
+
+## [0.5.7] - 2025-09-01
+
+### Fixed
+- rmcp 0.6.1 compatibility for `cargo install codanna --locked`
+- Symbol counts showing as 0 in `get_index_info`
+
 ## [0.5.6] - 2025-08-22
 
 ### Fixed

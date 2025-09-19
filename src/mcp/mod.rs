@@ -25,7 +25,7 @@ pub mod watcher;
 
 use rmcp::{
     ServerHandler,
-    handler::server::{router::tool::ToolRouter, tool::Parameters},
+    handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::{ErrorData as McpError, *},
     schemars,
     service::{Peer, RequestContext, RoleServer},
@@ -33,7 +33,6 @@ use rmcp::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json;
-use std::future::Future;
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
 
@@ -41,12 +40,12 @@ use crate::{IndexPersistence, Settings, SimpleIndexer, Symbol};
 
 /// Format a Unix timestamp as relative time (e.g., "2 hours ago")
 pub fn format_relative_time(timestamp: u64) -> String {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
+    use chrono::{DateTime, Utc};
 
-    let diff = now.saturating_sub(timestamp);
+    let now = Utc::now();
+    let then = DateTime::from_timestamp(timestamp as i64, 0).unwrap_or_else(Utc::now);
+
+    let diff = (now.timestamp() - then.timestamp()) as u64;
 
     if diff < 60 {
         "just now".to_string()
@@ -60,12 +59,8 @@ pub fn format_relative_time(timestamp: u64) -> String {
         let days = diff / 86400;
         format!("{} day{} ago", days, if days == 1 { "" } else { "s" })
     } else {
-        // For older dates, show the actual date
-        // This is a simple approximation
-        let date = std::time::UNIX_EPOCH + std::time::Duration::from_secs(timestamp);
-        format!("{date:?}")
-            .replace("SystemTime { tv_sec: ", "")
-            .replace(", tv_nsec: 0 }", "")
+        // For older dates, show the actual formatted date
+        then.format("%Y-%m-%d").to_string()
     }
 }
 
@@ -146,6 +141,9 @@ pub struct SemanticSearchWithContextRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lang: Option<String>,
 }
+
+#[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
+pub struct GetIndexInfoRequest {}
 
 fn default_depth() -> u32 {
     3
@@ -645,7 +643,10 @@ impl CodeIntelligenceServer {
     }
 
     #[tool(description = "Get information about the indexed codebase")]
-    pub async fn get_index_info(&self) -> Result<CallToolResult, McpError> {
+    pub async fn get_index_info(
+        &self,
+        Parameters(_params): Parameters<GetIndexInfoRequest>,
+    ) -> Result<CallToolResult, McpError> {
         let indexer = self.indexer.read().await;
         let symbol_count = indexer.symbol_count();
         let file_count = indexer.file_count();
@@ -1162,13 +1163,16 @@ impl ServerHandler for CodeIntelligenceServer {
             server_info: Implementation {
                 name: "codanna".to_string(),
                 version: env!("CARGO_PKG_VERSION").to_string(),
+                title: Some("Codanna Code Intelligence".to_string()),
+                website_url: Some("https://github.com/bartolli/codanna".to_string()),
+                icons: None,
             },
             instructions: Some(
-                "This server provides code intelligence tools for analyzing Rust codebases. \
-                Use 'search_symbols' for full-text search with fuzzy matching, 'find_symbol' to locate specific symbols, \
-                'get_calls' to see what a function calls, 'find_callers' to see what calls a function, \
-                and 'analyze_impact' to understand the impact of changes. \
-                Use 'get_index_info' to see what's in the index."
+                "This server provides code intelligence tools for analyzing this codebase. \
+                WORKFLOW: Start with 'semantic_search_with_context' or 'semantic_search_docs' to anchor on the right files and APIs - they provide the highest-quality context. \
+                Then use 'find_symbol' and 'search_symbols' to lock onto exact files and kinds. \
+                Treat 'get_calls', 'find_callers', and 'analyze_impact' as hints; confirm with code reading or tighter queries (unique names, kind filters). \
+                Use 'get_index_info' to understand what's indexed."
                 .to_string()
             ),
         }

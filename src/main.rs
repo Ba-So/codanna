@@ -14,7 +14,7 @@ use codanna::parsing::{
 use codanna::types::SymbolCounter;
 use codanna::{IndexPersistence, Settings, SimpleIndexer, Symbol, SymbolKind};
 use serde::Serialize;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -97,6 +97,7 @@ fn create_custom_help() -> String {
     help.push_str("  mcp-test    Test MCP connection\n");
     help.push_str("  mcp         Execute MCP tools directly\n");
     help.push_str("  benchmark   Benchmark parser performance\n");
+    help.push_str("  parse       Output AST nodes in JSONL format\n");
     help.push_str("  help        Print this message or the help of the given subcommand(s)\n\n");
 
     help.push_str("See 'codanna help <command>' for more information on a specific command.\n\n");
@@ -289,6 +290,25 @@ enum Commands {
         /// Custom file to benchmark
         #[arg(short, long)]
         file: Option<PathBuf>,
+    },
+
+    /// Parse a file and output AST nodes in JSONL format
+    #[command(about = "Parse file and output AST as JSON Lines")]
+    Parse {
+        /// File to parse
+        file: PathBuf,
+
+        /// Output file (defaults to stdout)
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+
+        /// Maximum depth to traverse
+        #[arg(short = 'd', long)]
+        max_depth: Option<usize>,
+
+        /// Include all nodes (by default only named nodes are shown, like tree-sitter)
+        #[arg(short = 'a', long)]
+        all_nodes: bool,
     },
 }
 
@@ -543,8 +563,15 @@ async fn main() {
     let index_path = config.index_path.clone();
     let persistence = IndexPersistence::new(index_path);
 
-    // Skip loading index for mcp-test (thin client mode)
-    let skip_index_load = matches!(cli.command, Commands::McpTest { .. });
+    // Skip loading index for commands that don't need it
+    let skip_index_load = matches!(
+        cli.command,
+        Commands::McpTest { .. }
+            | Commands::Parse { .. }
+            | Commands::Init { .. }
+            | Commands::Config
+            | Commands::Benchmark { .. }
+    );
 
     // Determine if we need full trait resolver initialization
     // Only needed for trait-related commands: implementations, trait analysis, etc.
@@ -1743,7 +1770,7 @@ async fn main() {
 
             // Call the tool directly
             use codanna::mcp::*;
-            use rmcp::handler::server::tool::Parameters;
+            use rmcp::handler::server::wrapper::Parameters;
 
             let result = match tool.as_str() {
                 "find_symbol" => {
@@ -1818,7 +1845,13 @@ async fn main() {
                         }))
                         .await
                 }
-                "get_index_info" => server.get_index_info().await,
+                "get_index_info" => {
+                    use codanna::mcp::GetIndexInfoRequest;
+                    use rmcp::handler::server::wrapper::Parameters;
+                    server
+                        .get_index_info(Parameters(GetIndexInfoRequest {}))
+                        .await
+                }
                 "search_symbols" => {
                     let query = arguments
                         .as_ref()
@@ -2432,6 +2465,40 @@ async fn main() {
 
         Commands::Benchmark { language, file } => {
             run_benchmark_command(&language, file);
+        }
+
+        Commands::Parse {
+            file,
+            output,
+            max_depth,
+            all_nodes,
+        } => {
+            run_parse_command(&file, output, max_depth, all_nodes);
+        }
+    }
+}
+
+/// Run parse command to output AST as JSONL
+fn run_parse_command(
+    file_path: &Path,
+    output: Option<PathBuf>,
+    max_depth: Option<usize>,
+    all_nodes: bool,
+) {
+    use codanna::io::parse::execute_parse;
+
+    match execute_parse(file_path, output, max_depth, all_nodes) {
+        Ok(()) => {
+            // Success - exit with code 0
+            std::process::exit(0);
+        }
+        Err(e) => {
+            // Print error to stderr
+            eprintln!("Error: {e}");
+
+            // Exit with appropriate error code
+            let exit_code = e.exit_code();
+            std::process::exit(exit_code as i32);
         }
     }
 }

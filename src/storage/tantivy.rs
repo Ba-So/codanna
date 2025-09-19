@@ -364,6 +364,8 @@ pub struct DocumentIndex {
     embedding_generator: Option<Arc<dyn EmbeddingGenerator>>,
     /// Symbols pending vector processing (SymbolId, symbol_text)
     pub(crate) pending_embeddings: Mutex<Vec<(SymbolId, String)>>,
+    /// Pending symbol counter during batch operations
+    pending_symbol_counter: Mutex<Option<u32>>,
 }
 
 impl std::fmt::Debug for DocumentIndex {
@@ -426,6 +428,7 @@ impl DocumentIndex {
             cluster_cache: Arc::new(RwLock::new(None)),
             embedding_generator: None,
             pending_embeddings: Mutex::new(Vec::new()),
+            pending_symbol_counter: Mutex::new(None),
         })
     }
 
@@ -760,6 +763,14 @@ impl DocumentIndex {
         if writer_lock.is_none() {
             let writer = self.index.writer::<Document>(100_000_000)?; // 100MB buffer
             *writer_lock = Some(writer);
+
+            // Initialize the pending symbol counter for this batch
+            let current = self
+                .query_metadata(MetadataKey::SymbolCounter)?
+                .unwrap_or(0) as u32;
+            if let Ok(mut pending_guard) = self.pending_symbol_counter.lock() {
+                *pending_guard = Some(current + 1);
+            }
         }
         Ok(())
     }
@@ -864,6 +875,11 @@ impl DocumentIndex {
             // Reload the reader to see new documents
             self.reader.reload()?;
 
+            // Clear the pending symbol counter after commit
+            if let Ok(mut pending_guard) = self.pending_symbol_counter.lock() {
+                *pending_guard = None;
+            }
+
             // Process pending vector embeddings if enabled
             if self.has_vector_support() && self.embedding_generator.is_some() {
                 self.post_commit_vector_processing()?;
@@ -917,7 +933,43 @@ impl DocumentIndex {
                 self.schema.context,
             ],
         );
-        let main_query = query_parser.parse_query(query_str)?;
+
+        // Try parsing as Tantivy query syntax first, fall back to literal matching
+        // for queries with special characters (interface{}, Vec<T>, etc.)
+        let main_query = match query_parser.parse_query(query_str) {
+            Ok(query) => query,
+            Err(_parse_error) => {
+                // Query contains syntax that conflicts with Tantivy parser.
+                // Fall back to literal term matching across searchable fields.
+                let name_term = Term::from_field_text(self.schema.name, query_str);
+                let doc_term = Term::from_field_text(self.schema.doc_comment, query_str);
+                let sig_term = Term::from_field_text(self.schema.signature, query_str);
+                let ctx_term = Term::from_field_text(self.schema.context, query_str);
+
+                Box::new(BooleanQuery::new(vec![
+                    (
+                        Occur::Should,
+                        Box::new(TermQuery::new(name_term, IndexRecordOption::Basic))
+                            as Box<dyn Query>,
+                    ),
+                    (
+                        Occur::Should,
+                        Box::new(TermQuery::new(doc_term, IndexRecordOption::Basic))
+                            as Box<dyn Query>,
+                    ),
+                    (
+                        Occur::Should,
+                        Box::new(TermQuery::new(sig_term, IndexRecordOption::Basic))
+                            as Box<dyn Query>,
+                    ),
+                    (
+                        Occur::Should,
+                        Box::new(TermQuery::new(ctx_term, IndexRecordOption::Basic))
+                            as Box<dyn Query>,
+                    ),
+                ])) as Box<dyn Query>
+            }
+        };
 
         // Fuzzy query for typo tolerance on the name field
         let term = Term::from_field_text(self.schema.name, query_str);
@@ -1226,18 +1278,24 @@ impl DocumentIndex {
     /// Get all symbols (use with caution on large indexes)
     pub fn get_all_symbols(&self, limit: usize) -> StorageResult<Vec<crate::Symbol>> {
         let searcher = self.reader.searcher();
-        let all_query = tantivy::query::AllQuery;
 
-        let top_docs = searcher.search(&all_query, &TopDocs::with_limit(limit))?;
+        // Use pre-filtering query instead of AllQuery + post-filtering
+        // This matches the pattern used in find_symbols_by_name and find_symbols_by_file
+        let query = BooleanQuery::from(vec![(
+            Occur::Must,
+            Box::new(TermQuery::new(
+                Term::from_field_text(self.schema.doc_type, "symbol"),
+                IndexRecordOption::Basic,
+            )) as Box<dyn Query>,
+        )]);
+
+        let top_docs = searcher.search(&query, &TopDocs::with_limit(limit))?;
+
         let mut symbols = Vec::new();
 
         for (_score, doc_address) in top_docs {
             let doc = searcher.doc::<Document>(doc_address)?;
-            if let Some(doc_type) = doc.get_first(self.schema.doc_type) {
-                if doc_type.as_str() == Some("symbol") {
-                    symbols.push(self.document_to_symbol(&doc)?);
-                }
-            }
+            symbols.push(self.document_to_symbol(&doc)?);
         }
 
         Ok(symbols)
@@ -1466,6 +1524,16 @@ impl DocumentIndex {
 
     /// Get next symbol ID
     pub fn get_next_symbol_id(&self) -> StorageResult<u32> {
+        // During batch operations, use and increment the pending counter
+        if let Ok(mut pending_guard) = self.pending_symbol_counter.lock() {
+            if let Some(ref mut counter) = *pending_guard {
+                let next_id = *counter;
+                *counter += 1;
+                return Ok(next_id);
+            }
+        }
+
+        // Otherwise, query the committed metadata
         let current = self
             .query_metadata(MetadataKey::SymbolCounter)?
             .unwrap_or(0) as u32;

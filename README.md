@@ -26,8 +26,8 @@ Give your code assistant the ability to see through your codebase—understandin
 Your AI assistant knows your code:
 
 -	"Where's this function called?" → instant call graph
--	"Show me error handling patterns" → semantic search through implementations
--	"Find functions parsing config files" → natural language discovery
+-	"Show me all authentication functions" → finds functions with auth-related doc comments
+-	"Find config file parsers" → matches functions that parse configuration
 -	"What breaks if I change this interface?" → full-project impact analysis
 
 ## Why Bother
@@ -36,9 +36,9 @@ Your AI assistant knows your code:
 
 Codanna cuts the noise:
 
--	No grep-and-hope loops.
--	No explaining the same thing twice.
--	No blind code generation.
+-	Less grep-and-hope loops.
+-	Less explaining the same thing twice.
+-	Less blind code generation.
 
 **Instead**: tight context, smarter engineering, flow that doesn't stall.
 
@@ -48,7 +48,7 @@ Codanna cuts the noise:
 
 ```bash
 # Install
-cargo install codanna
+cargo install codanna --all-features
 
 # setup
 codanna init
@@ -114,7 +114,7 @@ codanna mcp semantic_search_docs query:"where do we resolve symbol references  0
 2. **Extract real stuff** -  functions, traits, type relationships, call graphs
 3. **Embed** - semantic vectors built from your doc comments
 4. **Index** - Tantivy + memory-mapped symbol cache for <10ms lookups
-5. **Serve** - MCP protocol for AI assistants, ~300ms response time (HTTP/HTTPS) and stdio built-in (0.16s) 
+5. **Serve** - MCP protocol for AI assistants, ~300ms response time (HTTP/HTTPS) and stdio built-in (0.16s)
 
 ## Claude
 
@@ -162,7 +162,7 @@ Configure in `.mcp.json`:
 
 ### Claude Sub Agent
 
-**codanna-navigator** sub agent at `.claude/agents/codanna-navigator.md`. 
+**codanna-navigator** sub agent at `.claude/agents/codanna-navigator.md`.
 
 > We include a **codanna-navigator** sub agent (`.claude/agents/codanna-navigator.md`) that knows how to use codanna effectively.
 
@@ -229,11 +229,6 @@ Codanna includes custom slash commands for Claude that provide intelligent workf
 
 These commands use Codanna's MCP tools under the hood but provide guided workflows with comprehensive analysis and automatic report generation.
 
-## Unix-Native. Pipe it, baby!
-
-Codanna speaks CLI like you do, positional when it's simple, key:value when it's not.
-All MCP tools support `--json`, so piping isn't noise, it's music.
-
 ## Configuration
 
 Lives in `.codanna/settings.toml`:
@@ -261,6 +256,31 @@ node_modules/   # Skip dependencies
 *_test.rs       # Optionally skip tests
 ```
 
+### Unix-Native. Pipe it, baby!
+
+Codanna speaks CLI like you do, positional when it's simple, key:value when it's not.
+All MCP tools support `--json`, so piping isn't noise, it's music.
+
+```bash
+# MCP semantic search with language filter
+codanna mcp semantic_search_with_context query:"error handling" limit:2 lang:rust --json | jq -r '.data[] | "\(.symbol.name) (\(.symbol.scope_context)) (score: \(.score)) - \(.context.file_path) - \(.symbol.doc_comment)"'
+# Output: error (ClassMember) (score: 0.6421908) - src/io/format.rs:148 - Create a generic error response.
+#         add_error (ClassMember) (score: 0.6356536) - src/indexing/progress.rs:46 - Add an error (limited to first 100 errors)
+```
+
+```bash
+# Show symbol types, names and locations
+codanna retrieve search "config" --json | jq -r '.items[] | "\(.symbol.kind) \(.symbol.name) @ \(.file_path)"'
+# Output: Function test_partial_config @ src/config.rs:911
+#         Method config_key @ src/parsing/language.rs:114
+
+# Get unique file paths for search results
+codanna retrieve search "parser" --json | jq -r '.items[].file_path' | sort -u
+
+# Extract function signatures with scope context
+codanna retrieve search "create_parser" --json | jq -r '.items[] | "\(.symbol.name) (\(.symbol.scope_context)) - \(.file_path)\n  \(.symbol.signature)"'
+```
+
 ### Documentation Comments for Better Search
 
 Semantic search works by understanding your documentation comments:
@@ -275,7 +295,7 @@ fn load_config(path: &Path) -> Result<Config, Error> {
 
 With good comments, semantic search can find this function when prompted for:
 - "configuration validation"
-- "handle missing config files" 
+- "handle missing config files"
 - "TOML parsing with error handling"
 
 This encourages better documentation → better AI understanding → more motivation to document.
@@ -313,6 +333,7 @@ All retrieve commands support `--json` flag for structured output (exit code 3 w
 | `codanna mcp-test` | Verify Claude can connect and list available tools | `codanna mcp-test` |
 | `codanna mcp <TOOL>` | Execute MCP tools without spawning server | `codanna mcp find_symbol main --json` |
 | `codanna benchmark` | Benchmark parser performance | `codanna benchmark rust --file my_code.rs` |
+| `codanna parse` | Parse file and output AST as JSON Lines | `codanna parse file.rs --all-nodes` |
 
 #### Common Flags
 
@@ -348,7 +369,7 @@ Semantic search tools support language filtering to reduce noise in mixed-langua
 # Search only in Rust code
 codanna mcp semantic_search_docs query:"authentication" lang:rust limit:5
 
-# Search only in TypeScript code  
+# Search only in TypeScript code
 codanna mcp semantic_search_with_context query:"parse config" lang:typescript limit:3
 ```
 
@@ -416,33 +437,43 @@ codanna benchmark python       # Test specific language
 - ~150MB for model storage (downloaded on first use)
 - A few MB for index storage (varies by codebase size)
 
+### System Dependencies
+
+**Linux (Ubuntu/Debian):**
+```bash
+sudo apt update && sudo apt install pkg-config libssl-dev
+```
+
+**Linux (CentOS/RHEL):**
+```bash
+sudo yum install pkgconfig openssl-devel
+```
+
+**Linux (Fedora):**
+```bash
+sudo dnf install pkgconfig openssl-devel
+```
+
+**macOS/Windows:** No additional dependencies required.
+
 ## Current Limitations
 
-- Supports Rust, Python, TypeScript, Go and PHP (more language support coming)
+- Supports Rust, Python, TypeScript, Go, PHP, C, and C++ (more language support coming)
 - Semantic search requires English documentation/comments
 - Windows support is experimental
 
 ## Roadmap
 
-### v.0.5.6 (Current Release)
+### Current Release: v0.5.13
 
-| Feature | Description | Status |
-|---------|-------------|--------|
-| JSON Output Support | Structured output for all commands | ✓ |
-| Unix-Friendly CLI | Positional args and key:value syntax | ✓ |
-| Incremental Index Updates | File watching with auto re-indexing | ✓ |
-| Language Registry Architecture | Modular parser system for easy language additions | ✓ |
-| PHP Support | Full PHP parser implementation | ✓ |
-| TypeScript Support | TypeScript with type annotations | ✓ |
-| Go Support | Go with type annotations | ✓ |
+See [CHANGELOG.md](CHANGELOG.md) for detailed release notes and feature history.
 
-### Roadmap
+### Planned Features
 | Feature | Description | Status |
 |---------|-------------|--------|
 | JavaScript Support | Full JavaScript/ES6+ parser | ○ |
 | C# Support | C# with .NET ecosystem support | ○ |
 | Java Support | Java with class hierarchies | ○ |
-| C/C++ Support | C and C++ with headers and templates | ○ |
 | Direct Semantic Search | `retrieve semantic` command | ○ |
 | Batch Operations | Process multiple symbols in one call | ○ |
 | Configuration Profiles | Environment-specific settings | ○ |

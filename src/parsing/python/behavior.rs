@@ -79,6 +79,28 @@ impl Default for PythonBehavior {
 }
 
 impl LanguageBehavior for PythonBehavior {
+    fn configure_symbol(&self, symbol: &mut crate::Symbol, module_path: Option<&str>) {
+        // Apply default behavior: set module_path and parse visibility
+        if let Some(path) = module_path {
+            let full_path = self.format_module_path(path, &symbol.name);
+            symbol.module_path = Some(full_path.clone().into());
+
+            // If this is the synthetic module symbol, set its display name to the last segment
+            // (e.g., examples.python.module_calls_test -> module_calls_test)
+            if symbol.kind == crate::types::SymbolKind::Module {
+                let short = full_path.rsplit('.').next().unwrap_or(full_path.as_str());
+                symbol.name = crate::types::compact_string(short);
+            }
+        } else if symbol.kind == crate::types::SymbolKind::Module {
+            // No module path available (e.g., root __init__.py). Avoid '<' '>' which
+            // get stripped by the analyzer, to keep the name searchable via exact term.
+            symbol.name = crate::types::compact_string("module");
+        }
+
+        if let Some(ref sig) = symbol.signature {
+            symbol.visibility = self.parse_visibility(sig);
+        }
+    }
     fn create_resolution_context(&self, file_id: FileId) -> Box<dyn ResolutionScope> {
         Box::new(crate::parsing::python::PythonResolutionContext::new(
             file_id,
@@ -132,6 +154,147 @@ impl LanguageBehavior for PythonBehavior {
 
     fn get_language(&self) -> Language {
         self.language.clone()
+    }
+
+    fn normalize_caller_name(&self, name: &str, file_id: FileId) -> String {
+        if name == "<module>" {
+            if let Some(module_path) = self.get_module_path_for_file(file_id) {
+                // Return the last path segment so it matches a token in the name field
+                module_path
+                    .rsplit('.')
+                    .next()
+                    .unwrap_or("module")
+                    .to_string()
+            } else {
+                // No module path known (e.g., root __init__.py)
+                "module".to_string()
+            }
+        } else {
+            name.to_string()
+        }
+    }
+
+    fn resolve_external_call_target(
+        &self,
+        to_name: &str,
+        from_file: FileId,
+    ) -> Option<(String, String)> {
+        // Use tracked imports to infer the module for an unresolved callee
+        let imports = self.get_imports_for_file(from_file);
+        // Prefer explicit imports that name the symbol
+        for imp in &imports {
+            // Aliased import: from pkg import Real as Alias; to_name would be Alias
+            if let Some(alias) = &imp.alias {
+                if alias == to_name {
+                    // Map to the base module path and keep symbol name as the alias (query uses alias)
+                    if let Some((module_path, _real_name)) = imp.path.rsplit_once('.') {
+                        return Some((module_path.to_string(), to_name.to_string()));
+                    }
+                }
+            }
+            // from pkg import Name
+            if imp.path.ends_with(&format!(".{to_name}")) {
+                if let Some((module_path, _)) = imp.path.rsplit_once('.') {
+                    return Some((module_path.to_string(), to_name.to_string()));
+                }
+            }
+            // from pkg import *
+            if imp.is_glob {
+                return Some((imp.path.clone(), to_name.to_string()));
+            }
+        }
+        None
+    }
+
+    fn create_external_symbol(
+        &self,
+        document_index: &mut crate::storage::DocumentIndex,
+        module_path: &str,
+        symbol_name: &str,
+        language_id: crate::parsing::LanguageId,
+    ) -> crate::IndexResult<crate::SymbolId> {
+        use crate::storage::MetadataKey;
+        use crate::{IndexError, Symbol, SymbolId, SymbolKind, Visibility};
+
+        // Reuse existing external symbol if present
+        if let Ok(cands) = document_index.find_symbols_by_name(symbol_name, None) {
+            for s in cands {
+                if let Some(mp) = &s.module_path {
+                    if mp.as_ref() == module_path {
+                        return Ok(s.id);
+                    }
+                }
+            }
+        }
+
+        // Compute virtual file path for Python stubs
+        let mut path_buf = String::from(".codanna/external/");
+        path_buf.push_str(&module_path.replace('.', "/"));
+        path_buf.push_str(".pyi");
+        let path_str = path_buf;
+
+        // Ensure file_info exists
+        let file_id = if let Ok(Some((fid, _))) = document_index.get_file_info(&path_str) {
+            fid
+        } else {
+            let next_file_id =
+                document_index
+                    .get_next_file_id()
+                    .map_err(|e| IndexError::TantivyError {
+                        operation: "get_next_file_id".to_string(),
+                        cause: e.to_string(),
+                    })?;
+            let file_id = crate::FileId::new(next_file_id).ok_or(IndexError::FileIdExhausted)?;
+            let hash = format!("external:{module_path}");
+            let ts = crate::indexing::get_utc_timestamp();
+            document_index
+                .store_file_info(file_id, &path_str, &hash, ts)
+                .map_err(|e| IndexError::TantivyError {
+                    operation: "store_file_info".to_string(),
+                    cause: e.to_string(),
+                })?;
+            file_id
+        };
+
+        // Allocate a new symbol id
+        let next_id =
+            document_index
+                .get_next_symbol_id()
+                .map_err(|e| IndexError::TantivyError {
+                    operation: "get_next_symbol_id".to_string(),
+                    cause: e.to_string(),
+                })?;
+        let symbol_id = SymbolId::new(next_id).ok_or(IndexError::SymbolIdExhausted)?;
+
+        // Build and index the external symbol as a Class (Python instantiations)
+        let mut symbol = Symbol::new(
+            symbol_id,
+            symbol_name.to_string(),
+            SymbolKind::Class,
+            file_id,
+            crate::Range::new(0, 0, 0, 0),
+        )
+        .with_visibility(Visibility::Public);
+        symbol.module_path = Some(module_path.to_string().into());
+        symbol.scope_context = Some(crate::symbol::ScopeContext::Global);
+        symbol.language_id = Some(language_id);
+
+        document_index
+            .index_symbol(&symbol, &path_str)
+            .map_err(|e| IndexError::TantivyError {
+                operation: "index_symbol".to_string(),
+                cause: e.to_string(),
+            })?;
+
+        // Update symbol counter metadata
+        document_index
+            .store_metadata(MetadataKey::SymbolCounter, symbol_id.value() as u64)
+            .map_err(|e| IndexError::TantivyError {
+                operation: "store_metadata(SymbolCounter)".to_string(),
+                cause: e.to_string(),
+            })?;
+
+        Ok(symbol_id)
     }
 
     fn module_path_from_file(&self, file_path: &Path, project_root: &Path) -> Option<String> {
@@ -208,15 +371,19 @@ impl LanguageBehavior for PythonBehavior {
     ) -> bool {
         // 1. Always check exact match first (performance)
         if import_path == symbol_module_path {
-            eprintln!("DEBUG: Python exact match: {import_path} == {symbol_module_path}");
+            if crate::config::is_global_debug_enabled() {
+                eprintln!("DEBUG: Python exact match: {import_path} == {symbol_module_path}");
+            }
             return true;
         }
 
         // 2. Handle Python-specific import patterns
         if let Some(importing_mod) = importing_module {
-            eprintln!(
-                "DEBUG: Python import_matches_symbol: import='{import_path}', symbol='{symbol_module_path}', from='{importing_mod}'"
-            );
+            if crate::config::is_global_debug_enabled() {
+                eprintln!(
+                    "DEBUG: Python import_matches_symbol: import='{import_path}', symbol='{symbol_module_path}', from='{importing_mod}'"
+                );
+            }
             // Handle relative imports starting with dots
             if import_path.starts_with('.') {
                 let resolved = self.resolve_python_relative_import(import_path, importing_mod);

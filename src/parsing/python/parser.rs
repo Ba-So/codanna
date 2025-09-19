@@ -12,10 +12,14 @@
 //! verify compatibility with node type names used in this implementation.
 
 use crate::parsing::Import;
-use crate::parsing::{Language, LanguageParser, MethodCall, ParserContext, ScopeType};
+use crate::parsing::{
+    HandledNode, Language, LanguageParser, MethodCall, NodeTracker, NodeTrackingState,
+    ParserContext, ScopeType,
+};
 use crate::types::SymbolCounter;
 use crate::{FileId, Range, Symbol, SymbolKind};
 use std::any::Any;
+use std::collections::HashSet;
 use thiserror::Error;
 use tree_sitter::{Node, Parser};
 
@@ -46,6 +50,7 @@ pub enum PythonParseError {
 /// Python language parser
 pub struct PythonParser {
     parser: Parser,
+    node_tracker: NodeTrackingState,
 }
 
 impl std::fmt::Debug for PythonParser {
@@ -57,6 +62,51 @@ impl std::fmt::Debug for PythonParser {
 }
 
 impl PythonParser {
+    /// Parse Python source code and extract all symbols
+    pub fn parse(
+        &mut self,
+        code: &str,
+        file_id: FileId,
+        symbol_counter: &mut SymbolCounter,
+    ) -> Vec<Symbol> {
+        let tree = match self.parser.parse(code, None) {
+            Some(tree) => tree,
+            None => return Vec::new(),
+        };
+
+        let root_node = tree.root_node();
+        let mut symbols = Vec::new();
+        // Create a parser context starting at module scope
+        let mut context = ParserContext::new();
+
+        // Create a module-level symbol to represent the file's module scope.
+        // Name is set to "<module>" here to match Python conventions and tests;
+        // during indexing, PythonBehavior will rename it to the actual module path
+        // (e.g., package.module) for searchability.
+        let module_symbol_id = symbol_counter.next_id();
+        let module_range = self.node_to_range(root_node);
+        let mut module_symbol = Symbol::new(
+            module_symbol_id,
+            "<module>",
+            SymbolKind::Module,
+            file_id,
+            module_range,
+        );
+        module_symbol.scope_context = Some(crate::symbol::ScopeContext::Module);
+        symbols.push(module_symbol);
+
+        self.extract_symbols_from_node(
+            root_node,
+            code,
+            file_id,
+            &mut symbols,
+            symbol_counter,
+            &mut context,
+        );
+
+        symbols
+    }
+
     /// Create a new Python parser instance
     pub fn new() -> Result<Self, PythonParseError> {
         let mut parser = Parser::new();
@@ -66,12 +116,15 @@ impl PythonParser {
                 reason: format!("tree-sitter error: {e}"),
             })?;
 
-        Ok(Self { parser })
+        Ok(Self {
+            parser,
+            node_tracker: NodeTrackingState::new(),
+        })
     }
 
     /// Extract symbols from AST node recursively
     fn extract_symbols_from_node(
-        &self,
+        &mut self,
         node: Node,
         code: &str,
         file_id: FileId,
@@ -81,6 +134,7 @@ impl PythonParser {
     ) {
         match node.kind() {
             "function_definition" => {
+                self.register_handled_node(node.kind(), node.kind_id());
                 // Extract function name for parent tracking
                 let func_name = self.extract_function_name(node, code);
 
@@ -111,6 +165,7 @@ impl PythonParser {
                 context.set_current_class(saved_class);
             }
             "class_definition" => {
+                self.register_handled_node(node.kind(), node.kind_id());
                 // Extract class name for parent tracking
                 let class_name = self.extract_class_name(node, code);
 
@@ -141,20 +196,70 @@ impl PythonParser {
                 context.set_current_class(saved_class);
             }
             "expression_statement" => {
-                // Check for assignments at module level
-                if let Some(child) = node.child(0) {
-                    if child.kind() == "assignment" && context.is_module_level() {
-                        if let Some(symbol) =
-                            self.process_assignment(child, code, file_id, counter, context)
-                        {
-                            symbols.push(symbol);
-                        }
-                    }
+                // Process children (including assignments handled by direct "assignment" case)
+                self.process_children(node, code, file_id, symbols, counter, context);
+            }
+            "decorated_definition" => {
+                self.register_handled_node(node.kind(), node.kind_id());
+                // Handle decorated functions and classes (@property, @staticmethod, etc.)
+                // Process ALL children to ensure decorators are tracked
+                self.process_children(node, code, file_id, symbols, counter, context);
+            }
+            "assignment" => {
+                self.register_handled_node(node.kind(), node.kind_id());
+                // Direct assignment at any scope level
+                if let Some(symbol) = self.process_assignment(node, code, file_id, counter, context)
+                {
+                    symbols.push(symbol);
                 }
-                // Continue processing children
+                // Also process children to track lambda, comprehensions, etc. on the right side
+                self.process_children(node, code, file_id, symbols, counter, context);
+            }
+            "type_alias_statement" => {
+                self.register_handled_node(node.kind(), node.kind_id());
+                // Handle type aliases: UserId = int
+                if let Some(symbol) = self.process_type_alias(node, code, file_id, counter, context)
+                {
+                    symbols.push(symbol);
+                }
+            }
+            "import_statement" | "import_from_statement" => {
+                self.register_handled_node(node.kind(), node.kind_id());
+                // For now, just process children to find any nested symbols
+                // TODO: Consider creating import symbols for better cross-file resolution
+                self.process_children(node, code, file_id, symbols, counter, context);
+            }
+            "lambda" => {
+                self.register_handled_node(node.kind(), node.kind_id());
+                // Lambda expressions - process children for nested symbols
+                self.process_children(node, code, file_id, symbols, counter, context);
+            }
+            "list_comprehension"
+            | "dictionary_comprehension"
+            | "set_comprehension"
+            | "generator_expression" => {
+                self.register_handled_node(node.kind(), node.kind_id());
+                // Comprehensions - process children for nested symbols
+                self.process_children(node, code, file_id, symbols, counter, context);
+            }
+            "decorator" => {
+                self.register_handled_node(node.kind(), node.kind_id());
+                // Decorators - process children
+                self.process_children(node, code, file_id, symbols, counter, context);
+            }
+            "for_statement" => {
+                self.register_handled_node(node.kind(), node.kind_id());
+                // For loops - process children for nested symbols
+                self.process_children(node, code, file_id, symbols, counter, context);
+            }
+            "type" => {
+                self.register_handled_node(node.kind(), node.kind_id());
+                // Type annotations - process children
                 self.process_children(node, code, file_id, symbols, counter, context);
             }
             _ => {
+                // Track any other nodes we encounter
+                self.register_handled_node(node.kind(), node.kind_id());
                 // Recursively process children
                 self.process_children(node, code, file_id, symbols, counter, context);
             }
@@ -163,7 +268,7 @@ impl PythonParser {
 
     /// Process a function definition node
     fn process_function(
-        &self,
+        &mut self,
         node: Node,
         code: &str,
         file_id: FileId,
@@ -245,7 +350,7 @@ impl PythonParser {
 
     /// Process child nodes recursively
     fn process_children(
-        &self,
+        &mut self,
         node: Node,
         code: &str,
         file_id: FileId,
@@ -294,19 +399,41 @@ impl PythonParser {
             // Try to extract the value as a simple signature
             if let Some(right) = node.child_by_field_name("right") {
                 let value_preview = &code[right.byte_range()];
-                // Limit the signature to first 100 chars for readability
-                let truncated = if value_preview.len() > 100 {
-                    format!("{}...", &value_preview[..100])
-                } else {
-                    value_preview.to_string()
-                };
-                symbol.signature = Some(format!("{name} = {truncated}").into());
+                // Store full signature for semantic quality
+                symbol.signature = Some(format!("{name} = {value_preview}").into());
             }
 
             return Some(symbol);
         }
 
         None
+    }
+
+    /// Process a type alias statement (e.g., UserId = int, Vector = List[float])
+    fn process_type_alias(
+        &self,
+        node: Node,
+        code: &str,
+        file_id: FileId,
+        counter: &mut SymbolCounter,
+        context: &ParserContext,
+    ) -> Option<Symbol> {
+        // Type alias: type_name = type_expression
+        let name_node = node.child_by_field_name("name")?;
+        let name = &code[name_node.byte_range()];
+        let range = self.node_to_range(node);
+        let symbol_id = counter.next_id();
+
+        let mut symbol = Symbol::new(symbol_id, name, SymbolKind::TypeAlias, file_id, range);
+        symbol.scope_context = Some(context.current_scope_context());
+
+        // Extract the type alias definition as signature
+        if let Some(value_node) = node.child_by_field_name("value") {
+            let type_def = &code[value_node.byte_range()];
+            symbol.signature = Some(format!("{name} = {type_def}").into());
+        }
+
+        Some(symbol)
     }
 
     /// Extract function name from function_definition node
@@ -359,9 +486,10 @@ impl PythonParser {
         false
     }
 
-    /// Build function signature with type annotations
-    fn build_function_signature(&self, node: Node, code: &str) -> Option<String> {
+    /// Build function signature with type annotations  
+    fn build_function_signature(&mut self, node: Node, code: &str) -> Option<String> {
         let params_node = node.child_by_field_name("parameters")?;
+        self.register_handled_node(params_node.kind(), params_node.kind_id());
         let params_str = self.build_parameters_string(params_node, code)?;
 
         // Check if this is an async function
@@ -384,7 +512,7 @@ impl PythonParser {
     }
 
     /// Build parameters string with type annotations
-    fn build_parameters_string(&self, params_node: Node, code: &str) -> Option<String> {
+    fn build_parameters_string(&mut self, params_node: Node, code: &str) -> Option<String> {
         let mut params = Vec::new();
 
         for child in params_node.children(&mut params_node.walk()) {
@@ -395,18 +523,21 @@ impl PythonParser {
                     params.push(param_name.to_string());
                 }
                 "typed_parameter" => {
+                    self.register_handled_node(child.kind(), child.kind_id());
                     // Parameter with type annotation: name: type
                     if let Some(param_str) = self.extract_typed_parameter(child, code) {
                         params.push(param_str);
                     }
                 }
                 "typed_default_parameter" => {
+                    self.register_handled_node(child.kind(), child.kind_id());
                     // Parameter with type annotation and default value: name: type = value
                     if let Some(param_str) = self.extract_typed_default_parameter(child, code) {
                         params.push(param_str);
                     }
                 }
                 "default_parameter" => {
+                    self.register_handled_node(child.kind(), child.kind_id());
                     // Parameter with default value: name = value
                     if let Some(param_str) = self.extract_default_parameter(child, code) {
                         params.push(param_str);
@@ -562,7 +693,7 @@ impl PythonParser {
 
     /// Find function calls in AST node recursively
     fn find_calls_in_node<'a>(
-        &self,
+        &mut self,
         node: Node,
         code: &'a str,
         calls: &mut Vec<(&'a str, &'a str, Range)>,
@@ -570,10 +701,24 @@ impl PythonParser {
     ) {
         match node.kind() {
             "function_definition" => {
+                self.register_handled_node(node.kind(), node.kind_id());
                 self.process_function_node_for_calls(node, code, calls, current_function);
             }
             "call" => {
+                self.register_handled_node(node.kind(), node.kind_id());
                 self.process_call_node(node, code, calls, current_function);
+            }
+            "lambda" => {
+                self.register_handled_node(node.kind(), node.kind_id());
+                self.process_children_for_calls(node, code, calls, current_function);
+            }
+            "list_comprehension" | "dictionary_comprehension" | "set_comprehension" => {
+                self.register_handled_node(node.kind(), node.kind_id());
+                self.process_children_for_calls(node, code, calls, current_function);
+            }
+            "decorator" => {
+                self.register_handled_node(node.kind(), node.kind_id());
+                self.process_children_for_calls(node, code, calls, current_function);
             }
             _ => {
                 self.process_children_for_calls(node, code, calls, current_function);
@@ -583,7 +728,7 @@ impl PythonParser {
 
     /// Process function definition node for call detection
     fn process_function_node_for_calls<'a>(
-        &self,
+        &mut self,
         node: Node,
         code: &'a str,
         calls: &mut Vec<(&'a str, &'a str, Range)>,
@@ -601,17 +746,16 @@ impl PythonParser {
 
     /// Process call node for call detection
     fn process_call_node<'a>(
-        &self,
+        &mut self,
         node: Node,
         code: &'a str,
         calls: &mut Vec<(&'a str, &'a str, Range)>,
         current_function: &mut Option<&'a str>,
     ) {
-        if let Some(caller) = *current_function {
-            if let Some(callee) = self.extract_call_target(node, code) {
-                let range = self.node_to_range(node);
-                calls.push((caller, callee, range));
-            }
+        if let Some(callee) = self.extract_call_target(node, code) {
+            let range = self.node_to_range(node);
+            let caller = (*current_function).unwrap_or("<module>");
+            calls.push((caller, callee, range));
         }
 
         self.process_children_for_calls(node, code, calls, current_function);
@@ -669,10 +813,9 @@ impl PythonParser {
         method_calls: &mut Vec<MethodCall>,
         current_function: &mut Option<&'a str>,
     ) {
-        if let Some(caller) = *current_function {
-            if let Some(method_call) = self.extract_method_call(node, code, caller) {
-                method_calls.push(method_call);
-            }
+        let caller = (*current_function).unwrap_or("<module>");
+        if let Some(method_call) = self.extract_method_call(node, code, caller) {
+            method_calls.push(method_call);
         }
 
         self.process_children_for_method_calls(node, code, method_calls, current_function);
@@ -680,7 +823,7 @@ impl PythonParser {
 
     /// Process child nodes for function calls
     fn process_children_for_calls<'a>(
-        &self,
+        &mut self,
         node: Node,
         code: &'a str,
         calls: &mut Vec<(&'a str, &'a str, Range)>,
@@ -1084,12 +1227,14 @@ impl PythonParser {
     }
 
     fn find_defines_in_node<'a>(
+        parser: &mut PythonParser,
         node: Node,
         code: &'a str,
         defines: &mut Vec<(&'a str, &'a str, Range)>,
     ) {
         match node.kind() {
             "class_definition" => {
+                parser.register_handled_node(node.kind(), node.kind_id());
                 // Extract class name
                 if let Some(class_name_node) = node.child_by_field_name("name") {
                     let class_name = &code[class_name_node.byte_range()];
@@ -1113,10 +1258,31 @@ impl PythonParser {
                     }
                 }
             }
+            "lambda" => {
+                parser.register_handled_node(node.kind(), node.kind_id());
+                // Process children for lambda
+                for child in node.children(&mut node.walk()) {
+                    Self::find_defines_in_node(parser, child, code, defines);
+                }
+            }
+            "list_comprehension" | "dictionary_comprehension" | "set_comprehension" => {
+                parser.register_handled_node(node.kind(), node.kind_id());
+                // Process children for comprehensions
+                for child in node.children(&mut node.walk()) {
+                    Self::find_defines_in_node(parser, child, code, defines);
+                }
+            }
+            "decorator" => {
+                parser.register_handled_node(node.kind(), node.kind_id());
+                // Process children for decorators
+                for child in node.children(&mut node.walk()) {
+                    Self::find_defines_in_node(parser, child, code, defines);
+                }
+            }
             _ => {
                 // Recursively process children
                 for child in node.children(&mut node.walk()) {
-                    Self::find_defines_in_node(child, code, defines);
+                    Self::find_defines_in_node(parser, child, code, defines);
                 }
             }
         }
@@ -1130,26 +1296,7 @@ impl LanguageParser for PythonParser {
         file_id: FileId,
         symbol_counter: &mut SymbolCounter,
     ) -> Vec<Symbol> {
-        let tree = match self.parser.parse(code, None) {
-            Some(tree) => tree,
-            None => return Vec::new(),
-        };
-
-        let root_node = tree.root_node();
-        let mut symbols = Vec::new();
-        // Create a parser context starting at module scope
-        let mut context = ParserContext::new();
-
-        self.extract_symbols_from_node(
-            root_node,
-            code,
-            file_id,
-            &mut symbols,
-            symbol_counter,
-            &mut context,
-        );
-
-        symbols
+        self.parse(code, file_id, symbol_counter)
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -1223,7 +1370,7 @@ impl LanguageParser for PythonParser {
         let root_node = tree.root_node();
         let mut defines = Vec::new();
 
-        Self::find_defines_in_node(root_node, code, &mut defines);
+        Self::find_defines_in_node(self, root_node, code, &mut defines);
         defines
     }
 
@@ -1254,6 +1401,16 @@ impl LanguageParser for PythonParser {
     }
 }
 
+impl NodeTracker for PythonParser {
+    fn get_handled_nodes(&self) -> &HashSet<HandledNode> {
+        self.node_tracker.get_handled_nodes()
+    }
+
+    fn register_handled_node(&mut self, node_kind: &str, node_id: u16) {
+        self.node_tracker.register_handled_node(node_kind, node_id)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1280,8 +1437,8 @@ mod tests {
         println!("---");
         let symbols = parser.parse(code, FileId::new(1).unwrap(), &mut SymbolCounter::new());
 
-        assert_eq!(symbols.len(), 1);
-        let func = &symbols[0];
+        assert_eq!(symbols.len(), 2); // <module>, hello
+        let func = symbols.iter().find(|s| s.name.as_ref() == "hello").unwrap();
         assert_eq!(func.name.as_ref(), "hello");
         assert_eq!(func.kind, SymbolKind::Function);
 
@@ -1317,8 +1474,11 @@ mod tests {
         println!("---");
         let symbols = parser.parse(code, FileId::new(1).unwrap(), &mut SymbolCounter::new());
 
-        assert_eq!(symbols.len(), 1);
-        let class = &symbols[0];
+        assert_eq!(symbols.len(), 2); // <module>, Person
+        let class = symbols
+            .iter()
+            .find(|s| s.name.as_ref() == "Person")
+            .unwrap();
         assert_eq!(class.name.as_ref(), "Person");
         assert_eq!(class.kind, SymbolKind::Class);
 
@@ -1361,7 +1521,7 @@ class Calculator:
         println!("---");
         let symbols = parser.parse(code, FileId::new(1).unwrap(), &mut SymbolCounter::new());
 
-        assert_eq!(symbols.len(), 3); // Calculator, __init__, add
+        assert_eq!(symbols.len(), 4); // <module>, Calculator, __init__, add
         assert!(
             symbols
                 .iter()
@@ -1431,7 +1591,7 @@ def outer():
         let symbols = parser.parse(code, FileId::new(1).unwrap(), &mut SymbolCounter::new());
 
         // Both outer and inner should be functions (not methods) since they're not in a class
-        assert_eq!(symbols.len(), 2);
+        assert_eq!(symbols.len(), 3); // <module>, outer, inner
         assert!(
             symbols
                 .iter()
@@ -1948,7 +2108,10 @@ def process_items(items: List[str], count: int = 10) -> Dict[str, int]:
         // Function without type annotations
         let code1 = "def simple(x, y=10): pass";
         let symbols1 = parser.parse(code1, FileId::new(1).unwrap(), &mut SymbolCounter::new());
-        let func1 = &symbols1[0];
+        let func1 = symbols1
+            .iter()
+            .find(|s| s.name.as_ref() == "simple")
+            .unwrap();
         assert!(func1.signature.is_some());
         let sig1 = func1.signature.as_ref().unwrap();
         assert!(sig1.contains("x, y = 10"));
@@ -1960,7 +2123,10 @@ def process_items(items: List[str], count: int = 10) -> Dict[str, int]:
             FileId::new(1).unwrap(),
             &mut SymbolCounter::from_value(10),
         );
-        let func2 = &symbols2[0];
+        let func2 = symbols2
+            .iter()
+            .find(|s| s.name.as_ref() == "get_number")
+            .unwrap();
         assert!(func2.signature.is_some());
         let sig2 = func2.signature.as_ref().unwrap();
         assert!(sig2.contains("() -> int"));
@@ -1972,7 +2138,10 @@ def process_items(items: List[str], count: int = 10) -> Dict[str, int]:
             FileId::new(1).unwrap(),
             &mut SymbolCounter::from_value(20),
         );
-        let func3 = &symbols3[0];
+        let func3 = symbols3
+            .iter()
+            .find(|s| s.name.as_ref() == "mixed")
+            .unwrap();
         assert!(func3.signature.is_some());
         let sig3 = func3.signature.as_ref().unwrap();
         assert!(sig3.contains("name"));
@@ -1987,7 +2156,10 @@ def process_items(items: List[str], count: int = 10) -> Dict[str, int]:
             FileId::new(1).unwrap(),
             &mut SymbolCounter::from_value(30),
         );
-        let func4 = &symbols4[0];
+        let func4 = symbols4
+            .iter()
+            .find(|s| s.name.as_ref() == "complex_types")
+            .unwrap();
         assert!(func4.signature.is_some());
         let sig4 = func4.signature.as_ref().unwrap();
         assert!(sig4.contains("Dict[str, List[int]]"));
@@ -2259,8 +2431,18 @@ class APIClient:
 "#;
         let symbols = parser.parse(code, FileId::new(1).unwrap(), &mut SymbolCounter::new());
 
-        // Should find class and both methods
-        assert_eq!(symbols.len(), 3);
+        println!("=== ASYNC METHOD DETECTION TEST ===");
+        println!("Found {len} symbols:", len = symbols.len());
+        for symbol in &symbols {
+            println!(
+                "  {name} ({kind:?})",
+                name = symbol.name.as_ref(),
+                kind = symbol.kind
+            );
+        }
+
+        // Should find module, class, both methods, and response variable (enhanced extraction)
+        assert_eq!(symbols.len(), 5);
 
         let fetch_method = symbols.iter().find(|s| s.name.as_ref() == "fetch").unwrap();
         let sync_method = symbols
@@ -2294,7 +2476,10 @@ class APIClient:
         // Async function with no parameters
         let code1 = "async def background_task(): pass";
         let symbols1 = parser.parse(code1, FileId::new(1).unwrap(), &mut SymbolCounter::new());
-        let func1 = &symbols1[0];
+        let func1 = symbols1
+            .iter()
+            .find(|s| s.name.as_ref() == "background_task")
+            .unwrap();
         assert!(func1.signature.as_ref().unwrap().contains("async"));
         assert!(func1.signature.as_ref().unwrap().contains("()"));
 
@@ -2309,7 +2494,10 @@ class APIClient:
             FileId::new(1).unwrap(),
             &mut SymbolCounter::from_value(10),
         );
-        let func2 = &symbols2[0];
+        let func2 = symbols2
+            .iter()
+            .find(|s| s.name.as_ref() == "process")
+            .unwrap();
         assert!(func2.signature.as_ref().unwrap().contains("async"));
         assert!(
             func2
@@ -2330,7 +2518,7 @@ def another_regular(): pass
             FileId::new(1).unwrap(),
             &mut SymbolCounter::from_value(20),
         );
-        assert_eq!(symbols3.len(), 3);
+        assert_eq!(symbols3.len(), 4); // <module> + 3 functions
 
         let regular1 = symbols3
             .iter()
@@ -2391,8 +2579,18 @@ async def process_batch(items: List[str]) -> Dict[str, Any]:
 
         let symbols = parser.parse(code, FileId::new(1).unwrap(), &mut SymbolCounter::new());
 
-        // Should find: class, async method, sync method, async function
-        assert_eq!(symbols.len(), 4);
+        println!("=== ASYNC INTEGRATION TEST ===");
+        println!("Found {len} symbols:", len = symbols.len());
+        for symbol in &symbols {
+            println!(
+                "  {name} ({kind:?})",
+                name = symbol.name.as_ref(),
+                kind = symbol.kind
+            );
+        }
+
+        // Should find: module, class, async method, sync method, async function, and local variables (enhanced extraction)
+        assert_eq!(symbols.len(), 8);
 
         let class_symbol = symbols
             .iter()
@@ -2555,12 +2753,7 @@ class Outer:
         fn print_node_with_fields(node: tree_sitter::Node, code: &str, depth: usize) {
             let indent = "  ".repeat(depth);
             let text = &code[node.byte_range()];
-            let text_preview = if text.len() > 50 {
-                format!("{}...", &text[..50])
-            } else {
-                text.to_string()
-            }
-            .replace('\n', "\\n");
+            let text_preview = crate::parsing::truncate_for_display(text, 50).replace('\n', "\\n");
             println!(
                 "{}{} [{}] \"{}\"",
                 indent,
@@ -2656,5 +2849,201 @@ class Outer:
         }
 
         print_node_with_fields(root, code, 0);
+    }
+
+    // ===== BASELINE TESTS FOR PYTHON DOC COMMENT ENHANCEMENT =====
+
+    #[test]
+    fn test_python_baseline_module_docstring() {
+        let mut parser = PythonParser::new().unwrap();
+        let code = r#"""This is a module-level docstring.
+
+It should be attached to the file/module symbol.
+"""
+
+def some_function():
+    pass
+"#;
+
+        println!("=== BASELINE TEST: Module Docstring (EXPECTED GAP) ===");
+        let symbols = parser.parse(code, FileId::new(1).unwrap(), &mut SymbolCounter::new());
+
+        // Look for module-level symbol with docstring
+        let module_symbol = symbols
+            .iter()
+            .find(|s| s.doc_comment.is_some() && s.name.as_ref().contains("module"));
+
+        println!("Expected: Module symbol with docstring 'This is a module-level docstring.'");
+        println!(
+            "Actual:   {:?}",
+            module_symbol.map(|s| (s.name.as_ref(), s.doc_comment.as_ref().unwrap().as_ref()))
+        );
+
+        // This should currently fail - module docstrings not supported
+        if module_symbol.is_none() {
+            println!("✓ CONFIRMED GAP: Module docstrings not currently extracted");
+        }
+    }
+
+    #[test]
+    fn test_python_baseline_method_docstring() {
+        let mut parser = PythonParser::new().unwrap();
+        let code = r#"
+class TestClass:
+    """Class docstring (should work)."""
+    
+    def method_with_docs(self):
+        """Method docstring that should be extracted.
+        
+        This is currently a GAP in functionality.
+        """
+        pass
+"#;
+
+        println!("=== BASELINE TEST: Method Docstring (EXPECTED GAP) ===");
+        let symbols = parser.parse(code, FileId::new(1).unwrap(), &mut SymbolCounter::new());
+
+        // Find the class (should have docstring)
+        let class_symbol = symbols.iter().find(|s| s.name.as_ref() == "TestClass");
+        assert!(class_symbol.is_some());
+        assert!(class_symbol.unwrap().doc_comment.is_some());
+        println!(
+            "✓ Class docstring works: {:?}",
+            class_symbol.unwrap().doc_comment.as_ref().unwrap().as_ref()
+        );
+
+        // Find the method (should have docstring but probably doesn't)
+        let method_symbol = symbols
+            .iter()
+            .find(|s| s.name.as_ref() == "method_with_docs");
+
+        println!(
+            "Expected: Method symbol with docstring 'Method docstring that should be extracted.'"
+        );
+        println!(
+            "Actual:   {:?}",
+            method_symbol.map(|s| (s.name.as_ref(), s.doc_comment.as_ref().map(|d| d.as_ref())))
+        );
+
+        if method_symbol.is_some() && method_symbol.unwrap().doc_comment.is_none() {
+            println!("✓ CONFIRMED GAP: Method docstrings not currently extracted");
+        }
+    }
+
+    #[test]
+    fn test_python_baseline_current_strengths() {
+        let mut parser = PythonParser::new().unwrap();
+        let code = r#"
+def function_with_docs():
+    """Function docstring (should work)."""
+    pass
+
+class ClassWithDocs:
+    """Class docstring (should work)."""
+    pass
+"#;
+
+        println!("=== BASELINE TEST: Current Strengths (SHOULD WORK) ===");
+        let symbols = parser.parse(code, FileId::new(1).unwrap(), &mut SymbolCounter::new());
+
+        // Function docstring (existing functionality)
+        let func_symbol = symbols
+            .iter()
+            .find(|s| s.name.as_ref() == "function_with_docs");
+        assert!(func_symbol.is_some());
+        let func_doc = func_symbol.unwrap().doc_comment.as_ref();
+
+        println!("Function docstring:");
+        println!("  Expected: 'Function docstring (should work).'");
+        println!("  Actual:   {:?}", func_doc.map(|d| d.as_ref()));
+        assert!(func_doc.is_some());
+        assert!(func_doc.unwrap().contains("Function docstring"));
+        println!("  ✅ WORKS CORRECTLY");
+
+        // Class docstring (existing functionality)
+        let class_symbol = symbols.iter().find(|s| s.name.as_ref() == "ClassWithDocs");
+        assert!(class_symbol.is_some());
+        let class_doc = class_symbol.unwrap().doc_comment.as_ref();
+
+        println!("Class docstring:");
+        println!("  Expected: 'Class docstring (should work).'");
+        println!("  Actual:   {:?}", class_doc.map(|d| d.as_ref()));
+        assert!(class_doc.is_some());
+        assert!(class_doc.unwrap().contains("Class docstring"));
+        println!("  ✅ WORKS CORRECTLY");
+    }
+
+    #[test]
+    fn test_comprehensive_docstring_extraction() {
+        let mut parser = PythonParser::new().unwrap();
+        let code = std::fs::read_to_string("examples/python/comprehensive.py")
+            .expect("Should find comprehensive test file");
+
+        println!("=== COMPREHENSIVE PYTHON DOCSTRING EXTRACTION TEST ===");
+        let symbols = parser.parse(&code, FileId::new(1).unwrap(), &mut SymbolCounter::new());
+
+        println!("Found {} symbols total:", symbols.len());
+
+        // Print each symbol and its docstring status
+        for symbol in &symbols {
+            println!();
+            println!("Symbol: {} ({:?})", symbol.name.as_ref(), symbol.kind);
+            println!(
+                "  Location: {}:{}",
+                symbol.range.start_line, symbol.range.start_column
+            );
+
+            if let Some(doc) = &symbol.doc_comment {
+                println!("  Docstring: \"{}\"", doc.as_ref().trim());
+            } else {
+                println!("  Docstring: None");
+            }
+
+            if let Some(sig) = &symbol.signature {
+                println!("  Signature: {}", sig.as_ref());
+            }
+        }
+
+        // Check for specific expected symbols
+        println!();
+        println!("=== SPECIFIC SYMBOL CHECKS ===");
+
+        // Module docstring check
+        let has_module_symbol = symbols
+            .iter()
+            .any(|s| s.name.as_ref().contains("module") || s.kind == crate::SymbolKind::Module);
+        println!("Module symbol found: {has_module_symbol}");
+
+        // Function docstring check (comprehensive.py has simple_function)
+        let simple_function = symbols
+            .iter()
+            .find(|s| s.name.as_ref() == "simple_function");
+        println!("simple_function found: {}", simple_function.is_some());
+        if let Some(func) = simple_function {
+            println!("  Has docstring: {}", func.doc_comment.is_some());
+        }
+
+        // Class docstring check (comprehensive.py has SimpleClass)
+        let simple_class = symbols.iter().find(|s| s.name.as_ref() == "SimpleClass");
+        println!("SimpleClass found: {}", simple_class.is_some());
+        if let Some(class) = simple_class {
+            println!("  Has docstring: {}", class.doc_comment.is_some());
+        }
+
+        // Method docstring check (comprehensive.py has method inside SimpleClass)
+        let method = symbols.iter().find(|s| s.name.as_ref() == "method");
+        println!("method found: {}", method.is_some());
+        if let Some(method_sym) = method {
+            println!("  Has docstring: {}", method_sym.doc_comment.is_some());
+        }
+
+        // Constants check
+        let module_constant = symbols
+            .iter()
+            .find(|s| s.name.as_ref() == "MODULE_CONSTANT");
+        println!("MODULE_CONSTANT found: {}", module_constant.is_some());
+        if let Some(constant) = module_constant {
+            println!("  Has docstring: {}", constant.doc_comment.is_some());
+        }
     }
 }

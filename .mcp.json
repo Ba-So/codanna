@@ -1,6 +1,10 @@
 {
   "mcpServers": {
-    "codanna": {
+    "Context7": {
+      "command": "npx",
+      "args": ["-y", "@upstash/context7-mcp"]
+    },
+    "codanna-stdio": {
       "command": "codanna",
       "args": ["serve", "--watch", "--watch-interval", "5"]
     },

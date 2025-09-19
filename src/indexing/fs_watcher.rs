@@ -310,6 +310,8 @@ impl FileSystemWatcher {
                         eprintln!("Detected change in indexed file: {}", path.display());
                         eprintln!("  Re-indexing...");
 
+                        eprintln!("  Using absolute path for file reading: {}", path.display());
+
                         let mut indexer = self.indexer.write().await;
                         match indexer.index_file(&path) {
                             Ok(result) => {
@@ -317,6 +319,16 @@ impl FileSystemWatcher {
                                 match result {
                                     IndexingResult::Indexed(_) => {
                                         eprintln!("  ✓ Re-indexed successfully (file updated)");
+
+                                        // CRITICAL: Save semantic search data after re-indexing
+                                        if indexer.has_semantic_search() {
+                                            let semantic_path = std::path::Path::new(".codanna/index/semantic");
+                                            if let Err(e) = indexer.save_semantic_search(semantic_path) {
+                                                eprintln!("  ✗ Failed to save semantic search after re-indexing: {e}");
+                                            } else {
+                                                eprintln!("  ✓ Semantic search saved successfully");
+                                            }
+                                        }
 
                                         // Send notification if broadcaster is available
                                         if let Some(ref broadcaster) = self.broadcaster {

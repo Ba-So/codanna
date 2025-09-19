@@ -4,9 +4,9 @@
 //! Validates language enablement and provides discovery of supported languages.
 
 use super::{
-    GoBehavior, GoParser, Language, LanguageBehavior, LanguageId, LanguageParser, PhpBehavior,
-    PhpParser, PythonBehavior, PythonParser, RustBehavior, RustParser, TypeScriptBehavior,
-    TypeScriptParser, get_registry,
+    CBehavior, CParser, CppBehavior, CppParser, GoBehavior, GoParser, Language, LanguageBehavior,
+    LanguageId, LanguageParser, PhpBehavior, PhpParser, PythonBehavior, PythonParser, RustBehavior,
+    RustParser, TypeScriptBehavior, TypeScriptParser, get_registry,
 };
 use crate::{IndexError, IndexResult, Settings};
 use std::sync::Arc;
@@ -157,6 +157,13 @@ impl ParserFactory {
                     "{} parser not yet fully implemented. Implementation in progress.",
                     language.name()
                 )))
+            Language::C => {
+                let parser = CParser::new().map_err(|e| IndexError::General(e.to_string()))?;
+                Ok(Box::new(parser))
+            }
+            Language::Cpp => {
+                let parser = CppParser::new().map_err(|e| IndexError::General(e.to_string()))?;
+                Ok(Box::new(parser))
             }
         }
     }
@@ -244,6 +251,19 @@ impl ParserFactory {
                     "{} parser not yet fully implemented. Implementation in progress.",
                     language.name()
                 )));
+            Language::C => {
+                let parser = CParser::new().map_err(|e| IndexError::General(e.to_string()))?;
+                ParserWithBehavior {
+                    parser: Box::new(parser),
+                    behavior: Box::new(CBehavior::new()),
+                }
+            }
+            Language::Cpp => {
+                let parser = CppParser::new().map_err(|e| IndexError::General(e.to_string()))?;
+                ParserWithBehavior {
+                    parser: Box::new(parser),
+                    behavior: Box::new(CppBehavior::new()),
+                }
             }
         };
 
@@ -277,6 +297,10 @@ impl ParserFactory {
             Language::JavaScript,
             Language::TypeScript,
             Language::Php,
+            Language::Go,
+            Language::Nix,
+            Language::C,
+            Language::Cpp,
         ]
         .into_iter()
         .filter(|&lang| self.is_language_enabled(lang))
@@ -401,6 +425,7 @@ mod tests {
                 enabled: true,
                 extensions: vec!["rs".to_string()],
                 parser_options: HashMap::new(),
+                config_files: Vec::new(),
             },
         );
 
@@ -411,6 +436,7 @@ mod tests {
                 enabled: true,
                 extensions: vec!["py".to_string()],
                 parser_options: HashMap::new(),
+                config_files: Vec::new(),
             },
         );
 
@@ -421,6 +447,7 @@ mod tests {
                 enabled: true,
                 extensions: vec!["php".to_string()],
                 parser_options: HashMap::new(),
+                config_files: Vec::new(),
             },
         );
 
@@ -528,6 +555,7 @@ mod tests {
                 enabled: true,
                 extensions: vec!["py".to_string()],
                 parser_options: HashMap::new(),
+                config_files: Vec::new(),
             },
         );
         settings.languages = languages;

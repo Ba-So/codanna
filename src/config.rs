@@ -21,6 +21,7 @@ use figment::{
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::OnceLock;
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct Settings {
@@ -98,6 +99,11 @@ pub struct LanguageConfig {
     /// Additional parser options
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub parser_options: HashMap<String, serde_json::Value>,
+
+    /// Project configuration files to monitor (e.g., tsconfig.json, pyproject.toml)
+    /// Empty by default - project resolution is opt-in
+    #[serde(default)]
+    pub config_files: Vec<PathBuf>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -429,6 +435,7 @@ fn generate_language_defaults() -> HashMap<String, LanguageConfig> {
                     enabled: def.default_enabled(),
                     extensions: def.extensions().iter().map(|s| s.to_string()).collect(),
                     parser_options: HashMap::new(),
+                    config_files: Vec::new(), // Empty by default - opt-in feature
                 },
             );
         }
@@ -456,6 +463,7 @@ fn fallback_minimal_languages() -> HashMap<String, LanguageConfig> {
             enabled: true,
             extensions: vec!["rs".to_string()],
             parser_options: HashMap::new(),
+            config_files: Vec::new(),
         },
     );
 
@@ -827,6 +835,13 @@ __pycache__/
 
         Ok(())
     }
+}
+
+/// Global check for whether debug logging is enabled.
+/// Uses settings from .codanna/settings.toml and caches the result.
+pub fn is_global_debug_enabled() -> bool {
+    static DEBUG_FLAG: OnceLock<bool> = OnceLock::new();
+    *DEBUG_FLAG.get_or_init(|| Settings::load().map(|s| s.debug).unwrap_or(false))
 }
 
 #[cfg(test)]

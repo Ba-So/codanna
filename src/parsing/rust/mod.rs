@@ -1,5 +1,6 @@
 //! Rust language parser implementation
 
+pub mod audit;
 pub mod behavior;
 pub mod definition;
 pub mod parser;

@@ -1,13 +1,6 @@
 # Adding Language Support
 
-> **📝 Note: This guide is currently under development**
-> 
-> We're actively updating this documentation to reflect the latest v0.5.2 architecture improvements. 
-> Some sections may be incomplete or subject to change as we refine the language implementation process.
-
 Languages self-register via the modular registry system. Each language lives in its own subdirectory with complete isolation and language-specific resolution capabilities.
-
-## Current Status (v0.5.6)
 
 **✅ Production Ready:**
 - Language registry architecture with self-registration

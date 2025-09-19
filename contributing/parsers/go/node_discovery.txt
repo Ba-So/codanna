@@ -1,1001 +1,154 @@
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.20s
-     Running unittests src/lib.rs (target/debug/deps/codanna-fa753e2294f4ea83)
-
-running 0 tests
-
-test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 284 filtered out; finished in 0.00s
-
-     Running unittests src/main.rs (target/debug/deps/codanna-4750e708ba99f4b4)
-
-running 0 tests
-
-test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
-
-     Running tests/abi15_exploration.rs (target/debug/deps/abi15_exploration-80f86872201cb175)
-
-running 1 test
 === Go Language ABI-15 COMPREHENSIVE NODE MAPPING ===
-  ABI Version: 14
-  Node kind count: 219
+  Generated: 2025-09-13 22:47:31 UTC
+  ABI Version: 15
+  Node kind count: 115
 
 === PACKAGE AND IMPORT NODES ===
-  ✓ package_clause                 -> ID: 96
-  ✓ package_identifier             -> ID: 216
-  ✓ import_declaration             -> ID: 97
-  ✓ import_spec                    -> ID: 98
-  ✓ import_spec_list               -> ID: 100
-  ✓ interpreted_string_literal     -> ID: 190
-  ✗ dot_import                     NOT FOUND
-  ✗ blank_import                   NOT FOUND
-  ✗ import_alias                   NOT FOUND
+  ✓ package_clause                      -> ID: 96
+  ✓ package_identifier                  -> ID: 216
+  ✓ import_declaration                  -> ID: 97
+  ✓ import_spec                         -> ID: 98
+  ✓ import_spec_list                    -> ID: 100
+  ✓ interpreted_string_literal          -> ID: 190
+  ✗ dot                                 NOT FOUND
+  ✗ blank_identifier                    NOT FOUND
+  ✗ import_alias                        NOT FOUND
 
 === STRUCT-RELATED NODES ===
-  ✓ type_declaration               -> ID: 115
-  ✓ type_spec                      -> ID: 116
-  ✓ struct_type                    -> ID: 126
-  ✓ field_declaration              -> ID: 129
-  ✓ field_declaration_list         -> ID: 128
-  ✗ tag                            NOT FOUND
-  ✗ struct_literal                 NOT FOUND
-  ✗ struct_field                   NOT FOUND
-  ✗ embedded_field                 NOT FOUND
-  ✓ type_identifier                -> ID: 218
+  ✓ type_declaration                    -> ID: 115
+  ✓ type_spec                           -> ID: 116
+  ✓ struct_type                         -> ID: 126
+  ✓ field_declaration                   -> ID: 129
+  ✓ field_declaration_list              -> ID: 128
+  ✓ type_identifier                     -> ID: 218
+  ✓ field_identifier                    -> ID: 214
+  ✗ tag                                 NOT FOUND
+  ✗ struct_field                        NOT FOUND
+  ✗ embedded_field                      NOT FOUND
 
 === INTERFACE-RELATED NODES ===
-  ✓ interface_type                 -> ID: 130
-  ✗ method_spec                    NOT FOUND
-  ✗ method_spec_list               NOT FOUND
-  ✓ type_elem                      -> ID: 132
-  ✓ type_constraint                -> ID: 217
-  ✗ type_set                       NOT FOUND
-  ✗ embedded_interface             NOT FOUND
-  ✗ union_type                     NOT FOUND
+  ✓ interface_type                      -> ID: 130
+  ✓ method_elem                         -> ID: 131
+  ✗ method_spec                         NOT FOUND
+  ✗ method_spec_list                    NOT FOUND
+  ✓ type_elem                           -> ID: 132
+  ✓ type_constraint                     -> ID: 217
+  ✗ type_set                            NOT FOUND
+  ✗ embedded_interface                  NOT FOUND
 
 === FUNCTION-RELATED NODES ===
-  ✓ function_declaration           -> ID: 107
-  ✓ func_literal                   -> ID: 185
-  ✓ function_type                  -> ID: 135
-  ✓ method_declaration             -> ID: 108
-  ✗ receiver                       NOT FOUND
-  ✓ parameter_declaration          -> ID: 112
-  ✓ parameter_list                 -> ID: 111
-  ✗ result                         NOT FOUND
-  ✓ variadic_parameter_declaration -> ID: 113
-  ✓ type_parameter_declaration     -> ID: 110
-  ✓ type_parameter_list            -> ID: 109
-  ✓ type_constraint                -> ID: 217
+  ✓ function_declaration                -> ID: 107
+  ✓ func_literal                        -> ID: 185
+  ✓ function_type                       -> ID: 135
+  ✓ method_declaration                  -> ID: 108
+  ✗ receiver                            NOT FOUND
+  ✓ parameter_declaration               -> ID: 112
+  ✓ parameter_list                      -> ID: 111
+  ✗ result                              NOT FOUND
+  ✗ variadic_parameter_declaration      NOT FOUND
+  ✓ type_parameter_declaration          -> ID: 110
+  ✓ type_parameter_list                 -> ID: 109
 
 === VARIABLE/CONSTANT NODES ===
-  ✓ var_declaration                -> ID: 104
-  ✓ var_spec                       -> ID: 105
-  ✓ const_declaration              -> ID: 102
-  ✓ const_spec                     -> ID: 103
-  ✓ short_var_declaration          -> ID: 147
-  ✓ assignment_statement           -> ID: 146
-  ✓ inc_statement                  -> ID: 144
-  ✓ dec_statement                  -> ID: 145
-  ✓ expression_list                -> ID: 117
-  ✗ identifier_list                NOT FOUND
+  ✓ var_declaration                     -> ID: 104
+  ✓ var_spec                            -> ID: 105
+  ✓ const_declaration                   -> ID: 102
+  ✓ const_spec                          -> ID: 103
+  ✓ short_var_declaration               -> ID: 147
+  ✓ assignment_statement                -> ID: 146
+  ✓ inc_statement                       -> ID: 144
+  ✗ dec_statement                       NOT FOUND
+  ✓ expression_list                     -> ID: 117
+  ✗ identifier_list                     NOT FOUND
 
 === TYPE-RELATED NODES ===
-  ✓ type_alias                     -> ID: 114
-  ✓ type_declaration               -> ID: 115
-  ✓ type_spec                      -> ID: 116
-  ✓ pointer_type                   -> ID: 122
-  ✓ array_type                     -> ID: 123
-  ✓ slice_type                     -> ID: 125
-  ✓ map_type                       -> ID: 133
-  ✓ channel_type                   -> ID: 134
-  ✓ generic_type                   -> ID: 120
-  ✗ type_instantiation             NOT FOUND
-  ✓ type_arguments                 -> ID: 121
-  ✗ type_parameter                 NOT FOUND
-  ✓ qualified_type                 -> ID: 188
-
-=== CALL-RELATED NODES ===
-  ✓ call_expression                -> ID: 171
-  ✗ method_expression              NOT FOUND
-  ✓ selector_expression            -> ID: 175
-  ✓ index_expression               -> ID: 176
-  ✓ slice_expression               -> ID: 177
-  ✓ type_assertion_expression      -> ID: 178
-  ✓ type_conversion_expression     -> ID: 179
-  ✓ argument_list                  -> ID: 174
-  ✓ parenthesized_expression       -> ID: 170
-
-=== CONTROL FLOW NODES ===
-  ✓ if_statement                   -> ID: 157
-  ✓ for_statement                  -> ID: 158
-  ✗ switch_statement               NOT FOUND
-  ✓ type_switch_statement          -> ID: 164
-  ✓ select_statement               -> ID: 167
-  ✓ go_statement                   -> ID: 155
-  ✓ defer_statement                -> ID: 156
-  ✓ return_statement               -> ID: 154
-  ✓ break_statement                -> ID: 151
-  ✓ continue_statement             -> ID: 152
-  ✓ fallthrough_statement          -> ID: 150
-  ✓ goto_statement                 -> ID: 153
-  ✓ labeled_statement              -> ID: 148
-
-=== CHANNEL/CONCURRENCY NODES ===
-  ✓ channel_type                   -> ID: 134
-  ✓ send_statement                 -> ID: 142
-  ✓ receive_statement              -> ID: 143
-  ✓ communication_case             -> ID: 168
-  ✓ default_case                   -> ID: 163
-  ✓ expression_case                -> ID: 162
-  ✓ type_case                      -> ID: 166
-  ✓ select_statement               -> ID: 167
-
-=== LITERAL NODES ===
-  ✓ int_literal                    -> ID: 86
-  ✓ float_literal                  -> ID: 87
-  ✓ imaginary_literal              -> ID: 88
-  ✓ rune_literal                   -> ID: 89
-  ✓ raw_string_literal             -> ID: 189
-  ✓ interpreted_string_literal     -> ID: 190
-  ✓ true                           -> ID: 91
-  ✓ false                          -> ID: 92
-  ✓ nil                            -> ID: 90
-  ✓ iota                           -> ID: 93
-  ✓ composite_literal              -> ID: 181
-  ✓ literal_element                -> ID: 183
-  ✓ keyed_element                  -> ID: 184
-
-=== DOCUMENTATION NODES ===
-  ✓ comment                        -> ID: 94
-  ✗ line_comment                   NOT FOUND
-  ✗ general_comment                NOT FOUND
-  ✗ block_comment                  NOT FOUND
-
-=== OPERATOR NODES ===
-  ✓ binary_expression              -> ID: 187
-  ✓ unary_expression               -> ID: 186
-  ✓ assignment_statement           -> ID: 146
-  ✓ inc_statement                  -> ID: 144
-  ✓ dec_statement                  -> ID: 145
-
-=== Summary ===
-Total node kinds available: 219
-Use these node names in the Go parser to extract symbols!
-CRITICAL: Always verify exact node names - do NOT guess!
-test abi15_tests::explore_go_abi15_comprehensive ... ok
-
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 11 filtered out; finished in 0.00s
-
-     Running tests/embedding_model_comparison.rs (target/debug/deps/embedding_model_comparison-ec0c6f3918074aa2)
-
-running 0 tests
-
-test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
-
-     Running tests/explore_ts_heritage.rs (target/debug/deps/explore_ts_heritage-892847947b3bdadf)
-
-running 0 tests
-
-test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
-
-     Running tests/test_behavior_integration.rs (target/debug/deps/test_behavior_integration-eb85b96b5c6d810c)
-
-running 0 tests
-
-test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.00s
-
-     Running tests/test_generic_resolution_simple_proof.rs (target/debug/deps/test_generic_resolution_simple_proof-78230a7342b5d74b)
-
-running 0 tests
-
-test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
-
-     Running tests/test_parent_context_demo.rs (target/debug/deps/test_parent_context_demo-d033699b55082c95)
-
-running 0 tests
-
-test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
-
-     Running tests/test_parent_context_json.rs (target/debug/deps/test_parent_context_json-6a98a7fcaf059e67)
-
-running 0 tests
-
-test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
-
-     Running tests/test_parent_context_tracking.rs (target/debug/deps/test_parent_context_tracking-425d659c451923cd)
-
-running 0 tests
-
-test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
-
-     Running tests/test_parser_maturity_assessment.rs (target/debug/deps/test_parser_maturity_assessment-299a2dab27dabee8)
-
-running 0 tests
-
-test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.00s
-
-     Running tests/test_php_parent_context.rs (target/debug/deps/test_php_parent_context-9633ef26cd1675b8)
-
-running 0 tests
-
-test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
-
-     Running tests/test_php_real_world.rs (target/debug/deps/test_php_real_world-188cf6ecb1dcb66d)
-
-running 0 tests
-
-test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 0.00s
-
-     Running tests/test_php_resolution_api.rs (target/debug/deps/test_php_resolution_api-1eb73e4a4d57d8ef)
-
-running 0 tests
-
-test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.00s
-
-     Running tests/test_php_scope_tracking.rs (target/debug/deps/test_php_scope_tracking-9b788c627c4982bd)
-
-running 0 tests
-
-test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
-
-     Running tests/test_php_scope_verification.rs (target/debug/deps/test_php_scope_verification-c45c9976a5ca8fdd)
-
-running 0 tests
-
-test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
-
-     Running tests/test_python_inheritance.rs (target/debug/deps/test_python_inheritance-831fbfe921762104)
-
-running 0 tests
-
-test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s
-
-     Running tests/test_python_parent_context.rs (target/debug/deps/test_python_parent_context-a903722503d4629e)
-
-running 0 tests
-
-test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
-
-     Running tests/test_python_real_world.rs (target/debug/deps/test_python_real_world-6fa53a3768ecc773)
-
-running 0 tests
-
-test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 0.00s
-
-     Running tests/test_python_resolution.rs (target/debug/deps/test_python_resolution-012af1619ca8ae88)
-
-running 0 tests
-
-test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.00s
-
-     Running tests/test_python_scope_tracking.rs (target/debug/deps/test_python_scope_tracking-118764db511d0583)
-
-running 0 tests
-
-test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.00s
-
-     Running tests/test_python_scope_verification.rs (target/debug/deps/test_python_scope_verification-c5ad2ba6efe3c7e8)
-
-running 0 tests
-
-test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
-
-     Running tests/test_rust_parent_context.rs (target/debug/deps/test_rust_parent_context-1146bb8bfe1e4844)
-
-running 0 tests
-
-test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
-
-     Running tests/test_rust_resolution.rs (target/debug/deps/test_rust_resolution-096a3e8378045a93)
-
-running 0 tests
-
-test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.00s
-
-     Running tests/test_rust_scope_tracking.rs (target/debug/deps/test_rust_scope_tracking-8ac9d1fe6650a96e)
-
-running 0 tests
-
-test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
-
-     Running tests/test_rust_trait_resolution.rs (target/debug/deps/test_rust_trait_resolution-0a674f5ce5cf64c7)
-
-running 0 tests
-
-test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
-
-     Running tests/test_ts_implementations.rs (target/debug/deps/test_ts_implementations-f10c6ba5d31ea1e9)
-
-running 0 tests
-
-test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
-
-     Running tests/test_ts_type_nodes_debug.rs (target/debug/deps/test_ts_type_nodes_debug-2365e0c8c52ae663)
-
-running 0 tests
-
-test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
-
-     Running tests/test_typescript_arrow_complex.rs (target/debug/deps/test_typescript_arrow_complex-de83c94095388cbf)
-
-running 0 tests
-
-test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
-
-     Running tests/test_typescript_find_calls.rs (target/debug/deps/test_typescript_find_calls-9077a11913da681f)
-
-running 0 tests
-
-test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
-
-     Running tests/test_typescript_find_method_calls.rs (target/debug/deps/test_typescript_find_method_calls-727f715df4c93f0f)
-
-running 0 tests
-
-test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
-
-     Running tests/test_typescript_import_debug.rs (target/debug/deps/test_typescript_import_debug-49076d75f70e93b0)
-
-running 0 tests
-
-test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
-
-     Running tests/test_typescript_import_matching.rs (target/debug/deps/test_typescript_import_matching-8f99f9c4df6b22b6)
-
-running 0 tests
-
-test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
-
-     Running tests/test_typescript_import_verification.rs (target/debug/deps/test_typescript_import_verification-a7d287b98a5255bf)
-
-running 0 tests
-
-test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
-
-     Running tests/test_typescript_interface_scope.rs (target/debug/deps/test_typescript_interface_scope-bf9c8668c010756d)
-
-running 0 tests
-
-test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
-
-     Running tests/test_typescript_parent_debug.rs (target/debug/deps/test_typescript_parent_debug-473aa4e62f5b6a3c)
-
-running 0 tests
-
-test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
-
-     Running tests/test_typescript_parent_trace.rs (target/debug/deps/test_typescript_parent_trace-7ffc61a683ef5391)
-
-running 0 tests
-
-test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
-
-     Running tests/test_typescript_reexports.rs (target/debug/deps/test_typescript_reexports-629559aebc3da5e8)
-
-running 0 tests
-
-test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
-
-     Running tests/test_typescript_resolution_context.rs (target/debug/deps/test_typescript_resolution_context-56170a711af54549)
-
-running 0 tests
-
-test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.00s
-
-     Running tests/test_typescript_resolution_sprint3.rs (target/debug/deps/test_typescript_resolution_sprint3-9ee1a014855a098e)
-
-running 0 tests
-
-test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
-
-     Running tests/test_typescript_scope_tracking.rs (target/debug/deps/test_typescript_scope_tracking-43a783d37c949346)
-
-running 0 tests
-
-test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
-
-     Running tests/test_typescript_type_tracking.rs (target/debug/deps/test_typescript_type_tracking-db842fb6a25321dc)
-
-running 0 tests
-
-test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
-
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.18s
-     Running unittests src/lib.rs (target/debug/deps/codanna-fa753e2294f4ea83)
-
-running 0 tests
-
-test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 284 filtered out; finished in 0.00s
-
-     Running unittests src/main.rs (target/debug/deps/codanna-4750e708ba99f4b4)
-
-running 0 tests
-
-test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
-
-     Running tests/abi15_exploration.rs (target/debug/deps/abi15_exploration-80f86872201cb175)
-
-running 1 test
-
-=== Go Node Structure Exploration ===
-
---- Package declaration ---
-Code: package main
-[source_file] 'package main' (id: 95)
-    [package_clause] 'package main' (id: 96)
-        [package] 'package' (id: 5)
-        [package_identifier] 'main' (id: 216)
-
---- Simple import ---
-Code: import "fmt"
-[source_file] 'import "fmt"' (id: 95)
-    [import_declaration] 'import "fmt"' (id: 97)
-        [import] 'import' (id: 6)
-        [import_spec] '"fmt"' (id: 98)
-            └─ field: 'path'
-            [interpreted_string_literal] '"fmt"' (id: 190)
-                ["] '"' (id: 82)
-                [interpreted_string_literal_content] 'fmt' (id: 83)
-                ["] '"' (id: 82)
-
---- Import group ---
-Code: import (
-    "fmt"
-    "os"
-    m "math"
-    . "strings"  
-    _ "database/sql"
-)
-[source_file] 'import (\n    "fmt"\n    "os"\n    m "math"\n    . "st...' (id: 95)
-    [import_declaration] 'import (\n    "fmt"\n    "os"\n    m "math"\n    . "st...' (id: 97)
-        [import] 'import' (id: 6)
-        [import_spec_list] '(\n    "fmt"\n    "os"\n    m "math"\n    . "strings" ...' (id: 100)
-            [(] '(' (id: 9)
-            [import_spec] '"fmt"' (id: 98)
-                └─ field: 'path'
-                [interpreted_string_literal] '"fmt"' (id: 190)
-                    ["] '"' (id: 82)
-                    [interpreted_string_literal_content] 'fmt' (id: 83)
-                    ["] '"' (id: 82)
-            [import_spec] '"os"' (id: 98)
-                └─ field: 'path'
-                [interpreted_string_literal] '"os"' (id: 190)
-                    ["] '"' (id: 82)
-                    [interpreted_string_literal_content] 'os' (id: 83)
-                    ["] '"' (id: 82)
-            [import_spec] 'm "math"' (id: 98)
-                └─ field: 'name'
-                [package_identifier] 'm' (id: 216)
-                └─ field: 'path'
-                [interpreted_string_literal] '"math"' (id: 190)
-                    ["] '"' (id: 82)
-                    [interpreted_string_literal_content] 'math' (id: 83)
-                    ["] '"' (id: 82)
-            [import_spec] '. "strings"' (id: 98)
-                └─ field: 'name'
-                [dot] '.' (id: 99)
-                    [.] '.' (id: 7)
-                └─ field: 'path'
-                [interpreted_string_literal] '"strings"' (id: 190)
-                    ["] '"' (id: 82)
-                    [interpreted_string_literal_content] 'strings' (id: 83)
-                    ["] '"' (id: 82)
-            [import_spec] '_ "database/sql"' (id: 98)
-                └─ field: 'name'
-                [blank_identifier] '_' (id: 8)
-                └─ field: 'path'
-                [interpreted_string_literal] '"database/sql"' (id: 190)
-                    ["] '"' (id: 82)
-                    [interpreted_string_literal_content] 'database/sql' (id: 83)
-                    ["] '"' (id: 82)
-            [)] ')' (id: 10)
-
---- Struct with tag ---
-Code: type User struct { Name string `json:"name"` }
-[source_file] 'type User struct { Name string `json:"name"` }' (id: 95)
-    [type_declaration] 'type User struct { Name string `json:"name"` }' (id: 115)
-        [type] 'type' (id: 19)
-        [type_spec] 'User struct { Name string `json:"name"` }' (id: 116)
-            └─ field: 'name'
-            [type_identifier] 'User' (id: 218)
-            └─ field: 'type'
-            [struct_type] 'struct { Name string `json:"name"` }' (id: 126)
-                [struct] 'struct' (id: 21)
-                [field_declaration_list] '{ Name string `json:"name"` }' (id: 128)
-                    [{] '{' (id: 23)
-                    [field_declaration] 'Name string `json:"name"`' (id: 129)
-                        └─ field: 'name'
-                        [field_identifier] 'Name' (id: 214)
-                        └─ field: 'type'
-                        [type_identifier] 'string' (id: 218)
-                        └─ field: 'tag'
-                        [raw_string_literal] '`json:"name"`' (id: 189)
-                            [`] '`' (id: 80)
-                            [raw_string_literal_content] 'json:"name"' (id: 81)
-                            [`] '`' (id: 80)
-                    [}] '}' (id: 24)
-
---- Interface declaration ---
-Code: type Writer interface { Write([]byte) (int, error) }
-[source_file] 'type Writer interface { Write([]byte) (int, error)...' (id: 95)
-    [type_declaration] 'type Writer interface { Write([]byte) (int, error)...' (id: 115)
-        [type] 'type' (id: 19)
-        [type_spec] 'Writer interface { Write([]byte) (int, error) }' (id: 116)
-            └─ field: 'name'
-            [type_identifier] 'Writer' (id: 218)
-            └─ field: 'type'
-            [interface_type] 'interface { Write([]byte) (int, error) }' (id: 130)
-                [interface] 'interface' (id: 25)
-                [{] '{' (id: 23)
-                [method_elem] 'Write([]byte) (int, error)' (id: 131)
-                    └─ field: 'name'
-                    [field_identifier] 'Write' (id: 214)
-                    └─ field: 'parameters'
-                    [parameter_list] '([]byte)' (id: 111)
-                        [(] '(' (id: 9)
-                        [parameter_declaration] '[]byte' (id: 112)
-                            └─ field: 'type'
-                            [slice_type] '[]byte' (id: 125)
-                                [[] '[' (id: 16)
-                                []] ']' (id: 17)
-                                └─ field: 'element'
-                                [type_identifier] 'byte' (id: 218)
-                        [)] ')' (id: 10)
-                    └─ field: 'result'
-                    [parameter_list] '(int, error)' (id: 111)
-                        [(] '(' (id: 9)
-                        [parameter_declaration] 'int' (id: 112)
-                            └─ field: 'type'
-                            [type_identifier] 'int' (id: 218)
-                        [,] ',' (id: 12)
-                        [parameter_declaration] 'error' (id: 112)
-                            └─ field: 'type'
-                            [type_identifier] 'error' (id: 218)
-                        [)] ')' (id: 10)
-                [}] '}' (id: 24)
-
---- Method with receiver ---
-Code: func (u *User) String() string { return u.Name }
-[source_file] 'func (u *User) String() string { return u.Name }' (id: 95)
-    [method_declaration] 'func (u *User) String() string { return u.Name }' (id: 108)
-        [func] 'func' (id: 15)
-        └─ field: 'receiver'
-        [parameter_list] '(u *User)' (id: 111)
-            [(] '(' (id: 9)
-            [parameter_declaration] 'u *User' (id: 112)
-                └─ field: 'name'
-                [identifier] 'u' (id: 1)
-                └─ field: 'type'
-                [pointer_type] '*User' (id: 122)
-                    [*] '*' (id: 20)
-                    [type_identifier] 'User' (id: 218)
-            [)] ')' (id: 10)
-        └─ field: 'name'
-        [field_identifier] 'String' (id: 214)
-        └─ field: 'parameters'
-        [parameter_list] '()' (id: 111)
-            [(] '(' (id: 9)
-            [)] ')' (id: 10)
-        └─ field: 'result'
-        [type_identifier] 'string' (id: 218)
-        └─ field: 'body'
-        [block] '{ return u.Name }' (id: 136)
-            [{] '{' (id: 23)
-            [return_statement] 'return u.Name' (id: 154)
-                [return] 'return' (id: 49)
-                [expression_list] 'u.Name' (id: 117)
-                    [selector_expression] 'u.Name' (id: 175)
-                        └─ field: 'operand'
-                        [identifier] 'u' (id: 1)
-                        [.] '.' (id: 7)
-                        └─ field: 'field'
-                        [field_identifier] 'Name' (id: 214)
-            [}] '}' (id: 24)
-
---- Generic function ---
-Code: func Add[T int | float64](a, b T) T { return a + b }
-[source_file] 'func Add[T int | float64](a, b T) T { return a + b...' (id: 95)
-    [function_declaration] 'func Add[T int | float64](a, b T) T { return a + b...' (id: 107)
-        [func] 'func' (id: 15)
-        └─ field: 'name'
-        [identifier] 'Add' (id: 1)
-        └─ field: 'type_parameters'
-        [type_parameter_list] '[T int | float64]' (id: 109)
-            [[] '[' (id: 16)
-            [type_parameter_declaration] 'T int | float64' (id: 110)
-                └─ field: 'name'
-                [identifier] 'T' (id: 1)
-                └─ field: 'type'
-                [type_constraint] 'int | float64' (id: 217)
-                    [type_identifier] 'int' (id: 218)
-                    [|] '|' (id: 26)
-                    [type_identifier] 'float64' (id: 218)
-            []] ']' (id: 17)
-        └─ field: 'parameters'
-        [parameter_list] '(a, b T)' (id: 111)
-            [(] '(' (id: 9)
-            [parameter_declaration] 'a, b T' (id: 112)
-                └─ field: 'name'
-                [identifier] 'a' (id: 1)
-                [,] ',' (id: 12)
-                └─ field: 'name'
-                [identifier] 'b' (id: 1)
-                └─ field: 'type'
-                [type_identifier] 'T' (id: 218)
-            [)] ')' (id: 10)
-        └─ field: 'result'
-        [type_identifier] 'T' (id: 218)
-        └─ field: 'body'
-        [block] '{ return a + b }' (id: 136)
-            [{] '{' (id: 23)
-            [return_statement] 'return a + b' (id: 154)
-                [return] 'return' (id: 49)
-                [expression_list] 'a + b' (id: 117)
-                    [binary_expression] 'a + b' (id: 187)
-                        └─ field: 'left'
-                        [identifier] 'a' (id: 1)
-                        └─ field: 'operator'
-                        [+] '+' (id: 62)
-                        └─ field: 'right'
-                        [identifier] 'b' (id: 1)
-            [}] '}' (id: 24)
-
---- Variable declaration ---
-Code: var count int = 42
-[source_file] 'var count int = 42' (id: 95)
-    [var_declaration] 'var count int = 42' (id: 104)
-        [var] 'var' (id: 14)
-        [var_spec] 'count int = 42' (id: 105)
-            └─ field: 'name'
-            [identifier] 'count' (id: 1)
-            └─ field: 'type'
-            [type_identifier] 'int' (id: 218)
-            [=] '=' (id: 13)
-            └─ field: 'value'
-            [expression_list] '42' (id: 117)
-                [int_literal] '42' (id: 86)
-    [] '' (id: 4)
-
---- Constant declaration ---
-Code: const Pi = 3.14159
-[source_file] 'const Pi = 3.14159' (id: 95)
-    [const_declaration] 'const Pi = 3.14159' (id: 102)
-        [const] 'const' (id: 11)
-        [const_spec] 'Pi = 3.14159' (id: 103)
-            └─ field: 'name'
-            [identifier] 'Pi' (id: 1)
-            [=] '=' (id: 13)
-            └─ field: 'value'
-            [expression_list] '3.14159' (id: 117)
-                [float_literal] '3.14159' (id: 87)
-    [] '' (id: 4)
-
---- Short variable declaration ---
-Code: users := make([]User, 0)
-[source_file] 'users := make([]User, 0)' (id: 95)
-    [short_var_declaration] 'users := make([]User, 0)' (id: 147)
-        └─ field: 'left'
-        [expression_list] 'users' (id: 117)
-            [identifier] 'users' (id: 1)
-        [:=] ':=' (id: 30)
-        └─ field: 'right'
-        [expression_list] 'make([]User, 0)' (id: 117)
-            [call_expression] 'make([]User, 0)' (id: 171)
-                └─ field: 'function'
-                [identifier] 'make' (id: 1)
-                └─ field: 'arguments'
-                [argument_list] '([]User, 0)' (id: 174)
-                    [(] '(' (id: 9)
-                    [slice_type] '[]User' (id: 125)
-                        [[] '[' (id: 16)
-                        []] ']' (id: 17)
-                        └─ field: 'element'
-                        [type_identifier] 'User' (id: 218)
-                    [,] ',' (id: 12)
-                    [int_literal] '0' (id: 86)
-                    [)] ')' (id: 10)
-    [] '' (id: 4)
-
---- Channel send ---
-Code: ch <- value
-[source_file] 'ch <- value' (id: 95)
-    [send_statement] 'ch <- value' (id: 142)
-        └─ field: 'channel'
-        [identifier] 'ch' (id: 1)
-        [<-] '<-' (id: 29)
-        └─ field: 'value'
-        [identifier] 'value' (id: 1)
-    [] '' (id: 4)
-
---- Channel receive ---
-Code: value := <-ch
-[source_file] 'value := <-ch' (id: 95)
-    [short_var_declaration] 'value := <-ch' (id: 147)
-        └─ field: 'left'
-        [expression_list] 'value' (id: 117)
-            [identifier] 'value' (id: 1)
-        [:=] ':=' (id: 30)
-        └─ field: 'right'
-        [expression_list] '<-ch' (id: 117)
-            [unary_expression] '<-ch' (id: 186)
-                └─ field: 'operator'
-                [<-] '<-' (id: 29)
-                └─ field: 'operand'
-                [identifier] 'ch' (id: 1)
-    [] '' (id: 4)
-
---- Goroutine ---
-Code: go doWork()
-[source_file] 'go doWork()' (id: 95)
-    [go_statement] 'go doWork()' (id: 155)
-        [go] 'go' (id: 50)
-        [call_expression] 'doWork()' (id: 171)
-            └─ field: 'function'
-            [identifier] 'doWork' (id: 1)
-            └─ field: 'arguments'
-            [argument_list] '()' (id: 174)
-                [(] '(' (id: 9)
-                [)] ')' (id: 10)
-    [] '' (id: 4)
-
---- Defer statement ---
-Code: defer file.Close()
-[source_file] 'defer file.Close()' (id: 95)
-    [defer_statement] 'defer file.Close()' (id: 156)
-        [defer] 'defer' (id: 51)
-        [call_expression] 'file.Close()' (id: 171)
-            └─ field: 'function'
-            [selector_expression] 'file.Close' (id: 175)
-                └─ field: 'operand'
-                [identifier] 'file' (id: 1)
-                [.] '.' (id: 7)
-                └─ field: 'field'
-                [field_identifier] 'Close' (id: 214)
-            └─ field: 'arguments'
-            [argument_list] '()' (id: 174)
-                [(] '(' (id: 9)
-                [)] ')' (id: 10)
-    [] '' (id: 4)
-
-=== KEY FINDINGS FOR GO PARSER IMPLEMENTATION ===
-1. Use exact node names found above - do NOT guess
-2. Check field names for extracting specific parts
-3. Go uses different patterns than TypeScript
-4. Pay attention to receiver syntax for methods
-5. Handle Go's unique import syntax carefully
-test abi15_tests::explore_go_node_structure ... ok
-
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 11 filtered out; finished in 0.00s
-
-     Running tests/embedding_model_comparison.rs (target/debug/deps/embedding_model_comparison-ec0c6f3918074aa2)
-
-running 0 tests
-
-test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
-
-     Running tests/explore_ts_heritage.rs (target/debug/deps/explore_ts_heritage-892847947b3bdadf)
-
-running 0 tests
-
-test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
-
-     Running tests/test_behavior_integration.rs (target/debug/deps/test_behavior_integration-eb85b96b5c6d810c)
-
-running 0 tests
-
-test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.00s
-
-     Running tests/test_generic_resolution_simple_proof.rs (target/debug/deps/test_generic_resolution_simple_proof-78230a7342b5d74b)
-
-running 0 tests
-
-test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
-
-     Running tests/test_parent_context_demo.rs (target/debug/deps/test_parent_context_demo-d033699b55082c95)
-
-running 0 tests
-
-test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
-
-     Running tests/test_parent_context_json.rs (target/debug/deps/test_parent_context_json-6a98a7fcaf059e67)
-
-running 0 tests
-
-test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
-
-     Running tests/test_parent_context_tracking.rs (target/debug/deps/test_parent_context_tracking-425d659c451923cd)
-
-running 0 tests
-
-test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
-
-     Running tests/test_parser_maturity_assessment.rs (target/debug/deps/test_parser_maturity_assessment-299a2dab27dabee8)
-
-running 0 tests
-
-test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.00s
-
-     Running tests/test_php_parent_context.rs (target/debug/deps/test_php_parent_context-9633ef26cd1675b8)
-
-running 0 tests
-
-test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
-
-     Running tests/test_php_real_world.rs (target/debug/deps/test_php_real_world-188cf6ecb1dcb66d)
-
-running 0 tests
-
-test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 0.00s
-
-     Running tests/test_php_resolution_api.rs (target/debug/deps/test_php_resolution_api-1eb73e4a4d57d8ef)
-
-running 0 tests
-
-test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.00s
-
-     Running tests/test_php_scope_tracking.rs (target/debug/deps/test_php_scope_tracking-9b788c627c4982bd)
-
-running 0 tests
-
-test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
-
-     Running tests/test_php_scope_verification.rs (target/debug/deps/test_php_scope_verification-c45c9976a5ca8fdd)
-
-running 0 tests
-
-test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
-
-     Running tests/test_python_inheritance.rs (target/debug/deps/test_python_inheritance-831fbfe921762104)
-
-running 0 tests
-
-test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s
-
-     Running tests/test_python_parent_context.rs (target/debug/deps/test_python_parent_context-a903722503d4629e)
-
-running 0 tests
-
-test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
-
-     Running tests/test_python_real_world.rs (target/debug/deps/test_python_real_world-6fa53a3768ecc773)
-
-running 0 tests
-
-test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 0.00s
-
-     Running tests/test_python_resolution.rs (target/debug/deps/test_python_resolution-012af1619ca8ae88)
-
-running 0 tests
-
-test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.00s
-
-     Running tests/test_python_scope_tracking.rs (target/debug/deps/test_python_scope_tracking-118764db511d0583)
-
-running 0 tests
-
-test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.00s
-
-     Running tests/test_python_scope_verification.rs (target/debug/deps/test_python_scope_verification-c5ad2ba6efe3c7e8)
-
-running 0 tests
-
-test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
-
-     Running tests/test_rust_parent_context.rs (target/debug/deps/test_rust_parent_context-1146bb8bfe1e4844)
-
-running 0 tests
-
-test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
-
-     Running tests/test_rust_resolution.rs (target/debug/deps/test_rust_resolution-096a3e8378045a93)
-
-running 0 tests
-
-test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.00s
-
-     Running tests/test_rust_scope_tracking.rs (target/debug/deps/test_rust_scope_tracking-8ac9d1fe6650a96e)
-
-running 0 tests
-
-test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
-
-     Running tests/test_rust_trait_resolution.rs (target/debug/deps/test_rust_trait_resolution-0a674f5ce5cf64c7)
-
-running 0 tests
-
-test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
-
-     Running tests/test_ts_implementations.rs (target/debug/deps/test_ts_implementations-f10c6ba5d31ea1e9)
-
-running 0 tests
-
-test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
-
-     Running tests/test_ts_type_nodes_debug.rs (target/debug/deps/test_ts_type_nodes_debug-2365e0c8c52ae663)
-
-running 0 tests
-
-test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
-
-     Running tests/test_typescript_arrow_complex.rs (target/debug/deps/test_typescript_arrow_complex-de83c94095388cbf)
-
-running 0 tests
-
-test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
-
-     Running tests/test_typescript_find_calls.rs (target/debug/deps/test_typescript_find_calls-9077a11913da681f)
-
-running 0 tests
-
-test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
-
-     Running tests/test_typescript_find_method_calls.rs (target/debug/deps/test_typescript_find_method_calls-727f715df4c93f0f)
-
-running 0 tests
-
-test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
-
-     Running tests/test_typescript_import_debug.rs (target/debug/deps/test_typescript_import_debug-49076d75f70e93b0)
-
-running 0 tests
-
-test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
-
-     Running tests/test_typescript_import_matching.rs (target/debug/deps/test_typescript_import_matching-8f99f9c4df6b22b6)
-
-running 0 tests
-
-test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
-
-     Running tests/test_typescript_import_verification.rs (target/debug/deps/test_typescript_import_verification-a7d287b98a5255bf)
-
-running 0 tests
-
-test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
-
-     Running tests/test_typescript_interface_scope.rs (target/debug/deps/test_typescript_interface_scope-bf9c8668c010756d)
-
-running 0 tests
-
-test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
-
-     Running tests/test_typescript_parent_debug.rs (target/debug/deps/test_typescript_parent_debug-473aa4e62f5b6a3c)
-
-running 0 tests
-
-test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
-
-     Running tests/test_typescript_parent_trace.rs (target/debug/deps/test_typescript_parent_trace-7ffc61a683ef5391)
-
-running 0 tests
-
-test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
-
-     Running tests/test_typescript_reexports.rs (target/debug/deps/test_typescript_reexports-629559aebc3da5e8)
-
-running 0 tests
-
-test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
-
-     Running tests/test_typescript_resolution_context.rs (target/debug/deps/test_typescript_resolution_context-56170a711af54549)
-
-running 0 tests
-
-test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.00s
-
-     Running tests/test_typescript_resolution_sprint3.rs (target/debug/deps/test_typescript_resolution_sprint3-9ee1a014855a098e)
-
-running 0 tests
-
-test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
-
-     Running tests/test_typescript_scope_tracking.rs (target/debug/deps/test_typescript_scope_tracking-43a783d37c949346)
-
-running 0 tests
-
-test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
-
-     Running tests/test_typescript_type_tracking.rs (target/debug/deps/test_typescript_type_tracking-db842fb6a25321dc)
-
-running 0 tests
-
-test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
-
+  ✓ type_alias                          -> ID: 114
+  ✓ pointer_type                        -> ID: 122
+  ✗ array_type                          NOT FOUND
+  ✓ slice_type                          -> ID: 125
+  ✗ map_type                            NOT FOUND
+  ✓ channel_type                        -> ID: 134
+  ✓ generic_type                        -> ID: 120
+  ✗ type_instantiation                  NOT FOUND
+  ✓ type_arguments                      -> ID: 121
+  ✗ type_parameter                      NOT FOUND
+  ✓ qualified_type                      -> ID: 188
+
+=== UNCATEGORIZED NODES ===
+  ✓ !=                                  -> ID: 73
+  ✓ "                                   -> ID: 82
+  ✓ &                                   -> ID: 66
+  ✓ (                                   -> ID: 9
+  ✓ )                                   -> ID: 10
+  ✓ *                                   -> ID: 20
+  ✓ ++                                  -> ID: 31
+  ✓ ,                                   -> ID: 12
+  ✓ .                                   -> ID: 7
+  ✓ :                                   -> ID: 44
+  ✓ :=                                  -> ID: 30
+  ✓ ;                                   -> ID: 3
+  ✓ <                                   -> ID: 74
+  ✓ <-                                  -> ID: 29
+  ✓ =                                   -> ID: 13
+  ✓ ==                                  -> ID: 72
+  ✓ [                                   -> ID: 16
+  ✓ ]                                   -> ID: 17
+  ✓ `                                   -> ID: 80
+  ✓ argument_list                       -> ID: 174
+  ✓ binary_expression                   -> ID: 187
+  ✓ block                               -> ID: 136
+  ✓ break                               -> ID: 46
+  ✓ break_statement                     -> ID: 151
+  ✓ call_expression                     -> ID: 171
+  ✓ chan                                -> ID: 28
+  ✓ comment                             -> ID: 94
+  ✓ composite_literal                   -> ID: 181
+  ✓ const                               -> ID: 11
+  ✓ defer                               -> ID: 51
+  ✓ defer_statement                     -> ID: 156
+  ✓ else                                -> ID: 53
+  ✓ escape_sequence                     -> ID: 85
+  ✓ expression_statement                -> ID: 141
+  ✓ for                                 -> ID: 54
+  ✓ for_clause                          -> ID: 159
+  ✓ for_statement                       -> ID: 158
+  ✓ func                                -> ID: 15
+  ✓ go                                  -> ID: 50
+  ✓ go_statement                        -> ID: 155
+  ✓ identifier                          -> ID: 1
+  ✓ if                                  -> ID: 52
+  ✓ if_statement                        -> ID: 157
+  ✓ import                              -> ID: 6
+  ✓ index_expression                    -> ID: 176
+  ✓ int_literal                         -> ID: 86
+  ✓ interface                           -> ID: 25
+  ✓ interpreted_string_literal_content  -> ID: 83
+  ✓ iota                                -> ID: 93
+  ✓ keyed_element                       -> ID: 184
+  ✓ literal_element                     -> ID: 183
+  ✓ literal_value                       -> ID: 182
+  ✓ negated_type                        -> ID: 127
+  ✓ nil                                 -> ID: 90
+  ✓ package                             -> ID: 5
+  ✓ parenthesized_expression            -> ID: 170
+  ✓ range                               -> ID: 55
+  ✓ range_clause                        -> ID: 160
+  ✓ raw_string_literal                  -> ID: 189
+  ✓ raw_string_literal_content          -> ID: 81
+  ✓ return                              -> ID: 49
+  ✓ return_statement                    -> ID: 154
+  ✓ selector_expression                 -> ID: 175
+  ✓ send_statement                      -> ID: 142
+  ✓ source_file                         -> ID: 95
+  ✓ statement_list                      -> ID: 137
+  ✓ struct                              -> ID: 21
+  ✓ true                                -> ID: 91
+  ✓ type                                -> ID: 19
+  ✓ unary_expression                    -> ID: 186
+  ✓ var                                 -> ID: 14
+  ✓ var_spec_list                       -> ID: 106
+  ✓ {                                   -> ID: 23
+  ✓ }                                   -> ID: 24
+  ✓ ~                                   -> ID: 22
+
+Legend: ✓ = found in file, ○ = in grammar but not in file, ✗ = not in grammar

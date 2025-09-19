@@ -5,6 +5,7 @@
 
 use crate::error::IndexError;
 use crate::io::exit_code::ExitCode;
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
 /// Output format for CLI commands.
@@ -181,6 +182,24 @@ impl JsonResponse<serde_json::Value> {
             meta: None,
         }
     }
+}
+
+/// Format current time as UTC timestamp string.
+///
+/// Returns a string in the format "YYYY-MM-DD HH:MM:SS UTC".
+/// This is used for report generation and audit timestamps.
+///
+/// # Example
+/// ```
+/// use codanna::io::format::format_utc_timestamp;
+///
+/// let timestamp = format_utc_timestamp();
+/// // Returns something like "2025-09-28 15:30:45 UTC"
+/// ```
+pub fn format_utc_timestamp() -> String {
+    // Use chrono for accurate cross-platform date/time formatting
+    let now = Utc::now();
+    now.format("%Y-%m-%d %H:%M:%S UTC").to_string()
 }
 
 #[cfg(test)]

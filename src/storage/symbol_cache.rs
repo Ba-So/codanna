@@ -222,6 +222,75 @@ impl SymbolHashCache {
         None
     }
 
+    /// Collect up to `max_candidates` symbol IDs whose name hash matches.
+    /// This enables disambiguation at the call site without changing the cache format.
+    pub fn lookup_candidates(&self, name: &str, max_candidates: usize) -> Vec<SymbolId> {
+        let mut results = Vec::new();
+        let Some(mmap) = self.mmap.as_ref() else {
+            return results;
+        };
+
+        let name_hash = fnv1a_hash(name.as_bytes());
+        let bucket_idx = (name_hash as usize) % self.bucket_count;
+
+        // Get bucket boundaries
+        let bucket_start = self.bucket_offsets[bucket_idx] as usize;
+        let bucket_end = if bucket_idx + 1 < self.bucket_count {
+            self.bucket_offsets[bucket_idx + 1] as usize
+        } else {
+            mmap.len()
+        };
+
+        // Scan bucket for matching hash
+        let mut pos = bucket_start;
+
+        // Read bucket entry count
+        if pos + 4 > bucket_end {
+            return results;
+        }
+        let entry_count =
+            u32::from_le_bytes([mmap[pos], mmap[pos + 1], mmap[pos + 2], mmap[pos + 3]]) as usize;
+        pos += 4;
+
+        // Linear probe within bucket collecting matches up to max_candidates
+        for _ in 0..entry_count {
+            if pos + CacheEntry::SIZE > bucket_end {
+                break;
+            }
+
+            // Read entry hash first (fast rejection)
+            let entry_hash = u64::from_le_bytes([
+                mmap[pos + 4],
+                mmap[pos + 5],
+                mmap[pos + 6],
+                mmap[pos + 7],
+                mmap[pos + 8],
+                mmap[pos + 9],
+                mmap[pos + 10],
+                mmap[pos + 11],
+            ]);
+
+            if entry_hash == name_hash {
+                // Hash matches, extract symbol ID
+                if let Some(symbol_id) = SymbolId::new(u32::from_le_bytes([
+                    mmap[pos],
+                    mmap[pos + 1],
+                    mmap[pos + 2],
+                    mmap[pos + 3],
+                ])) {
+                    results.push(symbol_id);
+                    if results.len() >= max_candidates {
+                        break;
+                    }
+                }
+            }
+
+            pos += CacheEntry::SIZE;
+        }
+
+        results
+    }
+
     /// Build cache from symbols (called during indexing)
     pub fn build_from_symbols<'a>(
         path: impl AsRef<Path>,
@@ -300,5 +369,9 @@ impl ConcurrentSymbolCache {
 
     pub fn lookup_by_name(&self, name: &str) -> Option<SymbolId> {
         self.inner.read().lookup_by_name(name)
+    }
+
+    pub fn lookup_candidates(&self, name: &str, max_candidates: usize) -> Vec<SymbolId> {
+        self.inner.read().lookup_candidates(name, max_candidates)
     }
 }

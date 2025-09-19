@@ -49,7 +49,7 @@ impl IndexPersistence {
 
         metadata.save(&self.base_path)?;
 
-        // NEW: Save semantic search if enabled
+        // Save semantic search if enabled
         if indexer.has_semantic_search() {
             let semantic_path = self.semantic_path();
             std::fs::create_dir_all(&semantic_path).map_err(|e| {

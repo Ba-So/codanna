@@ -42,7 +42,7 @@ pub use inner::InnerStruct;
 
 // Constants and statics
 const MAX_SIZE: usize = 1024;
-pub const DEFAULT_NAME: &str = "default";
+pub const DEFAULT_NAME: &str = "defaults";
 static mut COUNTER: u32 = 0;
 static INSTANCE: std::sync::OnceLock<Config> = std::sync::OnceLock::new();
 
@@ -65,7 +65,16 @@ pub struct Config {
 }
 
 impl Config {
-    /// Create default config - will be called by TestService::new
+    /// Galactic antimatter propulsion system initialization for hyperdimensional warp drive recalibration
+    /// 
+    /// This revolutionary method establishes antimatter containment fields optimized for faster-than-light
+    /// travel coordination and temporal paradox prevention. Critical for maintaining spacetime integrity
+    /// during interstellar navigation sequences across multiple galaxy clusters.
+    /// 
+    /// # Stellar Engineering Features
+    /// - Warp core plasma stabilization (level 9000)
+    /// - Temporal causality loop protection algorithms
+    /// - Dark energy field manipulation protocols
     pub fn default() -> Self {
         Self {
             name: "default".to_string(),
@@ -264,7 +273,21 @@ where
     Ok(reference)
 }
 
-// Async function
+/// Embedding regeneration test for stdio MCP server hot-reload functionality
+/// 
+/// This async function specifically validates embedding synchronization when documentation changes.
+/// It ensures that documentation updates are properly indexed and searchable through
+/// natural language queries in the MCP server environment during hot-reload operations.
+///
+/// # Purpose
+/// Tests that semantic search can find this function using natural language queries
+/// about "embedding regeneration", "stdio MCP server", and "hot-reload functionality".
+/// 
+/// # Parameters
+/// - `url`: The URL to process during the async operation
+///
+/// # Returns
+/// A Result containing the processed URL string or an error
 pub async fn async_operation(url: &str) -> Result<String> {
     Ok(url.to_string())
 }
@@ -362,6 +385,12 @@ mod benches {
     fn bench_create(b: &mut Bencher) {
         b.iter(|| Config::new("bench".to_string()));
     }
+}
+
+/// Simple test for embedding regeneration debugging
+/// This should be found in semantic search if our fix works
+pub fn simple_embedding_test() {
+    println!("Simple embedding test function");
 }
 
 // Main function - demonstrates clear call relationships

@@ -6,7 +6,9 @@
 //! When migrating or updating the parser, ensure compatibility with ABI-14 features.
 
 use crate::parsing::Import;
-use crate::parsing::{LanguageParser, MethodCall, ParserContext, ScopeType};
+use crate::parsing::{
+    LanguageParser, MethodCall, NodeTracker, NodeTrackingState, ParserContext, ScopeType,
+};
 use crate::types::SymbolCounter;
 use crate::{FileId, Range, Symbol, SymbolKind, Visibility};
 use std::any::Any;
@@ -16,6 +18,7 @@ use tree_sitter::{Language, Node, Parser};
 pub struct TypeScriptParser {
     parser: Parser,
     context: ParserContext,
+    node_tracker: NodeTrackingState,
 }
 
 impl TypeScriptParser {
@@ -51,10 +54,43 @@ impl TypeScriptParser {
         symbol
     }
 
+    /// Parse TypeScript source code and extract all symbols
+    pub fn parse(
+        &mut self,
+        code: &str,
+        file_id: FileId,
+        symbol_counter: &mut SymbolCounter,
+    ) -> Vec<Symbol> {
+        // Reset context for each file
+        self.context = ParserContext::new();
+        let mut symbols = Vec::new();
+
+        match self.parser.parse(code, None) {
+            Some(tree) => {
+                let root_node = tree.root_node();
+                self.extract_symbols_from_node(
+                    root_node,
+                    code,
+                    file_id,
+                    symbol_counter,
+                    &mut symbols,
+                    "", // Module path will be determined by behavior
+                );
+            }
+            None => {
+                eprintln!("Failed to parse TypeScript file");
+            }
+        }
+
+        symbols
+    }
+
     /// Create a new TypeScript parser
     pub fn new() -> Result<Self, String> {
         let mut parser = Parser::new();
-        let language: Language = tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into();
+        // Use the TSX grammar so TSX/JSX syntax parses correctly. It also
+        // handles plain TypeScript files, avoiding ERROR roots in TSX files.
+        let language: Language = tree_sitter_typescript::LANGUAGE_TSX.into();
         parser
             .set_language(&language)
             .map_err(|e| format!("Failed to set TypeScript language: {e}"))?;
@@ -62,6 +98,7 @@ impl TypeScriptParser {
         Ok(Self {
             parser,
             context: ParserContext::new(),
+            node_tracker: NodeTrackingState::new(),
         })
     }
 
@@ -77,6 +114,9 @@ impl TypeScriptParser {
     ) {
         match node.kind() {
             "function_declaration" => {
+                // Register ALL child nodes for audit (including type_parameters, parameters, etc.)
+                self.register_node_recursively(node);
+
                 // Extract function name for parent tracking
                 let func_name = node
                     .child_by_field_name("name")
@@ -97,18 +137,20 @@ impl TypeScriptParser {
                 // Set current function for parent tracking BEFORE processing children
                 self.context.set_current_function(func_name.clone());
 
-                // Process children for nested functions/classes
-                for child in node.children(&mut node.walk()) {
-                    if child.kind() != "identifier" && child.kind() != "formal_parameters" {
-                        self.extract_symbols_from_node(
-                            child,
-                            code,
-                            file_id,
-                            counter,
-                            symbols,
-                            module_path,
-                        );
-                    }
+                // Process function body for nested symbols
+                if let Some(body) = node.child_by_field_name("body") {
+                    // Register the body node for audit tracking
+                    self.register_handled_node(body.kind(), body.kind_id());
+                    // Process the body using the standard extraction
+                    // This ensures all nodes are properly registered
+                    self.extract_symbols_from_node(
+                        body,
+                        code,
+                        file_id,
+                        counter,
+                        symbols,
+                        module_path,
+                    );
                 }
 
                 // Exit scope first (this clears the current context)
@@ -119,6 +161,8 @@ impl TypeScriptParser {
                 self.context.set_current_class(saved_class);
             }
             "class_declaration" | "abstract_class_declaration" => {
+                // Register ALL child nodes for audit
+                self.register_node_recursively(node);
                 // Extract class name for parent tracking
                 let class_name = node
                     .children(&mut node.walk())
@@ -150,6 +194,8 @@ impl TypeScriptParser {
                 }
             }
             "interface_declaration" => {
+                // Register ALL child nodes for audit
+                self.register_node_recursively(node);
                 if let Some(symbol) =
                     self.process_interface(node, code, file_id, counter, module_path)
                 {
@@ -157,6 +203,8 @@ impl TypeScriptParser {
                 }
             }
             "type_alias_declaration" => {
+                // Register ALL child nodes for audit
+                self.register_node_recursively(node);
                 if let Some(symbol) =
                     self.process_type_alias(node, code, file_id, counter, module_path)
                 {
@@ -164,11 +212,14 @@ impl TypeScriptParser {
                 }
             }
             "enum_declaration" => {
+                // Register ALL child nodes for audit
+                self.register_node_recursively(node);
                 if let Some(symbol) = self.process_enum(node, code, file_id, counter, module_path) {
                     symbols.push(symbol);
                 }
             }
             "lexical_declaration" | "variable_declaration" => {
+                self.register_handled_node(node.kind(), node.kind_id());
                 self.process_variable_declaration(
                     node,
                     code,
@@ -179,6 +230,7 @@ impl TypeScriptParser {
                 );
             }
             "arrow_function" => {
+                self.register_handled_node(node.kind(), node.kind_id());
                 // Handle arrow functions assigned to variables
                 if let Some(symbol) =
                     self.process_arrow_function(node, code, file_id, counter, module_path)
@@ -186,7 +238,80 @@ impl TypeScriptParser {
                     symbols.push(symbol);
                 }
             }
+            "ERROR" => {
+                // ERROR nodes occur when tree-sitter can't parse something
+                // (e.g., "use client" directive in React Server Components)
+                // We still want to extract symbols from the children
+                self.register_handled_node(node.kind(), node.kind_id());
+
+                // Check if this looks like a fragmented function declaration
+                // Pattern: identifier followed by formal_parameters
+                let mut cursor = node.walk();
+                let children: Vec<Node> = node.children(&mut cursor).collect();
+
+                let mut i = 0;
+                while i < children.len() {
+                    let child = children[i];
+
+                    // Check if this is an identifier followed by formal_parameters
+                    if child.kind() == "identifier" && i + 1 < children.len() {
+                        let next = children[i + 1];
+                        if next.kind() == "formal_parameters" {
+                            // This looks like a function declaration that got fragmented
+                            // Extract it as a function
+                            let func_name = &code[child.byte_range()];
+
+                            // Create a synthetic function symbol
+                            let symbol_id = counter.next_id();
+                            let range = Range::new(
+                                child.start_position().row as u32,
+                                child.start_position().column as u16,
+                                next.end_position().row as u32,
+                                next.end_position().column as u16,
+                            );
+
+                            let mut symbol = Symbol::new(
+                                symbol_id,
+                                func_name.to_string(),
+                                SymbolKind::Function,
+                                file_id,
+                                range,
+                            );
+
+                            symbol = symbol
+                                .with_visibility(Visibility::Public)
+                                .with_signature(format!("function {func_name}()"));
+
+                            if !module_path.is_empty() {
+                                symbol = symbol.with_module_path(module_path.to_string());
+                            }
+
+                            // Set scope context
+                            symbol.scope_context = Some(self.context.current_scope_context());
+
+                            symbols.push(symbol);
+
+                            // Skip the formal_parameters node since we processed it
+                            i += 2;
+                            continue;
+                        }
+                    }
+
+                    // Process child normally
+                    self.extract_symbols_from_node(
+                        child,
+                        code,
+                        file_id,
+                        counter,
+                        symbols,
+                        module_path,
+                    );
+                    i += 1;
+                }
+            }
             _ => {
+                // Track all nodes we encounter, even if not extracting symbols
+                self.register_handled_node(node.kind(), node.kind_id());
                 // For unhandled node types, recursively process children
                 let mut cursor = node.walk();
                 for child in node.children(&mut cursor) {
@@ -289,6 +414,7 @@ impl TypeScriptParser {
             for child in body.children(&mut cursor) {
                 match child.kind() {
                     "method_definition" => {
+                        self.register_handled_node(child.kind(), child.kind_id());
                         // Extract method name for parent tracking
                         let method_name = child
                             .child_by_field_name("name")
@@ -313,16 +439,17 @@ impl TypeScriptParser {
                             // Set current function to the method name
                             self.context.set_current_function(method_name.clone());
 
-                            for body_child in body.children(&mut body.walk()) {
-                                self.extract_symbols_from_node(
-                                    body_child,
-                                    code,
-                                    file_id,
-                                    counter,
-                                    symbols,
-                                    module_path,
-                                );
-                            }
+                            // Register the body node for audit tracking
+                            self.register_handled_node(body.kind(), body.kind_id());
+                            // Process the body using standard extraction
+                            self.extract_symbols_from_node(
+                                body,
+                                code,
+                                file_id,
+                                counter,
+                                symbols,
+                                module_path,
+                            );
 
                             // Exit scope first (this clears the current context)
                             self.context.exit_scope();
@@ -332,13 +459,16 @@ impl TypeScriptParser {
                         }
                     }
                     "public_field_definition" | "property_declaration" => {
+                        self.register_handled_node(child.kind(), child.kind_id());
                         if let Some(symbol) =
                             self.process_property(child, code, file_id, counter, module_path)
                         {
                             symbols.push(symbol);
                         }
                     }
-                    _ => {}
+                    _ => {
+                        self.register_handled_node(child.kind(), child.kind_id());
+                    }
                 }
             }
         }
@@ -462,13 +592,6 @@ impl TypeScriptParser {
                 if let Some(name_node) = child.child_by_field_name("name") {
                     if name_node.kind() == "identifier" {
                         let name = &code[name_node.byte_range()];
-                        let kind = if code[node.byte_range()].starts_with("const") {
-                            SymbolKind::Constant
-                        } else {
-                            SymbolKind::Variable
-                        };
-
-                        let visibility = self.determine_visibility(node, code);
 
                         // Check if this is an arrow function assignment
                         let is_arrow_function =
@@ -477,6 +600,20 @@ impl TypeScriptParser {
                             } else {
                                 false
                             };
+
+                        // Determine the kind based on whether it's a function or regular variable
+                        let kind = if is_arrow_function {
+                            SymbolKind::Function
+                        } else if code[node.byte_range()].starts_with("const") {
+                            SymbolKind::Constant
+                        } else {
+                            SymbolKind::Variable
+                        };
+
+                        let visibility = self.determine_visibility(node, code);
+
+                        // Extract JSDoc comment for const declarations
+                        let doc_comment = self.extract_doc_comment(&node, code);
 
                         let mut symbol = self.create_symbol(
                             counter.next_id(),
@@ -490,7 +627,7 @@ impl TypeScriptParser {
                                 child.end_position().column as u16,
                             ),
                             None,
-                            None,
+                            doc_comment,
                             module_path,
                             visibility,
                         );
@@ -534,6 +671,42 @@ impl TypeScriptParser {
                         }
 
                         symbols.push(symbol);
+
+                        // CRITICAL FIX: Process arrow function body for nested symbols
+                        if is_arrow_function {
+                            if let Some(value_node) = child.child_by_field_name("value") {
+                                if value_node.kind() == "arrow_function" {
+                                    if let Some(body) = value_node.child_by_field_name("body") {
+                                        // Save current context
+                                        let saved_function =
+                                            self.context.current_function().map(|s| s.to_string());
+                                        let saved_class =
+                                            self.context.current_class().map(|s| s.to_string());
+
+                                        // Enter function scope for the arrow function
+                                        self.context.enter_scope(ScopeType::function());
+                                        self.context.set_current_function(Some(name.to_string()));
+
+                                        // Register the body node for audit tracking
+                                        self.register_handled_node(body.kind(), body.kind_id());
+                                        // Process the body using standard extraction
+                                        self.extract_symbols_from_node(
+                                            body,
+                                            code,
+                                            file_id,
+                                            counter,
+                                            symbols,
+                                            module_path,
+                                        );
+
+                                        // Exit scope and restore context
+                                        self.context.exit_scope();
+                                        self.context.set_current_function(saved_function);
+                                        self.context.set_current_class(saved_class);
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -601,6 +774,7 @@ impl TypeScriptParser {
         let name = &code[name_node.byte_range()];
 
         let visibility = self.determine_method_visibility(node, code);
+        let doc_comment = self.extract_doc_comment(&node, code);
 
         Some(self.create_symbol(
             counter.next_id(),
@@ -614,7 +788,7 @@ impl TypeScriptParser {
                 node.end_position().column as u16,
             ),
             None,
-            None,
+            doc_comment,
             module_path,
             visibility,
         ))
@@ -662,27 +836,38 @@ impl TypeScriptParser {
 
     /// Determine visibility based on export keywords
     fn determine_visibility(&self, node: Node, code: &str) -> Visibility {
-        // Check if preceded by export keyword
+        // 1) Ancestor check: many TS grammars wrap declarations in export_statement
+        let mut anc = node.parent();
+        for _ in 0..3 {
+            // walk a few levels conservatively
+            if let Some(a) = anc {
+                if a.kind() == "export_statement" {
+                    return Visibility::Public;
+                }
+                anc = a.parent();
+            } else {
+                break;
+            }
+        }
+
+        // 2) Sibling check (rare, but safe)
         if let Some(prev) = node.prev_sibling() {
             if prev.kind() == "export_statement" {
                 return Visibility::Public;
             }
         }
 
-        // Check parent for export
-        if let Some(parent) = node.parent() {
-            if parent.kind() == "export_statement" {
-                return Visibility::Public;
-            }
+        // 3) Token check: if the source preceding the node contains 'export '
+        // This catches inline modifiers when export is not represented as a wrapper.
+        let start = node.start_byte();
+        let prefix_start = start.saturating_sub(10); // small window
+        let prefix = &code[prefix_start..start];
+        if prefix.contains("export ") || prefix.contains("export\n") {
+            return Visibility::Public;
         }
 
-        // Check the signature itself
-        let signature = &code[node.byte_range()];
-        if signature.starts_with("export ") {
-            Visibility::Public
-        } else {
-            Visibility::Private
-        }
+        // Default: not exported
+        Visibility::Private
     }
 
     /// Determine method/property visibility
@@ -928,28 +1113,36 @@ impl TypeScriptParser {
         file_id: FileId,
         imports: &mut Vec<Import>,
     ) {
-        eprintln!(
-            "ENTERING process_import_statement, code: {}",
-            &code[node.byte_range()]
-        );
+        if crate::config::is_global_debug_enabled() {
+            eprintln!(
+                "ENTERING process_import_statement, code: {}",
+                &code[node.byte_range()]
+            );
+        }
 
         // Debug: print all children
         let mut cursor = node.walk();
-        eprintln!("  Node has {} children:", node.child_count());
+        if crate::config::is_global_debug_enabled() {
+            eprintln!("  Node has {} children:", node.child_count());
+        }
 
         // Check if this is a type-only import (has 'type' keyword after 'import')
         let mut is_type_only = false;
         for (i, child) in node.children(&mut cursor).enumerate() {
-            eprintln!(
-                "    child[{}]: kind='{}', field_name={:?}",
-                i,
-                child.kind(),
-                node.field_name_for_child(i as u32)
-            );
+            if crate::config::is_global_debug_enabled() {
+                eprintln!(
+                    "    child[{}]: kind='{}', field_name={:?}",
+                    i,
+                    child.kind(),
+                    node.field_name_for_child(i as u32)
+                );
+            }
             // Check for 'type' keyword (appears in type-only imports)
             if child.kind() == "type" && i == 1 {
                 is_type_only = true;
-                eprintln!("    Detected type-only import!");
+                if crate::config::is_global_debug_enabled() {
+                    eprintln!("    Detected type-only import!");
+                }
             }
         }
 
@@ -971,10 +1164,12 @@ impl TypeScriptParser {
         };
 
         if let Some(import_clause) = import_clause {
-            eprintln!(
-                "  Found import_clause: {}",
-                &code[import_clause.byte_range()]
-            );
+            if crate::config::is_global_debug_enabled() {
+                eprintln!(
+                    "  Found import_clause: {}",
+                    &code[import_clause.byte_range()]
+                );
+            }
 
             // Check for different import types
             let mut has_default = false;
@@ -985,22 +1180,47 @@ impl TypeScriptParser {
 
             let mut cursor = import_clause.walk();
             for child in import_clause.children(&mut cursor) {
-                eprintln!(
-                    "    Child kind: {}, text: {}",
-                    child.kind(),
-                    &code[child.byte_range()]
-                );
+                if crate::config::is_global_debug_enabled() {
+                    eprintln!(
+                        "    Child kind: {}, text: {}",
+                        child.kind(),
+                        &code[child.byte_range()]
+                    );
+                }
                 match child.kind() {
                     "identifier" => {
                         // Default import
                         has_default = true;
                         let name = code[child.byte_range()].to_string();
-                        eprintln!("      Setting default_name = {name}");
+                        if crate::config::is_global_debug_enabled() {
+                            eprintln!("      Setting default_name = {name}");
+                        }
                         default_name = Some(name);
                     }
                     "named_imports" => {
                         // Named imports exist
                         has_named = true;
+                        // Extract named import specifiers: { Foo as Bar, Baz }
+                        let mut nc = child.walk();
+                        for ni in child.children(&mut nc) {
+                            if ni.kind() == "import_specifier" {
+                                let mut sp = ni.walk();
+                                let mut local: Option<String> = None;
+                                // Prefer the aliased local name if present
+                                for part in ni.children(&mut sp) {
+                                    if part.kind() == "identifier" {
+                                        local = Some(code[part.byte_range()].to_string());
+                                    }
+                                }
+                                imports.push(Import {
+                                    path: source_path.to_string(),
+                                    alias: local,
+                                    file_id,
+                                    is_glob: false,
+                                    is_type_only,
+                                });
+                            }
+                        }
                     }
                     "namespace_import" => {
                         // * as name
@@ -1019,10 +1239,12 @@ impl TypeScriptParser {
 
             // Add imports based on what we found
             // Following Rust pattern: one Import per module, with alias for default/namespace
-            eprintln!(
-                "  Summary: has_default={has_default}, has_named={has_named}, has_namespace={has_namespace}"
-            );
-            eprintln!("  default_name={default_name:?}, namespace_name={namespace_name:?}");
+            if crate::config::is_global_debug_enabled() {
+                eprintln!(
+                    "  Summary: has_default={has_default}, has_named={has_named}, has_namespace={has_namespace}"
+                );
+                eprintln!("  default_name={default_name:?}, namespace_name={namespace_name:?}");
+            }
 
             if has_namespace {
                 // Namespace import: import * as utils from './utils'
@@ -1045,9 +1267,11 @@ impl TypeScriptParser {
                 });
             } else if has_default {
                 // Default only: import React from 'react'
-                eprintln!(
-                    "  Adding default import: path='{source_path}', alias={default_name:?}, type_only={is_type_only}"
-                );
+                if crate::config::is_global_debug_enabled() {
+                    eprintln!(
+                        "  Adding default import: path='{source_path}', alias={default_name:?}, type_only={is_type_only}"
+                    );
+                }
                 imports.push(Import {
                     path: source_path.to_string(),
                     alias: default_name,
@@ -1056,14 +1280,7 @@ impl TypeScriptParser {
                     is_type_only,
                 });
             } else if has_named {
-                // Named only: import { Component } from 'react'
-                imports.push(Import {
-                    path: source_path.to_string(),
-                    alias: None,
-                    file_id,
-                    is_glob: false,
-                    is_type_only,
-                });
+                // Named-only already pushed per specifier above
             }
         } else {
             // Side-effect import (no import clause)
@@ -1129,38 +1346,212 @@ impl TypeScriptParser {
         current_function: Option<&'a str>,
         calls: &mut Vec<(&'a str, &'a str, Range)>,
     ) {
+        // Handle export wrappers that contain a function declaration. This helps
+        // when the tree is fragmented under an ERROR root and field labeling is unreliable.
+        if node.kind() == "export_statement" {
+            let mut w = node.walk();
+            for child in node.children(&mut w) {
+                if child.kind() == "function_declaration" {
+                    // Try to get function name
+                    let func_name = child
+                        .child_by_field_name("name")
+                        .or_else(|| {
+                            let mut cw = child.walk();
+                            child.children(&mut cw).find(|n| n.kind() == "identifier")
+                        })
+                        .map(|n| &code[n.byte_range()]);
+                    // Recurse into the function with proper context
+                    self.extract_calls_recursive(&child, code, func_name, calls);
+                    // Continue scanning other children as well
+                }
+            }
+        }
         // Handle function context - track which function we're inside
+        // CRITICAL: Only set NEW context when entering a function, otherwise INHERIT current context
         let function_context = if node.kind() == "function_declaration"
             || node.kind() == "method_definition"
             || node.kind() == "arrow_function"
             || node.kind() == "function_expression"
         {
-            // Extract function name
-            if let Some(name_node) = node.child_by_field_name("name") {
-                Some(&code[name_node.byte_range()])
+            // We're entering a NEW function scope - extract its name
+            if let Some(name_node) = node.child_by_field_name("name").or_else(|| {
+                // Fallback: some fragmented/ERROR-wrapped trees may not label fields
+                let mut w = node.walk();
+                node.children(&mut w).find(|n| n.kind() == "identifier")
+            }) {
+                let name = &code[name_node.byte_range()];
+                eprintln!(
+                    "DEBUG: Entering {} '{}' at line {}",
+                    node.kind(),
+                    name,
+                    node.start_position().row + 1
+                );
+                Some(name)
             } else {
-                // Arrow functions might not have a name, check parent
+                // Arrow functions might not have a name, check parent for variable declaration
+                // Handle case: const ComponentName = () => { ... }
+                if node.kind() == "arrow_function" {
+                    if let Some(parent) = node.parent() {
+                        if parent.kind() == "variable_declarator" {
+                            // Get the name from the variable declarator
+                            if let Some(name_node) = parent.child_by_field_name("name") {
+                                Some(&code[name_node.byte_range()])
+                            } else {
+                                current_function
+                            }
+                        } else {
+                            current_function
+                        }
+                    } else {
+                        current_function
+                    }
+                } else {
+                    current_function
+                }
+            }
+        } else if node.kind() == "identifier" && current_function.is_none() {
+            // ONLY check for fragmented functions if we're NOT already in a function
+            // Fragmented function detection only at top level error/program contexts.
+            if let Some(parent) = node.parent() {
+                if parent.kind() == "ERROR" || parent.kind() == "program" {
+                    if let Some(next_sibling) = node.next_sibling() {
+                        if next_sibling.kind() == "formal_parameters" {
+                            // This is a fragmented function (e.g., due to "use client" causing ERROR root)
+                            Some(&code[node.byte_range()])
+                        } else {
+                            current_function
+                        }
+                    } else {
+                        current_function
+                    }
+                } else {
+                    current_function
+                }
+            } else {
+                current_function
+            }
+        } else if node.kind() == "variable_declarator" && current_function.is_none() {
+            // ONLY check variable declarators at top level, not inside functions
+            // Check if this variable contains an arrow function or function expression
+            if let Some(init) = node.child_by_field_name("value") {
+                if init.kind() == "arrow_function" || init.kind() == "function_expression" {
+                    // Get the variable name to use as function context
+                    if let Some(name_node) = node.child_by_field_name("name") {
+                        Some(&code[name_node.byte_range()])
+                    } else {
+                        current_function
+                    }
+                } else {
+                    current_function
+                }
+            } else {
                 current_function
             }
         } else {
+            // Not a function declaration - INHERIT the current context
             current_function
         };
 
         // Check if this is a call expression
         if node.kind() == "call_expression" {
-            // Skip if it's a method call (handled by find_method_calls)
-            if let Some(function_node) = node.child_by_field_name("function") {
-                if function_node.kind() != "member_expression" {
-                    // It's a regular function call
-                    if let Some(fn_name) = Self::extract_function_name(&function_node, code) {
-                        if let Some(context) = function_context {
-                            let range = Range {
-                                start_line: (node.start_position().row + 1) as u32,
-                                start_column: node.start_position().column as u16,
-                                end_line: (node.end_position().row + 1) as u32,
-                                end_column: node.end_position().column as u16,
-                            };
-                            calls.push((context, fn_name, range));
+            // Try to obtain the callee node robustly: prefer 'function' field,
+            // but fall back to the first child if fields are missing under ERROR nodes.
+            let function_node = node.child_by_field_name("function").or_else(|| {
+                let mut w = node.walk();
+                node.children(&mut w).next()
+            });
+
+            if let Some(function_node) = function_node {
+                // Extract function name for all types of calls (including member expressions like console.log)
+                if let Some(fn_name) = Self::extract_function_name(&function_node, code) {
+                    eprintln!(
+                        "DEBUG: Found call to {} at line {}, context = {:?}",
+                        fn_name,
+                        node.start_position().row + 1,
+                        function_context
+                    );
+                    // If we don't have a function context yet, try to infer it from ancestors
+                    let inferred_context = if function_context.is_none() {
+                        let mut anc = node.parent();
+                        let mut ctx: Option<&'a str> = None;
+                        while let Some(a) = anc {
+                            match a.kind() {
+                                "function_declaration" => {
+                                    if let Some(name_node) =
+                                        a.child_by_field_name("name").or_else(|| {
+                                            let mut w = a.walk();
+                                            a.children(&mut w).find(|n| n.kind() == "identifier")
+                                        })
+                                    {
+                                        ctx = Some(&code[name_node.byte_range()]);
+                                        break;
+                                    }
+                                }
+                                "arrow_function" | "function_expression" => {
+                                    if let Some(p) = a.parent() {
+                                        if p.kind() == "variable_declarator" {
+                                            if let Some(name_node) = p.child_by_field_name("name") {
+                                                ctx = Some(&code[name_node.byte_range()]);
+                                                break;
+                                            }
+                                        }
+                                    }
+                                }
+                                _ => {}
+                            }
+                            anc = a.parent();
+                        }
+                        ctx
+                    } else {
+                        None
+                    };
+
+                    if let Some(context) = function_context.or(inferred_context) {
+                        let range = Range {
+                            start_line: (node.start_position().row + 1) as u32,
+                            start_column: node.start_position().column as u16,
+                            end_line: (node.end_position().row + 1) as u32,
+                            end_column: node.end_position().column as u16,
+                        };
+                        calls.push((context, fn_name, range));
+                        eprintln!("DEBUG: Added call {context} -> {fn_name}");
+                    } else {
+                        eprintln!("DEBUG: Skipping call to {fn_name} - no function context");
+                    }
+                }
+            }
+        }
+
+        // Special handling for fragmented functions
+        // If this is an identifier followed by formal_parameters, we need to process
+        // the following siblings with this function's context
+        if node.kind() == "identifier" {
+            if let Some(parent) = node.parent() {
+                if parent.kind() == "ERROR" || parent.kind() == "program" {
+                    if let Some(next_sibling) = node.next_sibling() {
+                        if next_sibling.kind() == "formal_parameters" {
+                            // Process subsequent siblings with this function's context
+                            let mut current = next_sibling.next_sibling();
+                            while let Some(sibling) = current {
+                                // Heuristic boundary: stop if we hit another top-level declaration
+                                let k = sibling.kind();
+                                if k == "function_declaration"
+                                    || k == "class_declaration"
+                                    || k == "abstract_class_declaration"
+                                    || k == "export_statement"
+                                {
+                                    break;
+                                }
+                                self.extract_calls_recursive(
+                                    &sibling,
+                                    code,
+                                    function_context,
+                                    calls,
+                                );
+                                current = sibling.next_sibling();
+                            }
+                            // Don't process children since we handled siblings
+                            return;
                         }
                     }
                 }
@@ -1354,6 +1745,24 @@ impl TypeScriptParser {
     ) {
         // Find the actual type identifier
         if let Some(type_name) = self.extract_simple_type_name(type_node, code) {
+            // Filter out TS primitive/predefined types to avoid noisy unresolved relationships
+            if matches!(
+                type_name,
+                "string"
+                    | "number"
+                    | "boolean"
+                    | "any"
+                    | "void"
+                    | "unknown"
+                    | "never"
+                    | "null"
+                    | "undefined"
+                    | "object"
+                    | "bigint"
+                    | "symbol"
+            ) {
+                return;
+            }
             let range = Range::new(
                 type_node.start_position().row as u32,
                 type_node.start_position().column as u16,
@@ -1613,19 +2022,55 @@ impl TypeScriptParser {
         current_function: Option<&str>,
         calls: &mut Vec<MethodCall>,
     ) {
-        // Track function context (same as find_calls)
+        // Track function context - SAME FIX as extract_calls_recursive
+        // Only set NEW context when entering a function, otherwise INHERIT
         let function_context = if node.kind() == "function_declaration"
             || node.kind() == "method_definition"
             || node.kind() == "arrow_function"
             || node.kind() == "function_expression"
         {
-            // Extract function name
+            // We're entering a NEW function - extract its name
             if let Some(name_node) = node.child_by_field_name("name") {
                 Some(&code[name_node.byte_range()])
+            } else if node.kind() == "arrow_function" {
+                // Check parent for variable declarator name
+                if let Some(parent) = node.parent() {
+                    if parent.kind() == "variable_declarator" {
+                        if let Some(name_node) = parent.child_by_field_name("name") {
+                            Some(&code[name_node.byte_range()])
+                        } else {
+                            current_function // Anonymous, inherit context
+                        }
+                    } else {
+                        current_function // Anonymous, inherit context
+                    }
+                } else {
+                    current_function // Anonymous, inherit context
+                }
+            } else {
+                current_function // Anonymous function, inherit context
+            }
+        } else if node.kind() == "identifier" && current_function.is_none() {
+            // Check for fragmented functions only at top level
+            if let Some(parent) = node.parent() {
+                if parent.kind() == "ERROR" || parent.kind() == "program" {
+                    if let Some(next_sibling) = node.next_sibling() {
+                        if next_sibling.kind() == "formal_parameters" {
+                            Some(&code[node.byte_range()])
+                        } else {
+                            current_function
+                        }
+                    } else {
+                        current_function
+                    }
+                } else {
+                    current_function
+                }
             } else {
                 current_function
             }
         } else {
+            // Not a function declaration - INHERIT the current context
             current_function
         };
 
@@ -1695,6 +2140,10 @@ impl TypeScriptParser {
     fn extract_function_name<'a>(node: &tree_sitter::Node, code: &'a str) -> Option<&'a str> {
         match node.kind() {
             "identifier" => Some(&code[node.byte_range()]),
+            "member_expression" => {
+                // For member expressions like console.log, return the full dotted name
+                Some(&code[node.byte_range()])
+            }
             "await_expression" => {
                 // Handle await foo()
                 if let Some(expr) = node.child_by_field_name("expression") {
@@ -1713,6 +2162,26 @@ impl TypeScriptParser {
             _ => None,
         }
     }
+
+    /// Recursively register all nodes for audit tracking
+    /// This is separate from symbol extraction - it just ensures all nodes are counted
+    fn register_node_recursively(&mut self, node: Node) {
+        self.register_handled_node(node.kind(), node.kind_id());
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            self.register_node_recursively(child);
+        }
+    }
+}
+
+impl NodeTracker for TypeScriptParser {
+    fn get_handled_nodes(&self) -> &std::collections::HashSet<crate::parsing::HandledNode> {
+        self.node_tracker.get_handled_nodes()
+    }
+
+    fn register_handled_node(&mut self, node_kind: &str, node_id: u16) {
+        self.node_tracker.register_handled_node(node_kind, node_id);
+    }
 }
 
 impl LanguageParser for TypeScriptParser {
@@ -1722,28 +2191,7 @@ impl LanguageParser for TypeScriptParser {
         file_id: FileId,
         symbol_counter: &mut SymbolCounter,
     ) -> Vec<Symbol> {
-        // Reset context for each file
-        self.context = ParserContext::new();
-        let mut symbols = Vec::new();
-
-        match self.parser.parse(code, None) {
-            Some(tree) => {
-                let root_node = tree.root_node();
-                self.extract_symbols_from_node(
-                    root_node,
-                    code,
-                    file_id,
-                    symbol_counter,
-                    &mut symbols,
-                    "", // Module path will be determined by behavior
-                );
-            }
-            None => {
-                eprintln!("Failed to parse TypeScript file");
-            }
-        }
-
-        symbols
+        self.parse(code, file_id, symbol_counter)
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -1881,6 +2329,79 @@ impl LanguageParser for TypeScriptParser {
     fn language(&self) -> crate::parsing::Language {
         crate::parsing::Language::TypeScript
     }
+
+    fn find_variable_types<'a>(&mut self, code: &'a str) -> Vec<(&'a str, &'a str, Range)> {
+        // Basic TS variable type inference for `const/let/var x = new Type()` patterns
+        let mut bindings = Vec::new();
+        if let Some(tree) = self.parser.parse(code, None) {
+            let root = tree.root_node();
+
+            fn walk<'a>(
+                node: &tree_sitter::Node,
+                code: &'a str,
+                out: &mut Vec<(&'a str, &'a str, Range)>,
+            ) {
+                // Look for lexical_declaration -> variable_declarator with new_expression initializer
+                if node.kind() == "lexical_declaration" || node.kind() == "variable_declaration" {
+                    let mut cursor = node.walk();
+                    for child in node.children(&mut cursor) {
+                        if child.kind() == "variable_declarator" {
+                            let name = child.child_by_field_name("name").and_then(|n| {
+                                if n.kind() == "identifier" {
+                                    Some(&code[n.byte_range()])
+                                } else {
+                                    None
+                                }
+                            });
+                            let init = child.child_by_field_name("value");
+                            if let (Some(var), Some(init_node)) = (name, init) {
+                                if init_node.kind() == "new_expression" {
+                                    // Extract constructor type: new TypeName(...)
+                                    if let Some(constructor) =
+                                        init_node.child_by_field_name("constructor")
+                                    {
+                                        // constructor might be an identifier or qualified name
+                                        // We take the last identifier as the type name
+                                        let type_name = if constructor.kind() == "identifier" {
+                                            Some(&code[constructor.byte_range()])
+                                        } else {
+                                            // Fallback: try to find a trailing identifier
+                                            let mut last_ident: Option<&str> = None;
+                                            let mut c2 = constructor.walk();
+                                            for part in constructor.children(&mut c2) {
+                                                if part.kind() == "identifier" {
+                                                    last_ident = Some(&code[part.byte_range()]);
+                                                }
+                                            }
+                                            last_ident
+                                        };
+                                        if let Some(typ) = type_name {
+                                            let range = Range::new(
+                                                child.start_position().row as u32,
+                                                child.start_position().column as u16,
+                                                child.end_position().row as u32,
+                                                child.end_position().column as u16,
+                                            );
+                                            out.push((var, typ, range));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                // Recurse
+                let mut cursor = node.walk();
+                for child in node.children(&mut cursor) {
+                    walk(&child, code, out);
+                }
+            }
+
+            walk(&root, code, &mut bindings);
+        }
+
+        bindings
+    }
 }
 
 #[cfg(test)]
@@ -1920,15 +2441,20 @@ export * from './common';
             );
         }
 
-        // Verify counts
-        assert_eq!(imports.len(), 7, "Should extract 7 imports");
+        // Verify counts (per-specifier imports now included)
+        assert_eq!(imports.len(), 8, "Should extract 8 imports");
 
         // Verify specific imports
-        // Named import creates one import with no alias
+        // Named imports create one Import per specifier with local alias
         assert!(
             imports
                 .iter()
-                .any(|i| i.path == "react" && i.alias.is_none())
+                .any(|i| i.path == "react" && i.alias == Some("Component".to_string()))
+        );
+        assert!(
+            imports
+                .iter()
+                .any(|i| i.path == "react" && i.alias == Some("useState".to_string()))
         );
         // Default import has alias
         assert!(
@@ -1942,11 +2468,11 @@ export * from './common';
                 .iter()
                 .any(|i| i.path == "./utils" && i.alias == Some("utils".to_string()) && i.is_glob)
         );
-        // Type import (named)
+        // Type import (named) captured as import with alias
         assert!(
             imports
                 .iter()
-                .any(|i| i.path == "./types" && i.alias.is_none())
+                .any(|i| i.path == "./types" && i.alias == Some("Props".to_string()))
         );
         // Side-effect import
         assert!(
@@ -2172,8 +2698,8 @@ export { default as MyButton } from './Button';
             );
         }
 
-        // Should have 4 imports: react (default), ./config, ./helper, ./Button
-        assert_eq!(imports.len(), 4, "Should have 4 imports");
+        // Should have 7 imports (per-specifier named imports)
+        assert_eq!(imports.len(), 7, "Should have 7 imports");
 
         // Check for React default import
         let react_default = imports
@@ -2181,19 +2707,95 @@ export { default as MyButton } from './Button';
             .find(|i| i.path == "react" && i.alias == Some("React".to_string()));
         assert!(react_default.is_some(), "Should find React default import");
 
-        // Check for config import (named imports, no alias)
-        let config = imports
-            .iter()
-            .find(|i| i.path == "./config" && i.alias.is_none());
-        assert!(config.is_some(), "Should find config import");
+        // Check for per-specifier config imports (Config type and createConfig function)
+        assert!(
+            imports
+                .iter()
+                .any(|i| i.path == "./config" && i.alias == Some("Config".to_string()))
+        );
+        assert!(
+            imports
+                .iter()
+                .any(|i| i.path == "./config" && i.alias == Some("createConfig".to_string()))
+        );
 
-        // Check for helper import (named imports, no alias on Import struct)
-        let helper = imports
-            .iter()
-            .find(|i| i.path == "./helper" && i.alias.is_none());
-        assert!(helper.is_some(), "Should find helper import");
+        // Check for aliased helper import
+        assert!(
+            imports
+                .iter()
+                .any(|i| i.path == "./helper" && i.alias == Some("H".to_string()))
+        );
 
         println!("✅ Complex patterns handled correctly");
+    }
+
+    #[test]
+    fn test_typescript_export_visibility_is_public() {
+        let mut parser = TypeScriptParser::new().unwrap();
+        let file_id = FileId::new(1).unwrap();
+        let code = r#"export function createChat() { return 'ok'; }"#;
+
+        let mut counter = SymbolCounter::new();
+        // Use internal parse path by calling parse directly via trait impl in a minimal way
+        let symbols = parser.parse(code, file_id, &mut counter);
+        // Should produce exactly one function symbol named createChat with Public visibility
+        assert!(
+            symbols
+                .iter()
+                .any(|s| s.name.as_ref() == "createChat"
+                    && matches!(s.visibility, Visibility::Public))
+        );
+    }
+
+    #[test]
+    fn test_typescript_find_variable_types_new_expression() {
+        let mut parser = TypeScriptParser::new().unwrap();
+        let code = r#"
+            class ChatSDK { createChat(): string { return 'x'; } }
+            function start() {
+                const sdk = new ChatSDK();
+                sdk.createChat();
+            }
+        "#;
+        let bindings = parser.find_variable_types(code);
+        // Expect a binding for sdk -> ChatSDK
+        assert!(
+            bindings
+                .iter()
+                .any(|(var, typ, _)| *var == "sdk" && *typ == "ChatSDK")
+        );
+    }
+
+    #[test]
+    fn test_typescript_find_method_calls_extraction() {
+        let mut parser = TypeScriptParser::new().unwrap();
+        let code = r#"
+            class ChatSDK { createChat(): string { return 'x'; } }
+            function startVoiceConversation() {
+                const sdk = new ChatSDK();
+                sdk.createChat();
+            }
+        "#;
+        let calls = parser.find_method_calls(code);
+        // Check that we have at least one call to createChat with receiver sdk
+        assert!(calls.iter().any(|c| c.caller == "startVoiceConversation"
+            && c.method_name == "createChat"
+            && c.receiver.as_deref() == Some("sdk")));
+    }
+
+    #[test]
+    fn test_typescript_filter_primitive_uses() {
+        let mut parser = TypeScriptParser::new().unwrap();
+        let code = r#"
+            function f(): string { return '' }
+            function g(): number { return 1 }
+        "#;
+        let uses = parser.find_uses(code);
+        // No primitive types should be reported
+        assert!(
+            uses.is_empty(),
+            "primitive type uses should be filtered out"
+        );
     }
 
     #[test]

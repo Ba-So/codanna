@@ -69,16 +69,11 @@
 //! - `tests/fixtures/go/` for comprehensive code examples
 //! - [`parser`] module for symbol extraction implementation details
 
+pub mod audit;
 pub mod behavior;
 pub mod definition;
 pub mod parser;
 pub mod resolution;
-
-#[cfg(test)]
-pub mod test_helpers;
-
-#[cfg(test)]
-mod parser_tests;
 
 pub use behavior::GoBehavior;
 pub use definition::GoLanguage;

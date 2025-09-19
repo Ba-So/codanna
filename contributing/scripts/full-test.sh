@@ -23,8 +23,8 @@ echo "📝 Check formatting"
 cargo fmt --check
 
 echo ""
-echo "📎 Clippy with project rules"
-cargo clippy -- -D warnings
+echo "📎 Clippy with project rules (strict mode with all targets and features)"
+cargo clippy --all-targets --all-features -- -D warnings
 
 # Build with different feature combinations
 echo ""

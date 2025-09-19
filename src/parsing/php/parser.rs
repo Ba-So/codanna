@@ -10,7 +10,9 @@
 //! version, verify compatibility with node type names used in this implementation.
 
 use crate::parsing::Import;
-use crate::parsing::{Language, LanguageParser, MethodCall, ParserContext, ScopeType};
+use crate::parsing::{
+    Language, LanguageParser, MethodCall, NodeTracker, NodeTrackingState, ParserContext, ScopeType,
+};
 use crate::types::SymbolCounter;
 use crate::{FileId, Range, Symbol, SymbolKind};
 use std::any::Any;
@@ -45,6 +47,7 @@ pub enum PhpParseError {
 pub struct PhpParser {
     parser: Parser,
     context: ParserContext,
+    node_tracker: NodeTrackingState,
 }
 
 impl std::fmt::Debug for PhpParser {
@@ -56,6 +59,32 @@ impl std::fmt::Debug for PhpParser {
 }
 
 impl PhpParser {
+    /// Parse PHP source code and extract all symbols
+    pub fn parse(
+        &mut self,
+        code: &str,
+        file_id: FileId,
+        symbol_counter: &mut SymbolCounter,
+    ) -> Vec<Symbol> {
+        // Reset context for each file
+        self.context = ParserContext::new();
+
+        let tree = match self.parser.parse(code, None) {
+            Some(tree) => tree,
+            None => return Vec::new(),
+        };
+
+        let mut symbols = Vec::with_capacity(64); // Reasonable initial capacity for most PHP files
+        self.extract_symbols_from_node(
+            tree.root_node(),
+            code,
+            file_id,
+            &mut symbols,
+            symbol_counter,
+        );
+        symbols
+    }
+
     /// Create a new PHP parser instance
     pub fn new() -> Result<Self, PhpParseError> {
         let mut parser = Parser::new();
@@ -68,6 +97,7 @@ impl PhpParser {
         Ok(Self {
             parser,
             context: ParserContext::new(),
+            node_tracker: NodeTrackingState::new(),
         })
     }
 
@@ -110,7 +140,8 @@ impl PhpParser {
         let text_preview = if node.child_count() == 0 {
             let text = &code[node.byte_range()];
             if text.len() > 50 {
-                format!(" = '{}'...", &text[..50])
+                let truncated = crate::parsing::safe_truncate_str(text, 50);
+                format!(" = '{truncated}'...")
             } else {
                 format!(" = '{text}'")
             }
@@ -162,6 +193,7 @@ impl PhpParser {
     ) {
         match node.kind() {
             "function_definition" => {
+                self.register_handled_node(node.kind(), node.kind_id());
                 // Extract function name for parent tracking
                 let func_name = self.extract_function_name(node, code);
 
@@ -193,6 +225,7 @@ impl PhpParser {
                 self.context.set_current_class(saved_class);
             }
             "method_declaration" => {
+                self.register_handled_node(node.kind(), node.kind_id());
                 // Extract method name for parent tracking
                 let method_name = self.extract_method_name(node, code);
 
@@ -224,6 +257,7 @@ impl PhpParser {
                 self.context.set_current_class(saved_class);
             }
             "class_declaration" => {
+                self.register_handled_node(node.kind(), node.kind_id());
                 // Extract class name for parent tracking
                 let class_name = self.extract_class_name(node, code);
 
@@ -254,6 +288,7 @@ impl PhpParser {
                 self.context.set_current_class(saved_class);
             }
             "interface_declaration" => {
+                self.register_handled_node(node.kind(), node.kind_id());
                 if let Some(symbol) = self.process_interface(node, code, file_id, counter) {
                     symbols.push(symbol);
                 }
@@ -264,6 +299,7 @@ impl PhpParser {
                 self.context.exit_scope();
             }
             "trait_declaration" => {
+                self.register_handled_node(node.kind(), node.kind_id());
                 // Extract trait name for parent tracking
                 let trait_name = self.extract_trait_name(node, code);
 
@@ -294,16 +330,19 @@ impl PhpParser {
                 self.context.set_current_class(saved_class);
             }
             "property_declaration" => {
+                self.register_handled_node(node.kind(), node.kind_id());
                 if let Some(symbol) = self.process_property(node, code, file_id, counter) {
                     symbols.push(symbol);
                 }
             }
             "const_declaration" => {
+                self.register_handled_node(node.kind(), node.kind_id());
                 // Process const declarations - they contain const_element children
                 // Process children to extract the const_elements
                 self.process_children(node, code, file_id, symbols, counter);
             }
             "const_element" => {
+                self.register_handled_node(node.kind(), node.kind_id());
                 // Process individual const elements
                 // Check if we're at global scope (not inside a class)
                 if self.is_global_scope(node) {
@@ -340,11 +379,13 @@ impl PhpParser {
                 }
             }
             "class_const_declaration" => {
+                self.register_handled_node(node.kind(), node.kind_id());
                 if let Some(symbol) = self.process_constant(node, code, file_id, counter) {
                     symbols.push(symbol);
                 }
             }
             "expression_statement" => {
+                self.register_handled_node(node.kind(), node.kind_id());
                 // Check for global constants via define() or global variables
                 if let Some(child) = node.child(0) {
                     match child.kind() {
@@ -375,6 +416,8 @@ impl PhpParser {
                 self.process_children(node, code, file_id, symbols, counter);
             }
             _ => {
+                // Track all nodes we encounter, even if not extracting symbols
+                self.register_handled_node(node.kind(), node.kind_id());
                 // Recursively process children
                 self.process_children(node, code, file_id, symbols, counter);
             }
@@ -803,19 +846,24 @@ impl PhpParser {
             // Try to extract the value as a simple signature
             if let Some(right) = node.child_by_field_name("right") {
                 let value_preview = &code[right.byte_range()];
-                // Limit the signature to first 100 chars for readability
-                let truncated = if value_preview.len() > 100 {
-                    format!("{}...", &value_preview[..100])
-                } else {
-                    value_preview.to_string()
-                };
-                symbol.signature = Some(format!("${clean_name} = {truncated}").into());
+                // Store full signature for semantic quality
+                symbol.signature = Some(format!("${clean_name} = {value_preview}").into());
             }
 
             return Some(symbol);
         }
 
         None
+    }
+}
+
+impl NodeTracker for PhpParser {
+    fn get_handled_nodes(&self) -> &std::collections::HashSet<crate::parsing::HandledNode> {
+        self.node_tracker.get_handled_nodes()
+    }
+
+    fn register_handled_node(&mut self, node_kind: &str, node_id: u16) {
+        self.node_tracker.register_handled_node(node_kind, node_id);
     }
 }
 
@@ -826,23 +874,7 @@ impl LanguageParser for PhpParser {
         file_id: FileId,
         symbol_counter: &mut SymbolCounter,
     ) -> Vec<Symbol> {
-        // Reset context for each file
-        self.context = ParserContext::new();
-
-        let tree = match self.parser.parse(code, None) {
-            Some(tree) => tree,
-            None => return Vec::new(),
-        };
-
-        let mut symbols = Vec::with_capacity(64); // Reasonable initial capacity for most PHP files
-        self.extract_symbols_from_node(
-            tree.root_node(),
-            code,
-            file_id,
-            &mut symbols,
-            symbol_counter,
-        );
-        symbols
+        self.parse(code, file_id, symbol_counter)
     }
 
     fn as_any(&self) -> &dyn Any {

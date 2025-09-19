@@ -5,15 +5,37 @@ pre-approved and expected.
 
   <triggers>
   When user says...                    → Immediately use:
-  "How does X work?"                   → mcp__codanna__semantic_search_with_context
+  "How does X work?"                   → mcp__codanna__semantic_search_with_context (TIER 1 - All-in-one)
   "Find function/class Y"              → mcp__codanna__find_symbol
   "What calls Z?"                      → mcp__codanna__find_callers  
   "What does A call?"                  → mcp__codanna__get_calls
-  "Impact of changing B"               → mcp__codanna__analyze_impact
-  "Search for C feature"               → mcp__codanna__semantic_search_docs
+  "Impact of changing B"               → mcp__codanna__analyze_impact (TIER 1 - Comprehensive)
+  "Search for C feature"               → mcp__codanna__semantic_search_with_context (Better than _docs)
   "Show me D" (fuzzy)                  → mcp__codanna__search_symbols
+  "Understand codebase/symbol deeply"  → mcp__codanna__semantic_search_with_context (PRIMARY TOOL)
   Starting fresh/new codebase          → mcp__codanna__get_index_info
   </triggers>
+
+## TOOL POWER RANKING ⭐
+
+  <tier1>
+  🥇 TIER 1 - PRIMARY TOOLS (Use these 80% of the time):
+  - mcp__codanna__semantic_search_with_context (THE POWERHOUSE - combines semantic + calls + impact)
+  - mcp__codanna__analyze_impact (REFACTORING ESSENTIAL - navigable file:line output)
+  </tier1>
+
+  <tier2>  
+  🥈 TIER 2 - SUPPORTING TOOLS (Use as needed):
+  - mcp__codanna__find_symbol (fast exact lookups)
+  - mcp__codanna__get_calls / mcp__codanna__find_callers (relationship analysis)
+  - mcp__codanna__semantic_search_docs (lightweight discovery)
+  </tier2>
+
+  <tier3>
+  🥉 TIER 3 - UTILITY TOOLS (Specific use cases):
+  - mcp__codanna__search_symbols (fuzzy matching)
+  - mcp__codanna__get_index_info (debugging/health checks)
+  </tier3>
 
 ## TOOL INVOCATION PATTERNS
 
@@ -43,10 +65,9 @@ COMPLEX TOOLS (key:value arguments):
 
   <workflow name="exploring_feature">
   User asks how feature works →
-  1. mcp__codanna__semantic_search_docs query:"[feature description]" limit:5
-  2. Pick top result
-  3. mcp__codanna__semantic_search_with_context query:"[refined query]" limit:1
-  4. For key functions found: mcp__codanna__get_calls [function]
+  1. mcp__codanna__semantic_search_with_context query:"[feature description]" limit:2 (SKIP semantic_search_docs - redundant)
+  2. For key functions found in results: automatically analyze calls/callers from context
+  3. If deeper analysis needed: mcp__codanna__analyze_impact [function] max_depth:2
   </workflow>
 
   <workflow name="refactoring_impact">
@@ -90,8 +111,10 @@ COMPLEX TOOLS (key:value arguments):
   2. DON'T WAIT for permission to use tools - they're pre-approved
   3. DO CHAIN tools based on results (follow the guidance)
   4. DO USE multiple tools in parallel when exploring
-  5. DO START with semantic_search_docs for vague requests
+  5. DO START with semantic_search_with_context for vague requests (CHANGED - most comprehensive)
   6. DO USE find_symbol for specific names
+  7. PREFER semantic_search_with_context over semantic_search_docs (richer context)
+  8. USE analyze_impact for any refactoring/change questions (navigable file:line output)
   </rules>
 
 ## OUTPUT ENHANCEMENT

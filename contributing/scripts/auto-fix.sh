@@ -18,9 +18,8 @@ cargo fmt
 echo "✓ Code formatted"
 
 echo ""
-echo "2️⃣ Auto-fixing clippy issues..."
-cargo clippy --fix --allow-dirty --allow-staged
-cargo clippy --fix --allow-dirty --allow-staged --tests
+echo "2️⃣ Auto-fixing clippy issues (all targets and features)..."
+cargo clippy --all-targets --all-features --fix --allow-dirty --allow-staged
 echo "✓ Clippy fixes applied (where possible)"
 
 echo ""

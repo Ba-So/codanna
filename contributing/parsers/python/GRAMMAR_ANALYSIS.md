@@ -1,0 +1,202 @@
+# Python Grammar Analysis
+
+*Generated: 2025-09-13 22:47:31 UTC*
+
+## Statistics
+- Total nodes in grammar JSON: 129
+- Nodes found in comprehensive.py: 121
+- Nodes handled by parser: 120
+- Symbol kinds extracted: 6
+
+## ✅ Successfully Handled Nodes
+These nodes are in examples and handled by parser:
+- %
+- (
+- )
+- *
+- **
+- +
+- ,
+- -
+- ->
+- .
+- //
+- :
+- :=
+- <
+- <=
+- =
+- ==
+- >
+- @
+- [
+- ]
+- _
+- argument_list
+- as
+- as_pattern
+- as_pattern_target
+- assignment
+- async
+- attribute
+- await
+- binary_operator
+- block
+- call
+- case
+- case_clause
+- case_pattern
+- class
+- class_definition
+- class_pattern
+- comment
+- comparison_operator
+- decorated_definition
+- decorator
+- def
+- dict_pattern
+- dictionary
+- dictionary_comprehension
+- dictionary_splat
+- dictionary_splat_pattern
+- dotted_name
+- ellipsis
+- else
+- else_clause
+- except
+- except_clause
+- expression_list
+- finally
+- finally_clause
+- float
+- for
+- for_in_clause
+- for_statement
+- from
+- function_definition
+- generator_expression
+- generic_type
+- identifier
+- if
+- if_clause
+- if_statement
+- import
+- import_from_statement
+- import_statement
+- in
+- integer
+- interpolation
+- is
+- keyword_argument
+- lambda
+- lambda_parameters
+- list
+- list_comprehension
+- list_pattern
+- list_splat
+- list_splat_pattern
+- match
+- match_statement
+- module
+- named_expression
+- none
+- not
+- not in
+- pair
+- parameters
+- parenthesized_expression
+- pass
+- pass_statement
+- pattern_list
+- raise
+- raise_statement
+- return
+- return_statement
+- set_comprehension
+- splat_pattern
+- string
+- string_content
+- string_end
+- string_start
+- subscript
+- true
+- try
+- try_statement
+- type
+- type_conversion
+- type_parameter
+- typed_default_parameter
+- typed_parameter
+- yield
+- {
+- }
+
+## ⚠️ Implementation Gaps
+These nodes appear in comprehensive.py but aren't handled:
+- expression_statement
+
+## 📝 Missing from Examples
+These grammar nodes aren't in comprehensive.py:
+- _compound_statement
+- _simple_statement
+- aliased_import
+- assert_statement
+- augmented_assignment
+- boolean_operator
+- break_statement
+- chevron
+- complex_pattern
+- concatenated_string
+- conditional_expression
+- constrained_type
+- continue_statement
+- default_parameter
+- delete_statement
+- elif_clause
+- escape_interpolation
+- escape_sequence
+- except_group_clause
+- exec_statement
+- expression
+- false
+- format_expression
+- format_specifier
+- future_import_statement
+- global_statement
+- import_prefix
+- keyword_pattern
+- keyword_separator
+- line_continuation
+- member_type
+- nonlocal_statement
+- not_operator
+- parameter
+- parenthesized_list_splat
+- pattern
+- positional_separator
+- primary_expression
+- print_statement
+- relative_import
+- set
+- slice
+- splat_type
+- tuple
+- tuple_pattern
+- type_alias_statement
+- unary_operator
+- union_pattern
+- union_type
+- while_statement
+- wildcard_import
+- with_clause
+- with_item
+- with_statement
+
+## 🎯 Symbol Kinds Extracted
+- Class
+- Constant
+- Function
+- Method
+- Module
+- Variable
+

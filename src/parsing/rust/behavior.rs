@@ -9,6 +9,14 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 use tree_sitter::Language;
 
+/// Debug macro honoring global settings debug flag
+macro_rules! debug_global {
+    ($($arg:tt)*) => {
+        if crate::config::is_global_debug_enabled() {
+            eprintln!($($arg)*);
+        }
+    };
+}
 /// Rust language behavior implementation
 #[derive(Clone)]
 pub struct RustBehavior {
@@ -257,13 +265,109 @@ impl LanguageBehavior for RustBehavior {
             return true;
         }
 
-        // Case 2: Only do complex matching if we have the importing module context
+        // Case 1b: Handle crate:: prefix mismatch
+        // Import might be "crate::foo::Bar" but symbol might be stored as "foo::Bar"
+        if let Some(without_crate) = import_path.strip_prefix("crate::") {
+            // Remove "crate::" prefix
+            if without_crate == symbol_module_path {
+                return true;
+            }
+        }
+
+        // Case 1c: Reverse case - symbol has crate:: but import doesn't
+        if symbol_module_path.starts_with("crate::") && !import_path.starts_with("crate::") {
+            let symbol_without_crate = &symbol_module_path[7..];
+            if import_path == symbol_without_crate {
+                return true;
+            }
+        }
+
+        // Case 1d: Common re-export pattern
+        // Allow importing a re-exported name from a higher-level module:
+        // import_path:  crate::parsing::Name
+        // symbol_path:  crate::parsing::something::Name
+        // Heuristic: same trailing name, symbol path starts with import prefix + '::'
+        if let Some((import_prefix, import_name)) = import_path.rsplit_once("::") {
+            // Only apply when both sides end with the same name
+            if symbol_module_path.ends_with(&format!("::{import_name}")) {
+                // Direct prefix check
+                if symbol_module_path.starts_with(&format!("{import_prefix}::")) {
+                    debug_global!(
+                        "DEBUG: Rust re-export heuristic matched (direct): import='{}', symbol='{}'",
+                        import_path,
+                        symbol_module_path
+                    );
+                    return true;
+                }
+
+                // crate:: prefix normalization (import has crate::, symbol doesn't)
+                if let Some(without_crate) = import_prefix.strip_prefix("crate::") {
+                    if symbol_module_path.starts_with(&format!("{without_crate}::")) {
+                        debug_global!(
+                            "DEBUG: Rust re-export heuristic matched (import had crate::): import='{}', symbol='{}'",
+                            import_path,
+                            symbol_module_path
+                        );
+                        return true;
+                    }
+                }
+
+                // crate:: prefix normalization (symbol has crate::, import doesn't)
+                if symbol_module_path.starts_with("crate::")
+                    && !import_prefix.starts_with("crate::")
+                {
+                    let symbol_without_crate = &symbol_module_path[7..];
+                    if symbol_without_crate.starts_with(&format!("{import_prefix}::")) {
+                        debug_global!(
+                            "DEBUG: Rust re-export heuristic matched (symbol had crate::): import='{}', symbol='{}'",
+                            import_path,
+                            symbol_module_path
+                        );
+                        return true;
+                    }
+                }
+            }
+        }
+
+        // Case 2: Handle super:: imports
+        if import_path.starts_with("super::") {
+            if let Some(importing_mod) = importing_module {
+                let relative_path = import_path.strip_prefix("super::").unwrap(); // Safe: we checked starts_with
+
+                // super:: means go up one level from the importing module
+                // Example: In crate::parsing::rust, super::LanguageBehavior -> crate::parsing::LanguageBehavior
+                if let Some(parent) = importing_mod.rsplit_once("::") {
+                    let candidate = format!("{}::{}", parent.0, relative_path);
+                    if candidate == symbol_module_path {
+                        return true;
+                    }
+
+                    // Re-export heuristic for super:: imports:
+                    // If the symbol lives deeper under the parent module but has the same tail name,
+                    // consider it a match (common re-export pattern)
+                    if symbol_module_path.ends_with(&format!("::{relative_path}"))
+                        && (symbol_module_path.starts_with(&format!("{}::", parent.0))
+                            || symbol_module_path == parent.0)
+                    {
+                        debug_global!(
+                            "DEBUG: Rust re-export heuristic matched (super): import='{}', symbol='{}'",
+                            import_path,
+                            symbol_module_path
+                        );
+                        return true;
+                    }
+                }
+            }
+        }
+
+        // Case 3: Only do complex matching if we have the importing module context
         if let Some(importing_mod) = importing_module {
             // Check if it's a relative import (doesn't start with crate:: or std libs)
             if !import_path.starts_with("crate::")
                 && !import_path.starts_with("std::")
                 && !import_path.starts_with("core::")
                 && !import_path.starts_with("alloc::")
+                && !import_path.starts_with("super::")
             {
                 // Try as relative to importing module
                 // Example: helpers::func in crate::module -> crate::module::helpers::func
@@ -272,12 +376,42 @@ impl LanguageBehavior for RustBehavior {
                     return true;
                 }
 
+                // Re-export heuristic for relative import under importing module
+                if let Some((base, name)) = candidate.rsplit_once("::") {
+                    if symbol_module_path.ends_with(&format!("::{name}"))
+                        && (symbol_module_path.starts_with(&format!("{base}::"))
+                            || symbol_module_path == base)
+                    {
+                        debug_global!(
+                            "DEBUG: Rust re-export heuristic matched (relative): import='{}', symbol='{}'",
+                            import_path,
+                            symbol_module_path
+                        );
+                        return true;
+                    }
+                }
+
                 // Try as sibling module (same parent)
                 // Example: In crate::module::submodule, helpers::func -> crate::module::helpers::func
                 if let Some(parent) = importing_mod.rsplit_once("::") {
                     let sibling = format!("{}::{}", parent.0, import_path);
                     if sibling == symbol_module_path {
                         return true;
+                    }
+
+                    // Re-export heuristic for sibling resolution
+                    if let Some((base, name)) = sibling.rsplit_once("::") {
+                        if symbol_module_path.ends_with(&format!("::{name}"))
+                            && (symbol_module_path.starts_with(&format!("{base}::"))
+                                || symbol_module_path == base)
+                        {
+                            debug_global!(
+                                "DEBUG: Rust re-export heuristic matched (sibling): import='{}', symbol='{}'",
+                                import_path,
+                                symbol_module_path
+                            );
+                            return true;
+                        }
                     }
                 }
             }
@@ -298,6 +432,99 @@ mod tests {
             behavior.format_module_path("crate::module", "function"),
             "crate::module::function"
         );
+    }
+
+    #[test]
+    fn test_import_matches_symbol_reexport_cases() {
+        let behavior = RustBehavior::new();
+
+        // Exact match
+        assert!(behavior.import_matches_symbol(
+            "crate::parsing::LanguageBehavior",
+            "crate::parsing::LanguageBehavior",
+            Some("crate::parsing::rust")
+        ));
+
+        // crate:: prefix mismatch (import has crate::, symbol doesn't)
+        assert!(behavior.import_matches_symbol("crate::foo::Bar", "foo::Bar", Some("crate::foo")));
+
+        // Reverse crate:: mismatch (symbol has crate::, import doesn't)
+        assert!(behavior.import_matches_symbol("foo::Bar", "crate::foo::Bar", Some("crate::foo")));
+
+        // Re-export under deeper module (direct heuristic)
+        assert!(behavior.import_matches_symbol(
+            "crate::parsing::LanguageBehavior",
+            "crate::parsing::language_behavior::LanguageBehavior",
+            Some("crate::parsing::rust")
+        ));
+
+        // super:: import resolves to parent; symbol lives deeper under parent
+        assert!(behavior.import_matches_symbol(
+            "super::TypeScriptBehavior",
+            "crate::parsing::typescript::behavior::TypeScriptBehavior",
+            Some("crate::parsing::typescript::parser")
+        ));
+
+        // Relative import from module; symbol under submodule
+        assert!(behavior.import_matches_symbol(
+            "LanguageBehavior",
+            "crate::parsing::language_behavior::LanguageBehavior",
+            Some("crate::parsing")
+        ));
+
+        // Sibling import pattern; symbol under deeper sibling
+        assert!(behavior.import_matches_symbol(
+            "LanguageBehavior",
+            "crate::parsing::language_behavior::LanguageBehavior",
+            Some("crate::parsing::rust")
+        ));
+    }
+
+    #[test]
+    fn test_import_matches_symbol_negative_cases() {
+        let behavior = RustBehavior::new();
+
+        // Different tail name should not match
+        assert!(!behavior.import_matches_symbol(
+            "crate::parsing::Foo",
+            "crate::parsing::language_behavior::Bar",
+            Some("crate::parsing::rust")
+        ));
+
+        // Prefix mismatch should not match (import prefix doesn't match symbol prefix)
+        assert!(!behavior.import_matches_symbol(
+            "crate::utils::Helper",
+            "crate::parsing::utils::Helper",
+            Some("crate::utils")
+        ));
+
+        // super:: import but symbol lives outside parent module
+        assert!(!behavior.import_matches_symbol(
+            "super::Foo",
+            "crate::x::Foo",
+            Some("crate::a::b::c")
+        ));
+
+        // Relative import from module; symbol under unrelated module
+        assert!(!behavior.import_matches_symbol(
+            "helpers::func",
+            "crate::other::helpers::func",
+            Some("crate::module")
+        ));
+
+        // crate:: mismatch with different path should not match
+        assert!(!behavior.import_matches_symbol(
+            "crate::foo::Bar",
+            "crate::bar::Bar",
+            Some("crate::foo")
+        ));
+
+        // Sibling heuristic should not over-match across unrelated bases
+        assert!(!behavior.import_matches_symbol(
+            "LanguageBehavior",
+            "crate::other::language_behavior::LanguageBehavior",
+            Some("crate::parsing::rust")
+        ));
     }
 
     #[test]

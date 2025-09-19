@@ -446,6 +446,49 @@ const Button: React.FC<ButtonProps> = ({ onClick, children }) => (
   <button onClick={onClick}>{children}</button>
 );
 
+// React-style component with hooks (arrow function in const)
+/**
+ * A themed component that manages theme state
+ */
+const ThemeCustomizer = () => {
+  const theme = 'light';
+  const count = 0;
+  
+  const handleClick = () => {
+    console.log('Clicked');
+    toggleTheme();
+  };
+  
+  const toggleTheme = () => {
+    console.log('Toggling theme');
+  };
+  
+  return { theme, count, handleClick, toggleTheme };
+};
+
+// Helper function for theme component
+function updateGlobalTheme(newTheme: string): void {
+  console.log('Updating theme to:', newTheme);
+}
+
+// Another arrow function component pattern
+const UserCard = (user: User) => {
+  const formatDate = (date: Date) => date.toLocaleDateString();
+  
+  return {
+    name: user.name,
+    formattedDate: formatDate(user.createdAt)
+  };
+};
+
+// Nested arrow functions in const declarations
+const createHandler = (prefix: string) => {
+  const innerHandler = (value: string) => {
+    console.log(prefix + value);
+  };
+  return innerHandler;
+};
+
 // Variance annotations (4.7+)
 interface Producer<out T> {
   produce(): T;

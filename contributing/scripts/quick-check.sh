@@ -19,8 +19,8 @@ cargo fmt --all -- --check
 echo "✓ Formatting check passed"
 
 echo ""
-echo "2️⃣ Clippy strict mode..."
-cargo clippy --all-targets -- -D warnings
+echo "2️⃣ Clippy strict mode (all targets and features)..."
+cargo clippy --all-targets --all-features -- -D warnings
 echo "✓ Clippy check passed"
 
 echo ""

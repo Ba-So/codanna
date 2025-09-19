@@ -79,6 +79,36 @@ pub trait ResolutionScope: Send + Sync {
     }
 }
 
+/// Project-specific resolution enhancement
+///
+/// This trait allows languages to enhance their import resolution with
+/// project configuration (tsconfig.json, pyproject.toml, go.mod, etc.)
+pub trait ProjectResolutionEnhancer: Send + Sync {
+    /// Transform an import path using project-specific rules
+    ///
+    /// Returns None if no transformation is needed (use original path)
+    /// Returns Some(enhanced_path) if the import should be resolved differently
+    ///
+    /// # Examples
+    /// - TypeScript: "@app/utils" -> "src/app/utils"
+    /// - Python: ".utils" -> "mypackage.submodule.utils"
+    /// - Go: "old/pkg" -> "../new/pkg"
+    /// - PHP: "App\Utils" -> "src/Utils.php"
+    fn enhance_import_path(&self, import_path: &str, from_file: FileId) -> Option<String>;
+
+    /// Get all possible candidate paths for an import
+    ///
+    /// Some project configs support multiple target paths (e.g., TypeScript paths)
+    fn get_import_candidates(&self, import_path: &str, from_file: FileId) -> Vec<String> {
+        // Default: single enhancement or original
+        if let Some(enhanced) = self.enhance_import_path(import_path, from_file) {
+            vec![enhanced]
+        } else {
+            vec![import_path.to_string()]
+        }
+    }
+}
+
 /// Language-agnostic inheritance resolver
 ///
 /// Each language implements this trait to handle its inheritance model:

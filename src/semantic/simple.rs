@@ -156,7 +156,11 @@ impl SimpleSemanticSearch {
         query: &str,
         limit: usize,
     ) -> Result<Vec<(SymbolId, f32)>, SemanticSearchError> {
+        println!("SEARCH_DEBUG: search() called with query: '{query}', limit: {limit}");
+        println!("SEARCH_DEBUG: embeddings count: {}", self.embeddings.len());
+
         if self.embeddings.is_empty() {
+            println!("SEARCH_DEBUG: No embeddings found, returning NoEmbeddings error");
             return Err(SemanticSearchError::NoEmbeddings);
         }
 
@@ -217,8 +221,7 @@ impl SimpleSemanticSearch {
                 .filter(|(id, _)| {
                     self.symbol_languages
                         .get(id)
-                        .map(|l| l == lang)
-                        .unwrap_or(false)
+                        .is_some_and(|symbol_lang| symbol_lang == lang)
                 })
                 .collect()
         } else {
