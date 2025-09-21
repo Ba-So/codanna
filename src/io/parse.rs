@@ -254,6 +254,7 @@ pub fn execute_parse(
         Language::JavaScript => tree_sitter_javascript::LANGUAGE.into(),
         Language::Php => tree_sitter_php::LANGUAGE_PHP.into(),
         Language::Go => tree_sitter_go::LANGUAGE.into(),
+        Language::Nix => tree_sitter_nix::LANGUAGE.into(),
         Language::C => tree_sitter_c::LANGUAGE.into(),
         Language::Cpp => tree_sitter_cpp::LANGUAGE.into(),
     };
