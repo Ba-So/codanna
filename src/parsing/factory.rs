@@ -5,8 +5,8 @@
 
 use super::{
     CBehavior, CParser, CppBehavior, CppParser, GoBehavior, GoParser, Language, LanguageBehavior,
-    LanguageId, LanguageParser, PhpBehavior, PhpParser, PythonBehavior, PythonParser, RustBehavior,
-    RustParser, TypeScriptBehavior, TypeScriptParser, get_registry,
+    LanguageId, LanguageParser, NixBehavior, NixParser, PhpBehavior, PhpParser, PythonBehavior, 
+    PythonParser, RustBehavior, RustParser, TypeScriptBehavior, TypeScriptParser, get_registry,
 };
 use crate::{IndexError, IndexResult, Settings};
 use std::sync::Arc;
@@ -152,11 +152,9 @@ impl ParserFactory {
                 Ok(Box::new(parser))
             }
             Language::Nix => {
-                // TODO: Implement NixParser trait in Task 2
-                Err(IndexError::General(format!(
-                    "{} parser not yet fully implemented. Implementation in progress.",
-                    language.name()
-                )))
+                let parser = NixParser::new().map_err(|e| IndexError::General(e.to_string()))?;
+                Ok(Box::new(parser))
+            }
             Language::C => {
                 let parser = CParser::new().map_err(|e| IndexError::General(e.to_string()))?;
                 Ok(Box::new(parser))
@@ -247,10 +245,12 @@ impl ParserFactory {
                 }
             }
             Language::Nix => {
-                return Err(IndexError::General(format!(
-                    "{} parser not yet fully implemented. Implementation in progress.",
-                    language.name()
-                )));
+                let parser = NixParser::new().map_err(|e| IndexError::General(e.to_string()))?;
+                ParserWithBehavior {
+                    parser: Box::new(parser),
+                    behavior: Box::new(NixBehavior::new()),
+                }
+            }
             Language::C => {
                 let parser = CParser::new().map_err(|e| IndexError::General(e.to_string()))?;
                 ParserWithBehavior {
