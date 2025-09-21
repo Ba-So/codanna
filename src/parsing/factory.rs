@@ -157,6 +157,7 @@ impl ParserFactory {
                     "{} parser not yet fully implemented. Implementation in progress.",
                     language.name()
                 )))
+            }
             Language::C => {
                 let parser = CParser::new().map_err(|e| IndexError::General(e.to_string()))?;
                 Ok(Box::new(parser))
