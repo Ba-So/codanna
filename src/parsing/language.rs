@@ -14,6 +14,7 @@ pub enum Language {
     TypeScript,
     Php,
     Go,
+    Nix,
     C,
     Cpp,
 }
@@ -32,6 +33,7 @@ impl Language {
             Language::TypeScript => super::LanguageId::new("typescript"),
             Language::Php => super::LanguageId::new("php"),
             Language::Go => super::LanguageId::new("go"),
+            Language::Nix => super::LanguageId::new("nix"),
             Language::C => super::LanguageId::new("c"),
             Language::Cpp => super::LanguageId::new("cpp"),
         }
@@ -49,6 +51,7 @@ impl Language {
             "typescript" => Some(Language::TypeScript),
             "php" => Some(Language::Php),
             "go" => Some(Language::Go),
+            "nix" => Some(Language::Nix),
             "c" => Some(Language::C),
             "cpp" => Some(Language::Cpp),
             _ => None,
@@ -81,6 +84,7 @@ impl Language {
                 Some(Language::Php)
             }
             "go" | "go.mod" | "go.sum" => Some(Language::Go),
+            "nix" => Some(Language::Nix),
             "c" | "h" => Some(Language::C),
             "cpp" | "hpp" | "cc" | "cxx" | "hxx" => Some(Language::Cpp),
             _ => None,
@@ -105,6 +109,7 @@ impl Language {
                 "php", "php3", "php4", "php5", "php7", "php8", "phps", "phtml",
             ],
             Language::Go => &["go", "go.mod", "go.sum"],
+            Language::Nix => &["nix"],
             Language::C => &["c", "h"],
             Language::Cpp => &["cpp", "hpp", "cc", "cxx", "hxx"],
         }
@@ -119,6 +124,7 @@ impl Language {
             Language::TypeScript => "typescript",
             Language::Php => "php",
             Language::Go => "go",
+            Language::Nix => "nix",
             Language::C => "c",
             Language::Cpp => "cpp",
         }
@@ -133,6 +139,7 @@ impl Language {
             Language::TypeScript => "TypeScript",
             Language::Php => "PHP",
             Language::Go => "Go",
+            Language::Nix => "Nix",
             Language::C => "C",
             Language::Cpp => "C++",
         }
@@ -167,6 +174,7 @@ mod tests {
         assert_eq!(Language::from_extension("go"), Some(Language::Go));
         assert_eq!(Language::from_extension("go.mod"), Some(Language::Go));
         assert_eq!(Language::from_extension("go.sum"), Some(Language::Go));
+        assert_eq!(Language::from_extension("nix"), Some(Language::Nix));
         assert_eq!(Language::from_extension("txt"), None);
     }
 
@@ -204,6 +212,11 @@ mod tests {
             Language::from_path(Path::new("main.go")),
             Some(Language::Go)
         );
+        assert_eq!(
+            Language::from_path(Path::new("test.nix")),
+            Some(Language::Nix)
+        );
+        assert_eq!(Language::from_extension("go.sum"), Some(Language::Go));
         assert_eq!(Language::from_path(Path::new("main.c")), Some(Language::C));
         assert_eq!(
             Language::from_path(Path::new("header.h")),

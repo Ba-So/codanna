@@ -373,6 +373,7 @@ fn initialize_registry(registry: &mut LanguageRegistry) {
     super::php::register(registry);
     super::typescript::register(registry);
     super::go::register(registry);
+    super::nix::register(registry);
     super::c::register(registry);
     super::cpp::register(registry);
 

@@ -1,0 +1,1 @@
+- Prefer using **codanna** over **serena**

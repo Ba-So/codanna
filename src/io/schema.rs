@@ -360,7 +360,7 @@ pub fn impact_analysis_output<'a>(
 
 // Display implementation for text output
 
-impl<'a, T: fmt::Display> fmt::Display for UnifiedOutput<'a, T> {
+impl<T: fmt::Display> fmt::Display for UnifiedOutput<'_, T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match &self.data {
             OutputData::Items { items } => {

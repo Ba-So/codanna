@@ -8,13 +8,31 @@
       "command": "codanna",
       "args": ["serve", "--watch", "--watch-interval", "5"]
     },
-    "codanna-sse": {
-      "type": "sse",
-      "url": "http://127.0.0.1:8080/mcp/sse"
+    "serena": {
+      "type": "stdio",
+      "command": "serena-stdio",
+      "args": [
+        "/home/baso/dev/codanna"
+      ]
     },
-    "codanna-https": {
-      "type": "sse",
-      "url": "https://127.0.0.1:8443/mcp/sse"
+    "cargo": {
+      "type": "stdio",
+      "command": "cargo-mcp",
+      "args": [
+        "serve"
+      ],
+      "env": {}
+    },
+    "shrimp": {
+      "type": "stdio",
+      "command": "mcp-shrimp-task-manager",
+      "args": [],
+      "env": {
+        "DATA_DIR": ".shrimp",
+        "TEMPLATES_USE": "en",
+        "ENABLE_GUI": "true",
+        "MCP_PROMPT_EXECUTE_TASK_APPEND": "Additional Validation Criteria: relevant tests must pass, pre-commit hooks must pass, commit the changes. Additional Implementation Guides: Add reference to the appropriate agent to use."
+      }
     }
   }
 }

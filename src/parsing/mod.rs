@@ -8,6 +8,7 @@ pub mod import;
 pub mod language;
 pub mod language_behavior;
 pub mod method_call;
+pub mod nix;
 pub mod parser;
 pub mod php;
 pub mod python;
@@ -25,6 +26,8 @@ pub use import::Import;
 pub use language::Language;
 pub use language_behavior::{LanguageBehavior, LanguageMetadata};
 pub use method_call::MethodCall;
+pub use nix::{NixBehavior, NixParser};
+pub use parser::LanguageParser;
 pub use parser::{
     HandledNode, LanguageParser, NodeTracker, NodeTrackingState, safe_truncate_str,
     truncate_for_display,

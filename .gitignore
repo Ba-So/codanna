@@ -10,6 +10,12 @@
 
 # IDE
 .idea/
+.redis/
+.pg/
+.direnv
+.claude
+.serena
+.shrimp
 .vscode/
 
 # Tree-sitter development
