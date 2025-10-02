@@ -285,6 +285,19 @@ function sum(...numbers: number[]): number {
   return numbers.reduce((a, b) => a + b, 0);
 }
 
+// Variable declaration with var (legacy style)
+var legacyVariable = 'old-school';
+var anotherVar: number = 42;
+
+// Function expression
+const myFunc = function(x: number): number {
+  return x * 2;
+};
+
+const namedFuncExpr = function factorial(n: number): number {
+  return n <= 1 ? 1 : n * factorial(n - 1);
+};
+
 // Function overloading
 function parse(value: string): object;
 function parse(value: string, reviver: (key: string, value: any) => any): object;
@@ -322,7 +335,7 @@ function isUser(value: any): value is User {
 // Type assertions
 const someValue: unknown = 'Hello';
 const strLength1 = (someValue as string).length;
-const strLength2 = (<string>someValue).length;
+const strLength2 = (someValue as string).length;
 
 // Non-null assertion
 function processUser(user?: User) {
@@ -436,6 +449,7 @@ declare function require(module: string): any;
 
 // JSX/TSX
 const element = <div className="container">Hello World</div>;
+const selfClosing = <input type="text" />;
 
 interface ButtonProps {
   onClick: () => void;

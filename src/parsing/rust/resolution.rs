@@ -134,6 +134,20 @@ impl ResolutionScope for RustResolutionContext {
 
         // 5. Check if it's a path (contains ::)
         if name.contains("::") {
+            // CRITICAL FIX: First try to resolve the full qualified path directly
+            // This handles cases where we have the full module path stored (e.g., "crate::init::init_global_dirs")
+            // Check in all scopes for the full qualified name
+            if let Some(&id) = self.imported_symbols.get(name) {
+                return Some(id);
+            }
+            if let Some(&id) = self.module_symbols.get(name) {
+                return Some(id);
+            }
+            if let Some(&id) = self.crate_symbols.get(name) {
+                return Some(id);
+            }
+
+            // If full path not found, try to resolve as a 2-part path
             // Handle qualified names like Type::method or module::function
             let parts: Vec<&str> = name.split("::").collect();
             if parts.len() == 2 {
@@ -147,7 +161,7 @@ impl ResolutionScope for RustResolutionContext {
                     return self.resolve(method_or_func);
                 }
             }
-            // Can't resolve - likely external library
+            // Can't resolve - likely external library or multi-part path we don't support yet
             return None;
         }
 
@@ -456,5 +470,74 @@ impl RustTraitResolver {
         }
 
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{FileId, SymbolId};
+
+    #[test]
+    fn test_resolve_qualified_module_path() {
+        // This test demonstrates the bug where fully qualified module paths
+        // like "crate::init::init_global_dirs" are not resolved correctly
+        // even though the symbol exists with that exact module_path
+
+        let mut context = RustResolutionContext::new(FileId::new(1).unwrap());
+        let symbol_id = SymbolId::new(42).unwrap();
+
+        // FIRST: Test the current (broken) behavior
+        println!("\n=== Testing CURRENT behavior (bug demonstration) ===");
+
+        // Currently we only add by name
+        context.add_symbol(
+            "init_global_dirs".to_string(),
+            symbol_id,
+            ScopeLevel::Global,
+        );
+
+        // This works (resolving by name)
+        let result1 = context.resolve("init_global_dirs");
+        println!("Resolving 'init_global_dirs': {result1:?} (Expected: Some(SymbolId(42)))");
+        assert_eq!(result1, Some(symbol_id));
+
+        // This DOESN'T work - this is the bug!
+        let result2 = context.resolve("crate::init::init_global_dirs");
+        println!(
+            "Resolving 'crate::init::init_global_dirs': {result2:?} (Expected: Some(SymbolId(42)) but got None!)"
+        );
+
+        // Clear for next test
+        context.clear_local_scope();
+
+        println!("\n=== Testing PROPOSED FIX ===");
+
+        // THE FIX: Add BOTH the name AND the module_path as resolvable keys
+        context.add_symbol(
+            "init_global_dirs".to_string(),
+            symbol_id,
+            ScopeLevel::Global,
+        );
+        context.add_symbol(
+            "crate::init::init_global_dirs".to_string(),
+            symbol_id,
+            ScopeLevel::Global,
+        );
+
+        // Now both should work!
+        let result3 = context.resolve("init_global_dirs");
+        println!("Resolving 'init_global_dirs': {result3:?} (Expected: Some(SymbolId(42)))");
+        assert_eq!(result3, Some(symbol_id));
+
+        let result4 = context.resolve("crate::init::init_global_dirs");
+        println!(
+            "Resolving 'crate::init::init_global_dirs': {result4:?} (Expected: Some(SymbolId(42)))"
+        );
+        assert_eq!(
+            result4,
+            Some(symbol_id),
+            "With fix applied, qualified path should resolve!"
+        );
     }
 }

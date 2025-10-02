@@ -5,6 +5,112 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.18] - 2025-09-30
+
+### Added
+- JSX component usage tracking in TypeScript parser
+  - New `component_usages` field tracks function → component relationships
+  - `extract_jsx_uses_recursive()` traverses AST to find JSX elements
+  - `track_jsx_component_usage()` filters components by uppercase naming convention
+  - Supports `jsx_element` and `jsx_self_closing_element` nodes
+  - Generator functions (`generator_function_declaration`) included in function context
+- Test fixtures for JSX usage patterns
+  - Profile.tsx: React component with JSX
+  - test_documented_jsx.tsx: JSX with documentation
+  - test_jsx_same_file.tsx: JSX defined and used in same file
+  - test_jsx_usage.tsx: Multiple components using shared JSX
+
+### Changed
+- Audit reports regenerated to reflect JSX and generator function support
+- All language parser audit reports updated with latest node counts
+
+## [0.5.17] - 2025-09-29
+
+### Changed
+- Refactored relationship compatibility logic from indexer to language behaviors
+  - Moved `is_compatible_relationship` from SimpleIndexer to ResolutionScope trait
+  - Each language now controls its own relationship validation rules
+  - Cleaner separation between orchestration and language-specific logic
+
+### Fixed
+- UTF-8 character boundary parsing error when encountering Unicode characters
+  - Added `safe_substring_window()` utility for UTF-8-safe string slicing
+  - TypeScript parser now handles box-drawing characters and emojis correctly
+  - Prevents panic when checking for export modifiers before symbols
+  - Fixes Issue #38
+
+## [0.5.16] - 2025-09-28
+
+### Added
+- TypeScript path alias resolution with full cross-module support
+  - Aliases like `@/*` resolved to actual paths (`./src/*`)
+  - Symbols added by module_path for cross-module resolution
+  - Import paths enhanced at storage time for correct resolution
+- Default export visibility tracking for TypeScript
+  - `export default` symbols now marked as Public
+  - Enables proper cross-module access to default exports
+- React component relationship support
+  - Constants and Variables now callable (React functional components)
+  - Proper relationship tracking for component hierarchies
+
+### Changed
+- **BREAKING**: External stub symbols no longer created for unresolved imports
+  - Cleaner index without placeholder symbols
+  - Requires full project reindex: `codanna index --force`
+- TypeScript behavior enhanced with module_path resolution
+- Relationship validation extended for JavaScript/TypeScript patterns
+
+### Fixed
+- TypeScript imports using path aliases not resolving across modules
+- Default exported symbols incorrectly marked as Private
+- React components (Constants) not creating proper call relationships
+- Cross-module visibility checks for exported symbols
+
+### Migration Required
+To benefit from improved TypeScript resolution:
+```bash
+codanna index --force
+```
+
+## [0.5.15] - 2025-09-27
+
+### Added
+- Cross-module resolution: Full qualified path resolution for all languages
+  - Symbols now resolvable by both simple name and full module path
+  - Example: `crate::init::init_global_dirs`, `app.utils.helper.process_data`
+- Python parser: Methods now use qualified names (e.g., `Calculator.__init__`)
+- Resolution tests for Rust and Python cross-module calls
+- Architectural documentation: Universal vs language-specific concepts
+
+### Changed
+- **BREAKING**: Python method naming convention - requires reindexing Python codebases
+- Resolution context: Module paths added during symbol population
+
+### Fixed
+- Cross-module function calls not being resolved (e.g., `crate::module::function`)
+- Python parser tests updated for new qualified naming convention
+
+## [0.5.14] - 2025-09-25
+
+### Added
+- Global model cache system at `~/.codanna/models` for shared FastEmbed models across projects
+- Project registry tracking all indexed projects with unique IDs
+- `codanna init` command to initialize project structure and create model symlinks
+- Test isolation with separate directories (`~/.codanna-test`) for development
+
+### Changed
+- **BREAKING**: Existing `.fastembed_cache` directories must be deleted before running `init --force`
+- Model storage moved from per-project directories to global cache via symlinks
+- Settings validation now checks for proper initialization on startup
+
+
+### Migration Required
+To upgrade existing projects:
+```bash
+rm -rf .fastembed_cache
+codanna init --force
+```
+
 ## [0.5.13] - 2025-09-13
 
 ### Fixed

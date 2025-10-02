@@ -90,7 +90,12 @@ pub async fn serve_http(config: crate::Settings, watch: bool, bind: String) -> a
         let watcher_broadcaster = broadcaster.clone();
         let debounce_ms = config.file_watch.debounce_ms;
 
-        match FileSystemWatcher::new(watcher_indexer, debounce_ms, config.mcp.debug) {
+        match FileSystemWatcher::new(
+            watcher_indexer,
+            debounce_ms,
+            config.mcp.debug,
+            &config.index_path,
+        ) {
             Ok(watcher) => {
                 let watcher = watcher.with_broadcaster(watcher_broadcaster);
                 let watcher_ct = ct.clone();

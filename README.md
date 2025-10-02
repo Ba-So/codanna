@@ -116,14 +116,14 @@ codanna mcp semantic_search_docs query:"where do we resolve symbol references  0
 4. **Index** - Tantivy + memory-mapped symbol cache for <10ms lookups
 5. **Serve** - MCP protocol for AI assistants, ~300ms response time (HTTP/HTTPS) and stdio built-in (0.16s)
 
-## Claude
+## MCP Clients
 
-Drop codanna in as an MCP server, point Claude at it, and watch it stop hand-waving and start answering with receipts.
+Drop codanna in as an MCP server, point the agent at it, and watch it stop hand-waving and start answering with receipts.
 
-### MCP Plug-In
+### Claude Code
 
 ```json
-# Add this to your .mcp.json:
+# Add this to your local .mcp.json:
 {
   "mcpServers": {
     "codanna": {
@@ -132,6 +132,58 @@ Drop codanna in as an MCP server, point Claude at it, and watch it stop hand-wav
     }
   }
 }
+```
+
+### Claude Desktop
+
+For Claude Desktop, you need the `--config` flag since it runs from a different location.
+
+Configure in `~/Library/Application Support/Claude/claude_desktop_config.json` (Mac):
+
+```json
+{
+  "mcpServers": {
+    "codanna": {
+      "command": "codanna",
+      "args": ["--config", "/absolute/path/to/your/project/.codanna/settings.toml", "serve", "--watch"]
+    }
+  }
+}
+```
+
+Replace `/absolute/path/to/your/project/` with your actual project path.
+
+### Codex CLI
+
+Codanna works with Codex CLI as a standard MCP server.
+
+Configure in `~/.codex/config.toml`:
+
+```toml
+[mcp_servers.codanna]
+command = "codanna"
+args = ["serve", "--watch"]
+startup_timeout_ms = 20_000
+```
+
+### Agent Guidance
+
+For optimal usage, add to your project instructions (`CLAUDE.md`, `AGENTS.md` or your system prompt):
+
+```markdown
+## Codanna MCP Tools
+
+Tool priority:
+- **Tier 1**: semantic_search_with_context, analyze_impact
+- **Tier 2**: find_symbol, get_calls, find_callers
+- **Tier 3**: search_symbols, semantic_search_docs, get_index_info
+
+Workflow:
+1. semantic_search_with_context - Find relevant code with context
+2. analyze_impact - Map dependencies and change radius
+3. find_symbol, get_calls, find_callers - Get specific details
+
+Start with semantic search, then narrow with specific queries.
 ```
 
 **HTTP/HTTPS Server**
@@ -217,7 +269,6 @@ template = "Significant impact with {result_count} symbols. Break the change int
 -	Less narration. More execution.
 -	Grep‑and‑hope becomes directed hops. Yes, you are absolutely right!
 
-
 ### Claude Slash Commands
 
 Codanna includes custom slash commands for Claude that provide intelligent workflows for code exploration:
@@ -232,17 +283,6 @@ These commands use Codanna's MCP tools under the hood but provide guided workflo
 ## Configuration
 
 Lives in `.codanna/settings.toml`:
-
-```toml
-[semantic_search]
-enabled = true
-model = "AllMiniLML6V2"
-threshold = 0.6  # Similarity threshold (0-1)
-
-[indexing]
-parallel_threads = 16  # Auto-detected by default
-include_tests = true   # Index test files
-```
 
 ## Nerds Section
 
@@ -399,15 +439,6 @@ Parser benchmarks on a 750-symbol test file:
 | **TypeScript** | 82,156 symbols/sec | 8.2x faster ✓ | Production |
 | **PHP** | 68,432 symbols/sec | 6.8x faster ✓ | Production |
 | **Go** | 74,655 symbols/second  | 7.5x faster ✓ | Production |
-| JavaScript | - | - | Planned |
-
-Key achievements:
-- **Zero-cost abstractions**: All parsers use borrowed string slices with no allocations in hot paths
-- **Parallel processing**: Multi-threaded indexing that scales with CPU cores
-- **Memory efficiency**: Approximately 100 bytes per symbol including all metadata
-- **Real-time capability**: Fast enough for incremental parsing during editing
-- **Optimized CLI startup**: ~300ms for all operations (53x improvement from v0.2)
-- **JSON output**: Zero overhead - structured output adds <1ms to response time
 
 Run performance benchmarks:
 ```bash
@@ -454,7 +485,7 @@ sudo yum install pkgconfig openssl-devel
 sudo dnf install pkgconfig openssl-devel
 ```
 
-**macOS/Windows:** No additional dependencies required.
+**macOS:** No additional dependencies required.
 
 ## Current Limitations
 
@@ -462,26 +493,9 @@ sudo dnf install pkgconfig openssl-devel
 - Semantic search requires English documentation/comments
 - Windows support is experimental
 
-## Roadmap
-
-### Current Release: v0.5.13
+## Releases
 
 See [CHANGELOG.md](CHANGELOG.md) for detailed release notes and feature history.
-
-### Planned Features
-| Feature | Description | Status |
-|---------|-------------|--------|
-| JavaScript Support | Full JavaScript/ES6+ parser | ○ |
-| C# Support | C# with .NET ecosystem support | ○ |
-| Java Support | Java with class hierarchies | ○ |
-| Direct Semantic Search | `retrieve semantic` command | ○ |
-| Batch Operations | Process multiple symbols in one call | ○ |
-| Configuration Profiles | Environment-specific settings | ○ |
-| Machine-Readable Progress | JSON progress output | ○ |
-| Cross-Language References | Track references across languages | ○ |
-| Language Server Protocol | LSP integration for IDEs | ○ |
-
-**Legend:** ✓ Complete | → In Progress | ○ Planned
 
 ## Contributing
 

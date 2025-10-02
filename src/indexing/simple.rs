@@ -305,8 +305,23 @@ impl SimpleIndexer {
     pub fn load_semantic_search(&mut self, path: &Path, info: bool) -> IndexResult<bool> {
         use crate::semantic::{SemanticMetadata, SimpleSemanticSearch};
 
+        // Debug output to understand path resolution
+        if self.settings.debug || info {
+            eprintln!(
+                "DEBUG: Attempting to load semantic search from: {}",
+                path.display()
+            );
+        }
+
         // Check if semantic data exists
         if !SemanticMetadata::exists(path) {
+            if self.settings.debug || info {
+                eprintln!("DEBUG: Semantic metadata not found at: {}", path.display());
+                eprintln!(
+                    "DEBUG: Looking for: {}",
+                    path.join("metadata.json").display()
+                );
+            }
             return Ok(false);
         }
 
@@ -513,8 +528,8 @@ impl SimpleIndexer {
                     semantic.lock().unwrap().remove_embeddings(&symbol_ids);
 
                     // CRITICAL: Save embeddings to disk after removal to prevent cache desync
-                    let semantic_path = std::path::Path::new(".codanna/index/semantic");
-                    if let Err(e) = semantic.lock().unwrap().save(semantic_path) {
+                    let semantic_path = self.settings.index_path.join("semantic");
+                    if let Err(e) = semantic.lock().unwrap().save(&semantic_path) {
                         eprintln!(
                             "Warning: Failed to save semantic search after embedding removal: {e}"
                         );
@@ -1333,102 +1348,8 @@ impl SimpleIndexer {
         }
     }
 
-    /// Check if a relationship between two symbol kinds is valid
-    /// This is designed to be language-agnostic and permissive
-    fn is_compatible_relationship(
-        from_kind: crate::SymbolKind,
-        to_kind: crate::SymbolKind,
-        rel_kind: crate::RelationKind,
-    ) -> bool {
-        use crate::RelationKind::*;
-        use crate::SymbolKind::*;
-
-        match rel_kind {
-            Calls | CalledBy => {
-                // Executable code can call other executable code
-                // Extend to support module-level execution (e.g., Python module top-level)
-                // and class instantiation as a call target in dynamic languages.
-                let caller_can_call =
-                    |k: &crate::SymbolKind| matches!(k, Function | Method | Macro | Module);
-                let callee_can_be_called =
-                    |k: &crate::SymbolKind| matches!(k, Function | Method | Macro | Class);
-
-                caller_can_call(&from_kind) && callee_can_be_called(&to_kind)
-            }
-            Implements | ImplementedBy => {
-                // Types can implement interfaces/traits
-                let implementor = |k: &crate::SymbolKind| matches!(k, Struct | Enum | Class);
-                let interface = |k: &crate::SymbolKind| matches!(k, Trait | Interface);
-
-                match rel_kind {
-                    Implements => implementor(&from_kind) && interface(&to_kind),
-                    ImplementedBy => interface(&from_kind) && implementor(&to_kind),
-                    _ => unreachable!(),
-                }
-            }
-            Uses | UsedBy => {
-                // Most symbols can use/reference types and values
-                // Be permissive here as different languages have different rules
-                let can_use = |k: &crate::SymbolKind| {
-                    matches!(
-                        k,
-                        Function | Method | Struct | Class | Trait | Interface | Module | Enum
-                    )
-                };
-                let can_be_used = |k: &crate::SymbolKind| {
-                    matches!(
-                        k,
-                        Struct
-                            | Enum
-                            | Class
-                            | Trait
-                            | Interface
-                            | TypeAlias
-                            | Constant
-                            | Variable
-                            | Function
-                            | Method
-                    )
-                };
-
-                match rel_kind {
-                    Uses => can_use(&from_kind) && can_be_used(&to_kind),
-                    UsedBy => can_be_used(&from_kind) && can_use(&to_kind),
-                    _ => unreachable!(),
-                }
-            }
-            Defines | DefinedIn => {
-                // Containers can define members
-                let container = |k: &crate::SymbolKind| {
-                    matches!(k, Trait | Interface | Module | Struct | Enum | Class)
-                };
-                let member = |k: &crate::SymbolKind| {
-                    matches!(k, Method | Function | Constant | Field | Variable)
-                };
-
-                match rel_kind {
-                    Defines => container(&from_kind) && member(&to_kind),
-                    DefinedIn => member(&from_kind) && container(&to_kind),
-                    _ => unreachable!(),
-                }
-            }
-            Extends | ExtendedBy => {
-                // Types can extend other types (inheritance)
-                // In TypeScript: classes can extend classes, interfaces can extend interfaces
-                // In Rust: traits can extend traits (via supertraits)
-                let extendable =
-                    |k: &crate::SymbolKind| matches!(k, Class | Interface | Trait | Struct | Enum);
-                extendable(&from_kind) && extendable(&to_kind)
-            }
-            References | ReferencedBy => {
-                // Very permissive - almost anything can reference anything
-                // This is a catch-all for general references
-                true
-            }
-        }
-    }
-
-    /// Add a relationship to Tantivy
+    /// Check if a relationship between two symbol kinds is valid.
+    /// This is designed to be language-agnostic and permissive.
     fn add_relationship_internal(
         &mut self,
         from: SymbolId,
@@ -2282,13 +2203,10 @@ impl SimpleIndexer {
             unresolved.len()
         );
 
-        // Track which external symbols we've already created to avoid duplicates
-        // Key: (module_path, symbol_name), Value: SymbolId
-        let mut created_external_symbols: std::collections::HashMap<(String, String), SymbolId> =
-            std::collections::HashMap::new();
+        // No longer tracking external symbols since we don't create them anymore
 
         // Track the symbol counter to ensure unique IDs
-        let mut symbol_counter = self.get_next_symbol_counter()?;
+        let symbol_counter = self.get_next_symbol_counter()?;
 
         for rel in &unresolved {
             debug_print!(
@@ -2323,32 +2241,14 @@ impl SimpleIndexer {
                                 if let Some((module_path, symbol_name)) =
                                     behavior.resolve_external_call_target(&target, rel.file_id)
                                 {
-                                    let key = (module_path.clone(), symbol_name.clone());
-                                    if let std::collections::hash_map::Entry::Vacant(e) =
-                                        created_external_symbols.entry(key)
-                                    {
-                                        debug_print!(
-                                            self,
-                                            "Pre-creating external symbol: {}::{}",
-                                            module_path,
-                                            symbol_name
-                                        );
-                                        if let Some(lang_id) =
-                                            self.file_languages.get(&rel.file_id).copied()
-                                        {
-                                            // Create the external symbol now
-                                            if let Ok(symbol_id) = behavior.create_external_symbol(
-                                                &mut self.document_index,
-                                                &module_path,
-                                                &symbol_name,
-                                                lang_id,
-                                            ) {
-                                                e.insert(symbol_id);
-                                                // Advance the counter to track the next ID
-                                                let _ = symbol_counter.next_id();
-                                            }
-                                        }
-                                    }
+                                    // Skip external symbol creation - we don't want to pollute the index
+                                    // with stub files for unresolved imports
+                                    debug_print!(
+                                        self,
+                                        "Skipping external symbol creation for: {}::{}",
+                                        module_path,
+                                        symbol_name
+                                    );
                                 }
                                 break;
                             }
@@ -2365,30 +2265,14 @@ impl SimpleIndexer {
                     if let Some((module_path, symbol_name)) =
                         behavior.resolve_external_call_target(&rel.to_name, rel.file_id)
                     {
-                        let key = (module_path.clone(), symbol_name.clone());
-                        if let std::collections::hash_map::Entry::Vacant(e) =
-                            created_external_symbols.entry(key)
-                        {
-                            debug_print!(
-                                self,
-                                "Pre-creating external symbol: {}::{}",
-                                module_path,
-                                symbol_name
-                            );
-                            if let Some(lang_id) = self.file_languages.get(&rel.file_id).copied() {
-                                // Create the external symbol now
-                                if let Ok(symbol_id) = behavior.create_external_symbol(
-                                    &mut self.document_index,
-                                    &module_path,
-                                    &symbol_name,
-                                    lang_id,
-                                ) {
-                                    e.insert(symbol_id);
-                                    // Advance the counter to track the next ID
-                                    let _ = symbol_counter.next_id();
-                                }
-                            }
-                        }
+                        // Skip external symbol creation - we don't want to pollute the index
+                        // with stub files for unresolved imports
+                        debug_print!(
+                            self,
+                            "Skipping external symbol pre-creation for: {}::{}",
+                            module_path,
+                            symbol_name
+                        );
                     }
                 }
             }
@@ -2399,15 +2283,9 @@ impl SimpleIndexer {
             self.update_symbol_counter(&symbol_counter)?;
         }
 
-        // Commit the external symbols so they're searchable
-        debug_print!(self, "Committing pre-created external symbols");
-        self.commit_tantivy_batch()?;
-
-        // Rebuild symbol cache to include the new external symbols
-        debug_print!(self, "Rebuilding symbol cache with external symbols");
-        if let Err(e) = self.build_symbol_cache() {
-            debug_print!(self, "Warning: Failed to rebuild symbol cache: {}", e);
-        }
+        // No longer creating external symbols, so skip the external symbol commit
+        // External symbols are a wrong design decision - we don't want to pollute
+        // the index with stub files for unresolved imports
 
         // Start a new batch for relationship updates
         self.start_tantivy_batch()?;
@@ -2550,23 +2428,15 @@ impl SimpleIndexer {
                             if let Some((module_path, symbol_name)) =
                                 behavior.resolve_external_call_target(&to_key, file_id)
                             {
+                                // Skip external symbol creation for resolved external calls
                                 debug_print!(
                                     self,
-                                    "External call resolved: {} -> {}::{}",
+                                    "Skipping external symbol for resolved call: {} -> {}::{}",
                                     to_key,
                                     module_path,
                                     symbol_name
                                 );
-                                if let Some(lang_id) = self.file_languages.get(&file_id).copied() {
-                                    Some(behavior.create_external_symbol(
-                                        &mut self.document_index,
-                                        &module_path,
-                                        &symbol_name,
-                                        lang_id,
-                                    )?)
-                                } else {
-                                    None
-                                }
+                                None
                             } else {
                                 None
                             }
@@ -2599,23 +2469,15 @@ impl SimpleIndexer {
                             if let Some((module_path, symbol_name)) =
                                 behavior.resolve_external_call_target(&rel.to_name, file_id)
                             {
+                                // Skip external symbol creation for mapped external calls
                                 debug_print!(
                                     self,
-                                    "External call target mapped: {} -> {}::{}",
+                                    "Skipping external symbol for mapped call: {} -> {}::{}",
                                     rel.to_name,
                                     module_path,
                                     symbol_name
                                 );
-                                if let Some(lang_id) = self.file_languages.get(&file_id).copied() {
-                                    Some(behavior.create_external_symbol(
-                                        &mut self.document_index,
-                                        &module_path,
-                                        &symbol_name,
-                                        lang_id,
-                                    )?)
-                                } else {
-                                    None
-                                }
+                                None
                             } else {
                                 None
                             }
@@ -2629,10 +2491,11 @@ impl SimpleIndexer {
 
                 let to_symbol_id = match to_symbol_id {
                     Some(id) => {
-                        debug_print!(self, "Resolved target symbol to: {:?}", id);
-                        eprintln!(
-                            "DEBUG: Resolved target symbol '{}' to ID: {:?}",
-                            rel.to_name, id
+                        debug_print!(
+                            self,
+                            "Resolved target symbol '{}' to ID: {:?}",
+                            rel.to_name,
+                            id
                         );
                         id
                     }
@@ -2678,9 +2541,14 @@ impl SimpleIndexer {
                         to_symbol.name
                     );
 
-                    // Check symbol kind compatibility
-                    if !Self::is_compatible_relationship(from_symbol.kind, to_symbol.kind, rel.kind)
-                    {
+                    // Check symbol kind compatibility using language behavior
+                    let behavior = self.get_behavior_for_file(file_id)?;
+                    if !behavior.is_compatible_relationship(
+                        from_symbol.kind,
+                        to_symbol.kind,
+                        rel.kind,
+                        file_id,
+                    ) {
                         debug_print!(
                             self,
                             "Incompatible relationship: {} ({:?}) -> {} ({:?}) for {:?}",
@@ -3428,203 +3296,9 @@ pub struct Another {
         assert_eq!(SimpleIndexer::module_proximity(None, None), 4);
     }
 
-    #[test]
-    fn test_is_compatible_relationship_calls() {
-        // Valid call relationships - executable code calling executable code
-        assert!(SimpleIndexer::is_compatible_relationship(
-            SymbolKind::Function,
-            SymbolKind::Function,
-            RelationKind::Calls
-        ));
-        assert!(SimpleIndexer::is_compatible_relationship(
-            SymbolKind::Method,
-            SymbolKind::Function,
-            RelationKind::Calls
-        ));
-        assert!(SimpleIndexer::is_compatible_relationship(
-            SymbolKind::Function,
-            SymbolKind::Method,
-            RelationKind::Calls
-        ));
-        assert!(SimpleIndexer::is_compatible_relationship(
-            SymbolKind::Macro,
-            SymbolKind::Function,
-            RelationKind::Calls
-        ));
-
-        // Invalid call relationships - non-executable code
-        assert!(!SimpleIndexer::is_compatible_relationship(
-            SymbolKind::Struct,
-            SymbolKind::Function,
-            RelationKind::Calls
-        ));
-        assert!(!SimpleIndexer::is_compatible_relationship(
-            SymbolKind::Trait,
-            SymbolKind::Method,
-            RelationKind::Calls
-        ));
-        assert!(!SimpleIndexer::is_compatible_relationship(
-            SymbolKind::Function,
-            SymbolKind::Struct,
-            RelationKind::Calls
-        ));
-        assert!(!SimpleIndexer::is_compatible_relationship(
-            SymbolKind::Constant,
-            SymbolKind::Function,
-            RelationKind::Calls
-        ));
-    }
-
-    #[test]
-    fn test_is_compatible_relationship_implements() {
-        // Valid implements relationships - types implementing interfaces
-        assert!(SimpleIndexer::is_compatible_relationship(
-            SymbolKind::Struct,
-            SymbolKind::Trait,
-            RelationKind::Implements
-        ));
-        assert!(SimpleIndexer::is_compatible_relationship(
-            SymbolKind::Enum,
-            SymbolKind::Trait,
-            RelationKind::Implements
-        ));
-        assert!(SimpleIndexer::is_compatible_relationship(
-            SymbolKind::Class,
-            SymbolKind::Interface,
-            RelationKind::Implements
-        ));
-        assert!(SimpleIndexer::is_compatible_relationship(
-            SymbolKind::Class,
-            SymbolKind::Trait,
-            RelationKind::Implements
-        ));
-
-        // Invalid implements relationships
-        assert!(!SimpleIndexer::is_compatible_relationship(
-            SymbolKind::Function,
-            SymbolKind::Trait,
-            RelationKind::Implements
-        ));
-        assert!(!SimpleIndexer::is_compatible_relationship(
-            SymbolKind::Struct,
-            SymbolKind::Function,
-            RelationKind::Implements
-        ));
-        assert!(!SimpleIndexer::is_compatible_relationship(
-            SymbolKind::Trait,
-            SymbolKind::Struct,
-            RelationKind::Implements
-        ));
-    }
-
-    #[test]
-    fn test_is_compatible_relationship_uses() {
-        // Valid uses relationships - language agnostic
-        assert!(SimpleIndexer::is_compatible_relationship(
-            SymbolKind::Function,
-            SymbolKind::Struct,
-            RelationKind::Uses
-        ));
-        assert!(SimpleIndexer::is_compatible_relationship(
-            SymbolKind::Method,
-            SymbolKind::Enum,
-            RelationKind::Uses
-        ));
-        assert!(SimpleIndexer::is_compatible_relationship(
-            SymbolKind::Class,
-            SymbolKind::Interface,
-            RelationKind::Uses
-        ));
-        assert!(SimpleIndexer::is_compatible_relationship(
-            SymbolKind::Module,
-            SymbolKind::TypeAlias,
-            RelationKind::Uses
-        ));
-        assert!(SimpleIndexer::is_compatible_relationship(
-            SymbolKind::Function,
-            SymbolKind::Constant,
-            RelationKind::Uses
-        ));
-        assert!(SimpleIndexer::is_compatible_relationship(
-            SymbolKind::Method,
-            SymbolKind::Variable,
-            RelationKind::Uses
-        ));
-
-        // Invalid uses relationships - what can't use things
-        assert!(!SimpleIndexer::is_compatible_relationship(
-            SymbolKind::Constant,
-            SymbolKind::Struct,
-            RelationKind::Uses
-        ));
-        assert!(!SimpleIndexer::is_compatible_relationship(
-            SymbolKind::Variable,
-            SymbolKind::Class,
-            RelationKind::Uses
-        ));
-        assert!(!SimpleIndexer::is_compatible_relationship(
-            SymbolKind::Field,
-            SymbolKind::Function,
-            RelationKind::Uses
-        ));
-    }
-
-    #[test]
-    fn test_is_compatible_relationship_defines() {
-        // Valid defines relationships - containers defining members
-        assert!(SimpleIndexer::is_compatible_relationship(
-            SymbolKind::Trait,
-            SymbolKind::Method,
-            RelationKind::Defines
-        ));
-        assert!(SimpleIndexer::is_compatible_relationship(
-            SymbolKind::Module,
-            SymbolKind::Function,
-            RelationKind::Defines
-        ));
-        assert!(SimpleIndexer::is_compatible_relationship(
-            SymbolKind::Struct,
-            SymbolKind::Field,
-            RelationKind::Defines
-        ));
-        assert!(SimpleIndexer::is_compatible_relationship(
-            SymbolKind::Class,
-            SymbolKind::Method,
-            RelationKind::Defines
-        ));
-        assert!(SimpleIndexer::is_compatible_relationship(
-            SymbolKind::Interface,
-            SymbolKind::Method,
-            RelationKind::Defines
-        ));
-        assert!(SimpleIndexer::is_compatible_relationship(
-            SymbolKind::Enum,
-            SymbolKind::Constant,
-            RelationKind::Defines
-        ));
-
-        // Invalid defines relationships - non-containers
-        assert!(!SimpleIndexer::is_compatible_relationship(
-            SymbolKind::Function,
-            SymbolKind::Method,
-            RelationKind::Defines
-        ));
-        assert!(!SimpleIndexer::is_compatible_relationship(
-            SymbolKind::Method,
-            SymbolKind::Function,
-            RelationKind::Defines
-        ));
-        assert!(!SimpleIndexer::is_compatible_relationship(
-            SymbolKind::Variable,
-            SymbolKind::Field,
-            RelationKind::Defines
-        ));
-    }
-
     // ===== Stage 3 Baseline Tests =====
     // These tests capture the CURRENT behavior of configure_symbol
     // to ensure refactoring doesn't change functionality
-
     #[test]
     fn test_configure_symbol_baseline_rust() {
         use crate::parsing::RustBehavior;

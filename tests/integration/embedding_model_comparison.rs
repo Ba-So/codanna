@@ -7,6 +7,16 @@ use anyhow::Result;
 use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
 use std::time::Instant;
 
+/// Get a unique cache directory for each test to avoid conflicts
+fn get_test_cache_dir(test_name: &str) -> std::path::PathBuf {
+    let temp_dir = std::env::temp_dir();
+    temp_dir.join(format!(
+        "codanna_test_fastembed_{}_{}",
+        test_name,
+        std::process::id()
+    ))
+}
+
 /// Test case for code similarity
 struct CodeExample {
     name: &'static str,
@@ -33,7 +43,11 @@ struct ModelEvaluation {
 }
 
 #[test]
+#[ignore = "Downloads 86MB model - run with --ignored for embedding benchmarks"]
 fn compare_embedding_models() -> Result<()> {
+    // Use a unique cache directory for this test
+    let cache_dir = get_test_cache_dir("compare_embedding_models");
+
     // Define test cases
     let test_cases = vec![
         CodeExample {
@@ -79,7 +93,7 @@ fn compare_embedding_models() -> Result<()> {
 
     for model_type in models {
         println!("\n=== Evaluating {model_type:?} ===");
-        let result = evaluate_model(model_type, &test_cases)?;
+        let result = evaluate_model(model_type, &test_cases, cache_dir.clone())?;
         println!("{result:#?}");
         results.push(result);
     }
@@ -114,6 +128,7 @@ fn compare_embedding_models() -> Result<()> {
 fn evaluate_model(
     model_type: EmbeddingModel,
     test_cases: &[CodeExample],
+    cache_dir: std::path::PathBuf,
 ) -> Result<ModelEvaluation> {
     let start = Instant::now();
 
@@ -121,8 +136,11 @@ fn evaluate_model(
     let model_name = format!("{model_type:?}");
 
     // Initialize model
-    let mut model =
-        TextEmbedding::try_new(InitOptions::new(model_type).with_show_download_progress(true))?;
+    let mut model = TextEmbedding::try_new(
+        InitOptions::new(model_type)
+            .with_cache_dir(cache_dir.clone())
+            .with_show_download_progress(true),
+    )?;
 
     let init_time = start.elapsed();
     println!("Model initialization: {init_time:?}");
@@ -205,7 +223,11 @@ fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
 }
 
 #[test]
+#[ignore = "Downloads 86MB model - run with --ignored for embedding tests"]
 fn test_code_specific_similarity() -> Result<()> {
+    // Use a unique cache directory for this test
+    let cache_dir = get_test_cache_dir("test_code_specific_similarity");
+
     // Test with actual code documentation examples
     let code_docs = vec![
         (
@@ -227,7 +249,9 @@ fn test_code_specific_similarity() -> Result<()> {
 
     // Use the default model for now
     let mut model = TextEmbedding::try_new(
-        InitOptions::new(EmbeddingModel::AllMiniLML6V2).with_show_download_progress(false),
+        InitOptions::new(EmbeddingModel::AllMiniLML6V2)
+            .with_cache_dir(cache_dir)
+            .with_show_download_progress(false),
     )?;
 
     println!("\n=== Code Documentation Similarity Test ===");
@@ -258,10 +282,16 @@ fn test_code_specific_similarity() -> Result<()> {
 }
 
 #[test]
+#[ignore = "Downloads 86MB model - run with --ignored for embedding tests"]
 fn test_similarity_thresholds() -> Result<()> {
+    // Use a unique cache directory for this test
+    let cache_dir = get_test_cache_dir("test_similarity_thresholds");
+
     // Test to find optimal similarity thresholds
     let mut model = TextEmbedding::try_new(
-        InitOptions::new(EmbeddingModel::AllMiniLML6V2).with_show_download_progress(false),
+        InitOptions::new(EmbeddingModel::AllMiniLML6V2)
+            .with_cache_dir(cache_dir)
+            .with_show_download_progress(false),
     )?;
 
     // Pairs with known relationships

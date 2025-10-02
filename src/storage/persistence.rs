@@ -25,12 +25,6 @@ impl IndexPersistence {
         self.base_path.join("semantic")
     }
 
-    /// Check if semantic data exists
-    fn has_semantic_data(&self) -> bool {
-        // Check if metadata exists - that's the definitive indicator
-        self.semantic_path().join("metadata.json").exists()
-    }
-
     /// Save metadata for the index
     #[must_use = "Save errors should be handled to ensure data is persisted"]
     pub fn save(&self, indexer: &SimpleIndexer) -> IndexResult<()> {
@@ -48,6 +42,9 @@ impl IndexPersistence {
         };
 
         metadata.save(&self.base_path)?;
+
+        // Update project registry with latest metadata
+        self.update_project_registry(&metadata)?;
 
         // Save semantic search if enabled
         if indexer.has_semantic_search() {
@@ -94,6 +91,9 @@ impl IndexPersistence {
         // Check if Tantivy index exists
         let tantivy_path = self.base_path.join("tantivy");
         if tantivy_path.join("meta.json").exists() {
+            // Extract debug flag before moving settings
+            let debug = settings.debug;
+
             // Create indexer that will load from Tantivy
             // Note: skip_trait_resolver no longer needed - behaviors handle resolution now
             let mut indexer = if skip_trait_resolver {
@@ -130,20 +130,29 @@ impl IndexPersistence {
                 }
             }
 
-            // NEW: Load semantic search if it exists
-            if self.has_semantic_data() {
-                let semantic_path = self.semantic_path();
-                match indexer.load_semantic_search(&semantic_path, info) {
-                    Ok(true) => {
-                        // Successfully loaded (message already printed by load_semantic_search)
+            // NEW: Always try to load semantic search - let the actual load determine if data exists
+            // This is more robust than checking filesystem paths which can fail due to resolution issues
+            let semantic_path = self.semantic_path();
+            if info || debug {
+                eprintln!("DEBUG: Persistence base_path: {}", self.base_path.display());
+                eprintln!(
+                    "DEBUG: Semantic path computed as: {}",
+                    semantic_path.display()
+                );
+            }
+            match indexer.load_semantic_search(&semantic_path, info) {
+                Ok(true) => {
+                    // Successfully loaded (message already printed by load_semantic_search)
+                }
+                Ok(false) => {
+                    // No semantic data found - this is fine, semantic search is optional
+                    if info || debug {
+                        eprintln!("DEBUG: No semantic data found (this is optional)");
                     }
-                    Ok(false) => {
-                        // No semantic data found (shouldn't happen if has_semantic_data() was true)
-                    }
-                    Err(e) => {
-                        // Log error but continue - semantic search is optional
-                        eprintln!("Warning: Failed to load semantic search: {e}");
-                    }
+                }
+                Err(e) => {
+                    // Log error but continue - semantic search is optional
+                    eprintln!("Warning: Failed to load semantic search: {e}");
                 }
             }
 
@@ -174,20 +183,79 @@ impl IndexPersistence {
         }
         Ok(())
     }
+
+    /// Update the project registry with latest metadata
+    fn update_project_registry(&self, metadata: &IndexMetadata) -> IndexResult<()> {
+        // Try to read the project ID file
+        let local_dir = crate::init::local_dir_name();
+        let project_id_path = PathBuf::from(local_dir).join(".project-id");
+
+        if !project_id_path.exists() {
+            // No project ID file means project wasn't registered during init
+            // This is fine for legacy projects
+            return Ok(());
+        }
+
+        let project_id =
+            std::fs::read_to_string(&project_id_path).map_err(|e| IndexError::FileRead {
+                path: project_id_path.clone(),
+                source: e,
+            })?;
+
+        // Load the registry
+        let mut registry = crate::init::ProjectRegistry::load()
+            .map_err(|e| IndexError::General(format!("Failed to load project registry: {e}")))?;
+
+        // Update the project metadata
+        if let Some(project) = registry.find_project_by_id_mut(&project_id) {
+            project.symbol_count = metadata.symbol_count;
+            project.file_count = metadata.file_count;
+            project.last_modified = metadata.last_modified;
+
+            // Get doc count from data source
+            if let DataSource::Tantivy { doc_count, .. } = &metadata.data_source {
+                project.doc_count = *doc_count;
+            }
+
+            // Save the updated registry
+            registry.save().map_err(|e| {
+                IndexError::General(format!("Failed to save project registry: {e}"))
+            })?;
+        }
+
+        Ok(())
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
     use tempfile::TempDir;
+
+    /// Check if semantic data exists (test helper)
+    fn has_semantic_data(persistence: &IndexPersistence) -> bool {
+        // Check if metadata exists - that's the definitive indicator
+        persistence.semantic_path().join("metadata.json").exists()
+    }
 
     #[test]
     fn test_save_and_load() {
         let temp_dir = TempDir::new().unwrap();
+
+        // Create a custom settings with temp_dir as the index path
+        let settings = Settings {
+            index_path: temp_dir.path().to_path_buf(),
+            ..Settings::default()
+        };
+
         let persistence = IndexPersistence::new(temp_dir.path().to_path_buf());
 
-        // Create an indexer
-        let indexer = SimpleIndexer::new();
+        // Create required directories for the indexer
+        std::fs::create_dir_all(temp_dir.path().join("tantivy")).unwrap();
+
+        // Create an indexer with custom settings
+        let indexer = SimpleIndexer::with_settings(Arc::new(settings));
 
         // Save it
         persistence.save(&indexer).unwrap();
@@ -224,13 +292,13 @@ mod tests {
         assert_eq!(semantic_path, temp_dir.path().join("semantic"));
 
         // Initially has no semantic data
-        assert!(!persistence.has_semantic_data());
+        assert!(!has_semantic_data(&persistence));
 
         // Create semantic directory and metadata file
         std::fs::create_dir_all(&semantic_path).unwrap();
         std::fs::write(semantic_path.join("metadata.json"), "{}").unwrap();
 
         // Now has semantic data
-        assert!(persistence.has_semantic_data());
+        assert!(has_semantic_data(&persistence));
     }
 }

@@ -1,17 +1,16 @@
 # TypeScript Grammar Analysis
 
-*Generated: 2025-09-13 22:47:31 UTC*
+*Generated: 2025-09-30 23:32:49 UTC*
 
 ## Statistics
 - Total nodes in grammar JSON: 183
-- Nodes found in comprehensive.ts: 193
-- Nodes handled by parser: 187
-- Symbol kinds extracted: 8
+- Nodes found in comprehensive.ts: 203
+- Nodes handled by parser: 189
+- Symbol kinds extracted: 9
 
 ## ✅ Successfully Handled Nodes
 These nodes are in examples and handled by parser:
 - !
-- "
 - ${
 - &
 - &&
@@ -27,6 +26,7 @@ These nodes are in examples and handled by parser:
 - :
 - ;
 - <
+- </
 - <<
 - <=
 - =
@@ -48,6 +48,7 @@ These nodes are in examples and handled by parser:
 - any
 - arguments
 - array
+- array_pattern
 - array_type
 - arrow_function
 - as
@@ -64,6 +65,7 @@ These nodes are in examples and handled by parser:
 - class_declaration
 - class_heritage
 - comment
+- computed_property_name
 - conditional_type
 - const
 - constraint
@@ -83,12 +85,14 @@ These nodes are in examples and handled by parser:
 - extends_type_clause
 - false
 - for
+- for_statement
 - formal_parameters
 - from
 - function
 - function_declaration
 - function_signature
 - function_type
+- generator_function_declaration
 - generic_type
 - get
 - global
@@ -110,7 +114,13 @@ These nodes are in examples and handled by parser:
 - internal_module
 - intersection_type
 - is
+- jsx_attribute
+- jsx_closing_element
+- jsx_element
+- jsx_expression
+- jsx_opening_element
 - keyof
+- let
 - lexical_declaration
 - literal_type
 - lookup_type
@@ -122,6 +132,7 @@ These nodes are in examples and handled by parser:
 - named_imports
 - namespace
 - namespace_import
+- nested_type_identifier
 - never
 - new
 - new_expression
@@ -129,7 +140,6 @@ These nodes are in examples and handled by parser:
 - null
 - number
 - object
-- object_pattern
 - object_type
 - opting_type_annotation
 - optional_parameter
@@ -138,6 +148,7 @@ These nodes are in examples and handled by parser:
 - parenthesized_type
 - predefined_type
 - private
+- program
 - property_identifier
 - property_signature
 - protected
@@ -150,8 +161,6 @@ These nodes are in examples and handled by parser:
 - return_statement
 - set
 - shorthand_property_identifier
-- shorthand_property_identifier_pattern
-- spread_element
 - statement_block
 - static
 - string
@@ -162,6 +171,7 @@ These nodes are in examples and handled by parser:
 - template_substitution
 - template_type
 - this
+- this_type
 - true
 - tuple_type
 - type
@@ -179,9 +189,11 @@ These nodes are in examples and handled by parser:
 - union_type
 - unknown
 - update_expression
+- variable_declaration
 - variable_declarator
 - void
 - while
+- while_statement
 - yield
 - yield_expression
 - {
@@ -190,22 +202,20 @@ These nodes are in examples and handled by parser:
 
 ## ⚠️ Implementation Gaps
 These nodes appear in comprehensive.ts but aren't handled:
-- /
-- array_pattern
-- computed_property_name
+- "
+- -
+- />
 - default
-- for_statement
-- generator_function_declaration
-- let
-- nested_type_identifier
-- program
-- regex
-- regex_pattern
+- function_expression
+- jsx_self_closing_element
+- jsx_text
+- object_pattern
 - satisfies
 - satisfies_expression
-- this_type
-- type_assertion
-- while_statement
+- shorthand_property_identifier_pattern
+- spread_element
+- ternary_expression
+- var
 
 ## 📝 Missing from Examples
 These grammar nodes aren't in comprehensive.ts:
@@ -233,7 +243,6 @@ These grammar nodes aren't in comprehensive.ts:
 - finally_clause
 - flow_maybe_type
 - for_in_statement
-- function_expression
 - generator_function
 - hash_bang_line
 - html_comment
@@ -257,7 +266,9 @@ These grammar nodes aren't in comprehensive.ts:
 - primary_type
 - private_property_identifier
 - readonly_type
+- regex
 - regex_flags
+- regex_pattern
 - rest_type
 - sequence_expression
 - statement
@@ -267,11 +278,10 @@ These grammar nodes aren't in comprehensive.ts:
 - switch_case
 - switch_default
 - switch_statement
-- ternary_expression
 - throw_statement
 - try_statement
+- type_assertion
 - type_query
-- variable_declaration
 - with_statement
 
 ## 🎯 Symbol Kinds Extracted
@@ -283,4 +293,5 @@ These grammar nodes aren't in comprehensive.ts:
 - Interface
 - Method
 - TypeAlias
+- Variable
 

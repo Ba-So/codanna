@@ -26,6 +26,14 @@ echo ""
 echo "📎 Clippy with project rules (strict mode with all targets and features)"
 cargo clippy --all-targets --all-features -- -D warnings
 
+# Build release binary first for all subsequent tests
+echo ""
+echo "🔨 Building release binary for testing (with all features)..."
+cargo build --release --all-features
+# Use absolute path to ensure tests can find it regardless of working directory
+export CODANNA_BIN="$(pwd)/target/release/codanna"
+echo "✓ Using release binary: $CODANNA_BIN"
+
 # Build with different feature combinations
 echo ""
 echo "🔨 Build (default features)"
@@ -56,7 +64,7 @@ echo "🖥️  Test MCP server functionality"
 # Run mcp-test locally (works fine with local permissions)
 # Note: This is skipped in GitHub Actions due to permission issues
 if [ -d ".codanna/index" ]; then
-    cargo run -- mcp-test
+    $CODANNA_BIN mcp-test
     if [ $? -eq 0 ]; then
         echo "✓ MCP server and tools working correctly"
     else
@@ -70,24 +78,23 @@ fi
 
 echo ""
 echo "📋 Verify CLI commands"
-cargo run -- --help > /dev/null
+$CODANNA_BIN --help > /dev/null
 echo "✓ Main help works"
-cargo run -- index --help > /dev/null
+$CODANNA_BIN index --help > /dev/null
 echo "✓ Index help works"
-cargo run -- retrieve --help > /dev/null
+$CODANNA_BIN retrieve --help > /dev/null
 echo "✓ Retrieve help works"
 
 # Performance checks
 echo ""
 echo "📊 Check binary size"
-cargo build --release
-ls -lh target/release/codanna
+ls -lh $CODANNA_BIN
 
 # Handle platform differences for stat command
 if [[ "$OSTYPE" == "darwin"* ]]; then
-    size=$(stat -f%z target/release/codanna)
+    size=$(stat -f%z $CODANNA_BIN)
 else
-    size=$(stat -c%s target/release/codanna)
+    size=$(stat -c%s $CODANNA_BIN)
 fi
 
 echo "Binary size: $size bytes"

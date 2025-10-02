@@ -118,6 +118,9 @@ impl IndexWatcher {
         }
 
         info!("Index file changed, reloading from {:?}", self.index_path);
+        if self.settings.mcp.debug {
+            eprintln!("DEBUG: IndexWatcher is reloading the index!");
+        }
 
         // Load the new index
         match self
@@ -132,8 +135,58 @@ impl IndexWatcher {
                 // Update last modified time
                 self.last_modified = Some(current_modified);
 
+                // Ensure semantic search stays attached after hot reloads
+                let mut restored_semantic = false;
+                if !indexer_guard.has_semantic_search() {
+                    let semantic_path = self.index_path.join("semantic");
+                    let metadata_exists = semantic_path.join("metadata.json").exists();
+                    if metadata_exists {
+                        match indexer_guard
+                            .load_semantic_search(&semantic_path, self.settings.debug)
+                        {
+                            Ok(true) => {
+                                restored_semantic = true;
+                            }
+                            Ok(false) => {
+                                if self.settings.debug {
+                                    eprintln!(
+                                        "DEBUG: Semantic metadata present but reload returned false"
+                                    );
+                                }
+                            }
+                            Err(e) => {
+                                warn!(
+                                    "Warning: Failed to reload semantic search after index update: {}",
+                                    e
+                                );
+                            }
+                        }
+                    } else if self.settings.debug {
+                        eprintln!(
+                            "DEBUG: Semantic metadata missing when attempting reload at {}",
+                            semantic_path.display()
+                        );
+                    }
+                }
+
                 let symbol_count = indexer_guard.symbol_count();
+                let has_semantic = indexer_guard.has_semantic_search();
+                if restored_semantic && self.settings.debug {
+                    match indexer_guard.semantic_search_embedding_count() {
+                        Ok(count) => {
+                            eprintln!("DEBUG: Restored semantic search with {count} embeddings");
+                        }
+                        Err(e) => {
+                            eprintln!(
+                                "DEBUG: Restored semantic search but failed to count embeddings: {e}"
+                            );
+                        }
+                    }
+                }
                 info!("Index successfully reloaded with {symbol_count} symbols");
+                if self.settings.mcp.debug {
+                    eprintln!("DEBUG: After reload, has_semantic_search: {has_semantic}");
+                }
 
                 // Send notification that index was reloaded
                 if let Some(ref broadcaster) = self.broadcaster {

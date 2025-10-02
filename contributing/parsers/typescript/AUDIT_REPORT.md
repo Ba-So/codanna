@@ -1,41 +1,43 @@
 # TypeScript Parser Coverage Report
 
-*Generated: 2025-09-13 22:47:31 UTC*
+*Generated: 2025-09-30 23:32:49 UTC*
 
 ## Summary
-- Nodes in file: 193
-- Nodes handled by parser: 187
-- Symbol kinds extracted: 8
+- Nodes in file: 203
+- Nodes handled by parser: 189
+- Symbol kinds extracted: 9
 
 ## Coverage Table
 
 | Node Type | ID | Status |
 |-----------|-----|--------|
-| class_declaration | 221 | ✅ implemented |
-| interface_declaration | 288 | ✅ implemented |
-| enum_declaration | 290 | ✅ implemented |
-| type_alias_declaration | 293 | ✅ implemented |
-| function_declaration | 224 | ✅ implemented |
-| method_definition | 261 | ✅ implemented |
-| public_field_definition | 266 | ✅ implemented |
-| private_field_definition | - | ❌ not found |
-| variable_declaration | - | ❌ not found |
-| lexical_declaration | 184 | ✅ implemented |
-| arrow_function | 227 | ✅ implemented |
-| function_expression | - | ❌ not found |
-| generator_function_declaration | 226 | ⚠️ gap |
-| import_statement | 174 | ✅ implemented |
-| export_statement | 167 | ✅ implemented |
-| namespace_import | 177 | ✅ implemented |
-| named_imports | 178 | ✅ implemented |
-| required_parameter | 296 | ✅ implemented |
-| optional_parameter | 297 | ✅ implemented |
-| rest_parameter | - | ❌ not found |
-| type_parameter | 341 | ✅ implemented |
-| type_annotation | 302 | ✅ implemented |
-| predefined_type | 335 | ✅ implemented |
-| namespace_declaration | - | ❌ not found |
+| class_declaration | 235 | ✅ implemented |
+| interface_declaration | 301 | ✅ implemented |
+| enum_declaration | 303 | ✅ implemented |
+| type_alias_declaration | 306 | ✅ implemented |
+| function_declaration | 238 | ✅ implemented |
+| method_definition | 275 | ✅ implemented |
+| public_field_definition | 280 | ✅ implemented |
+| accessibility_modifier | 307 | ✅ implemented |
+| variable_declaration | 189 | ✅ implemented |
+| lexical_declaration | 190 | ✅ implemented |
+| arrow_function | 241 | ✅ implemented |
+| function_expression | 237 | ⚠️ gap |
+| generator_function_declaration | 240 | ✅ implemented |
+| import_statement | 180 | ✅ implemented |
+| export_statement | 173 | ✅ implemented |
+| namespace_import | 183 | ✅ implemented |
+| named_imports | 184 | ✅ implemented |
+| required_parameter | 309 | ✅ implemented |
+| optional_parameter | 310 | ✅ implemented |
+| rest_pattern | 274 | ✅ implemented |
+| type_parameter | 354 | ✅ implemented |
+| type_annotation | 315 | ✅ implemented |
+| predefined_type | 348 | ✅ implemented |
+| internal_module | 297 | ✅ implemented |
 | module_declaration | - | ❌ not found |
+| jsx_element | 225 | ✅ implemented |
+| jsx_self_closing_element | 231 | ⚠️ gap |
 
 ## Legend
 
@@ -48,15 +50,11 @@
 ### Priority 1: Implementation Gaps
 These nodes exist in your code but aren't being captured:
 
-- `generator_function_declaration`: Add parsing logic in parser.rs
+- `function_expression`: Add parsing logic in parser.rs
+- `jsx_self_closing_element`: Add parsing logic in parser.rs
 
 ### Priority 2: Missing Examples
 These nodes aren't in the comprehensive example. Consider:
 
-- `private_field_definition`: Add example to comprehensive.ts or verify node name
-- `variable_declaration`: Add example to comprehensive.ts or verify node name
-- `function_expression`: Add example to comprehensive.ts or verify node name
-- `rest_parameter`: Add example to comprehensive.ts or verify node name
-- `namespace_declaration`: Add example to comprehensive.ts or verify node name
 - `module_declaration`: Add example to comprehensive.ts or verify node name
 

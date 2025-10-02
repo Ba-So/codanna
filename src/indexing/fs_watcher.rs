@@ -7,7 +7,7 @@
 
 use notify::{Event, EventKind, RecursiveMode, Watcher};
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 use thiserror::Error;
@@ -67,6 +67,8 @@ pub struct FileSystemWatcher {
     mcp_debug: bool,
     /// Optional notification broadcaster for MCP notifications
     broadcaster: Option<Arc<NotificationBroadcaster>>,
+    /// Index path for semantic search persistence
+    index_path: PathBuf,
 }
 
 impl FileSystemWatcher {
@@ -75,6 +77,8 @@ impl FileSystemWatcher {
     /// # Arguments
     /// * `indexer` - Shared reference to the indexer
     /// * `debounce_ms` - Milliseconds to wait before processing changes (for batching)
+    /// * `mcp_debug` - Debug flag for verbose output
+    /// * `index_path` - Path to the index directory for semantic search persistence
     ///
     /// # Returns
     /// A configured file watcher ready to start watching
@@ -82,6 +86,7 @@ impl FileSystemWatcher {
         indexer: Arc<RwLock<SimpleIndexer>>,
         debounce_ms: u64,
         mcp_debug: bool,
+        index_path: &Path,
     ) -> IndexResult<Self> {
         // Create channel for events with reasonable buffer
         let (tx, rx) = mpsc::channel(100);
@@ -105,6 +110,7 @@ impl FileSystemWatcher {
             _watcher: watcher,
             mcp_debug,
             broadcaster: None,
+            index_path: index_path.to_path_buf(),
         })
     }
 
@@ -322,8 +328,8 @@ impl FileSystemWatcher {
 
                                         // CRITICAL: Save semantic search data after re-indexing
                                         if indexer.has_semantic_search() {
-                                            let semantic_path = std::path::Path::new(".codanna/index/semantic");
-                                            if let Err(e) = indexer.save_semantic_search(semantic_path) {
+                                            let semantic_path = self.index_path.join("semantic");
+                                            if let Err(e) = indexer.save_semantic_search(&semantic_path) {
                                                 eprintln!("  ✗ Failed to save semantic search after re-indexing: {e}");
                                             } else {
                                                 eprintln!("  ✓ Semantic search saved successfully");
@@ -500,7 +506,8 @@ mod tests {
         // Create the watcher
         println!("\nStep 2: Creating FileSystemWatcher...");
         let indexer_arc = Arc::new(RwLock::new(indexer));
-        let watcher = FileSystemWatcher::new(indexer_arc.clone(), 500, false);
+        let index_path = PathBuf::from(".codanna/index");
+        let watcher = FileSystemWatcher::new(indexer_arc.clone(), 500, false, &index_path);
 
         assert!(watcher.is_ok());
         let _watcher = watcher.unwrap();
@@ -564,7 +571,8 @@ mod tests {
         // Create watcher
         println!("\nStep 2: Creating FileSystemWatcher...");
         let indexer_arc = Arc::new(RwLock::new(indexer));
-        let watcher = FileSystemWatcher::new(indexer_arc.clone(), 100, false).unwrap();
+        let index_path = PathBuf::from(".codanna/index");
+        let watcher = FileSystemWatcher::new(indexer_arc.clone(), 100, false, &index_path).unwrap();
 
         // Call get_indexed_paths (private method, but we can test via the indexer)
         println!("\nStep 3: Testing get_indexed_paths() behavior...");

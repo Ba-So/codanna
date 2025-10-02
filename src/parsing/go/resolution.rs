@@ -974,7 +974,37 @@ impl ResolutionScope for GoResolutionContext {
         }
 
         // 3. Check imported symbols
-        self.imported_symbols.get(name).copied()
+        if let Some(&id) = self.imported_symbols.get(name) {
+            return Some(id);
+        }
+
+        // 4. Check if it's a qualified name (contains .)
+        if name.contains('.') {
+            // CRITICAL FIX: First try to resolve the full qualified path directly
+            // This handles cases where we have the full package path stored (e.g., "github.com/user/pkg.Function")
+            // Check in all scopes for the full qualified name
+            if let Some(&id) = self.imported_symbols.get(name) {
+                return Some(id);
+            }
+            if let Some(&id) = self.package_symbols.get(name) {
+                return Some(id);
+            }
+
+            // If full path not found, try to resolve as a 2-part path
+            let parts: Vec<&str> = name.split('.').collect();
+            if parts.len() == 2 {
+                let package_or_type = parts[0];
+                let function_or_method = parts[1];
+
+                // Check if package/type exists in our codebase
+                if self.resolve(package_or_type).is_some() {
+                    // Package/type exists, resolve the function/method
+                    return self.resolve(function_or_method);
+                }
+            }
+        }
+
+        None
     }
 
     fn clear_local_scope(&mut self) {

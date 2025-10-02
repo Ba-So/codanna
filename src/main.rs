@@ -11,6 +11,9 @@ use codanna::FileId;
 use codanna::parsing::{
     GoParser, LanguageParser, PhpParser, PythonParser, RustParser, TypeScriptParser,
 };
+use codanna::project_resolver::{
+    providers::typescript::TypeScriptProvider, registry::SimpleProviderRegistry,
+};
 use codanna::types::SymbolCounter;
 use codanna::{IndexPersistence, Settings, SimpleIndexer, Symbol, SymbolKind};
 use serde::Serialize;
@@ -255,6 +258,14 @@ enum Commands {
         /// Tool arguments as JSON
         #[arg(long)]
         args: Option<String>,
+
+        /// Delay (seconds) before calling the tool, to exercise watcher reloads
+        #[arg(
+            long,
+            help = "Wait N seconds before calling the tool",
+            value_name = "SECONDS"
+        )]
+        delay: Option<u64>,
     },
 
     /// Call MCP tools directly (advanced)
@@ -452,6 +463,103 @@ enum RetrieveQuery {
     },
 }
 
+/// Create and populate the provider registry with all language providers.
+///
+/// This registry manages project-specific resolution providers that handle
+/// configuration files (like tsconfig.json) for enhanced import resolution.
+fn create_provider_registry() -> SimpleProviderRegistry {
+    let mut registry = SimpleProviderRegistry::new();
+
+    // Add TypeScript provider for tsconfig.json resolution
+    registry.add(Arc::new(TypeScriptProvider::new()));
+
+    // Future: Add more providers here
+    // registry.add(Arc::new(PythonProvider::new()));
+    // registry.add(Arc::new(RustProvider::new()));
+
+    registry
+}
+
+/// Initialize project resolution providers before indexing.
+///
+/// This validates configuration files and builds resolution caches for
+/// languages that have config_files specified in settings.toml.
+fn initialize_providers(
+    registry: &SimpleProviderRegistry,
+    settings: &Settings,
+) -> Result<(), codanna::IndexError> {
+    use codanna::IndexError;
+
+    let mut validation_errors = Vec::new();
+
+    for provider in registry.active_providers(settings) {
+        let lang_id = provider.language_id();
+        let config_paths = provider.config_paths(settings);
+
+        if config_paths.is_empty() {
+            continue; // Skip if no config files specified
+        }
+
+        println!("Initializing {lang_id} project resolver...");
+
+        // Validate config paths
+        let mut invalid_paths = Vec::new();
+        for path in &config_paths {
+            if !path.exists() {
+                invalid_paths.push(path.clone());
+            }
+        }
+
+        if !invalid_paths.is_empty() {
+            // Collect all invalid paths for error reporting
+            for path in &invalid_paths {
+                eprintln!("  ✗ {} config file not found: {}", lang_id, path.display());
+            }
+            validation_errors.push((lang_id.to_string(), invalid_paths));
+            continue;
+        }
+
+        // Build cache
+        if settings.debug {
+            println!(
+                "  Building resolution cache from {} config file(s)...",
+                config_paths.len()
+            );
+        }
+        if let Err(e) = provider.rebuild_cache(settings) {
+            // Warning only - continue without failing
+            if settings.debug {
+                eprintln!("  Warning: Failed to build {lang_id} resolution cache: {e}");
+                eprintln!("  Continuing without alias resolution for {lang_id}");
+            }
+        } else if settings.debug {
+            println!("  {lang_id} resolution cache built successfully");
+        }
+    }
+
+    if !validation_errors.is_empty() {
+        // Build detailed error message
+        let mut error_details = String::from("Invalid project configuration files:\n");
+        for (lang, paths) in &validation_errors {
+            error_details.push_str(&format!("\n{lang} configuration:\n"));
+            for path in paths {
+                error_details.push_str(&format!("  • {} not found\n", path.display()));
+            }
+        }
+        error_details.push_str("\nSuggestion: Check paths in .codanna/settings.toml");
+        error_details.push_str("\nExample for TypeScript:\n");
+        error_details.push_str("  [languages.typescript]\n");
+        error_details
+            .push_str("  config_files = [\"tsconfig.json\", \"packages/web/tsconfig.json\"]");
+
+        Err(IndexError::ConfigError {
+            reason: error_details,
+        })
+    } else {
+        Ok(())
+    }
+}
+
 /// Entry point with tokio async runtime.
 ///
 /// Handles config initialization, index loading/creation, and command dispatch.
@@ -460,8 +568,8 @@ enum RetrieveQuery {
 async fn main() {
     let cli = Cli::parse();
 
-    // For index command, auto-initialize if needed
-    if matches!(cli.command, Commands::Index { .. }) {
+    // For index command, auto-initialize if needed (but not when using --config)
+    if matches!(cli.command, Commands::Index { .. }) && cli.config.is_none() {
         if Settings::check_init().is_err() {
             // Auto-initialize for index command
             eprintln!("Initializing project configuration...");
@@ -475,8 +583,8 @@ async fn main() {
                 }
             }
         }
-    } else if !matches!(cli.command, Commands::Init { .. }) {
-        // For other commands, just warn
+    } else if !matches!(cli.command, Commands::Init { .. }) && cli.config.is_none() {
+        // For other commands without --config flag, just warn
         if let Err(warning) = Settings::check_init() {
             eprintln!("Warning: {warning}");
             eprintln!("Using default configuration for now.");
@@ -559,9 +667,26 @@ async fn main() {
         _ => {}
     }
 
+    // Early return for parse command - it needs no indexing infrastructure
+    if let Commands::Parse {
+        ref file,
+        ref output,
+        max_depth,
+        all_nodes,
+    } = cli.command
+    {
+        run_parse_command(file, output.clone(), max_depth, all_nodes);
+        // run_parse_command already calls std::process::exit
+    }
+
     // Set up persistence based on config
-    let index_path = config.index_path.clone();
-    let persistence = IndexPersistence::new(index_path);
+    // Use global path resolution that handles --config properly
+    let index_path = codanna::init::resolve_index_path(&config, cli.config.as_deref());
+
+    // Update the config with the resolved index_path so SimpleIndexer uses the correct path
+    config.index_path = index_path.clone();
+
+    let persistence = IndexPersistence::new(index_path.clone());
 
     // Skip loading index for commands that don't need it
     let skip_index_load = matches!(
@@ -765,14 +890,15 @@ async fn main() {
                     }
                     eprintln!("To test: npx @modelcontextprotocol/inspector cargo run -- serve");
 
-                    // Create MCP server from existing index
-                    let server = codanna::mcp::CodeIntelligenceServer::from_persistence(&config)
-                        .await
-                        .map_err(|e| {
-                            eprintln!("Failed to create MCP server: {e}");
-                            std::process::exit(1);
-                        })
-                        .unwrap();
+                    // Create MCP server using the already-loaded indexer
+                    if config.mcp.debug {
+                        eprintln!(
+                            "MCP DEBUG: Creating server with indexer - symbols: {}, semantic: {}",
+                            indexer.symbol_count(),
+                            indexer.has_semantic_search()
+                        );
+                    }
+                    let server = codanna::mcp::CodeIntelligenceServer::new(indexer);
 
                     // If watch mode is enabled, start the index watcher
                     if watch {
@@ -780,11 +906,10 @@ async fn main() {
                         use std::time::Duration;
 
                         let indexer_arc = server.get_indexer_arc();
-                        let settings = Arc::new(config.clone());
                         let server_arc = Arc::new(server.clone());
                         let watcher = IndexWatcher::new(
                             indexer_arc,
-                            settings,
+                            settings.clone(),
                             Duration::from_secs(actual_watch_interval),
                         )
                         .with_mcp_server(server_arc);
@@ -809,6 +934,7 @@ async fn main() {
                             watcher_indexer,
                             config.file_watch.debounce_ms,
                             config.mcp.debug,
+                            &index_path,
                         )
                         .map_err(|e| {
                             eprintln!("Failed to create file system watcher: {e}");
@@ -863,6 +989,27 @@ async fn main() {
         } => {
             // Determine if path is a file or directory
             if path.is_file() {
+                // Initialize project resolution providers even for single file
+                // (needed for proper alias resolution)
+                let provider_registry = create_provider_registry();
+                if let Err(e) = initialize_providers(&provider_registry, &config) {
+                    eprintln!("\n{e}");
+
+                    // Display recovery suggestions
+                    let suggestions = e.recovery_suggestions();
+                    if !suggestions.is_empty() {
+                        eprintln!("\nRecovery steps:");
+                        for suggestion in suggestions {
+                            eprintln!("  • {suggestion}");
+                        }
+                    }
+
+                    // Exit with ConfigError code
+                    use codanna::io::ExitCode;
+                    let exit_code = ExitCode::from_error(&e);
+                    std::process::exit(exit_code as i32);
+                }
+
                 // Single file indexing
                 match indexer.index_file_with_force(&path, force) {
                     Ok(result) => {
@@ -953,6 +1100,26 @@ async fn main() {
                     }
                 }
             } else if path.is_dir() {
+                // Initialize project resolution providers before indexing
+                let provider_registry = create_provider_registry();
+                if let Err(e) = initialize_providers(&provider_registry, &config) {
+                    eprintln!("\n{e}");
+
+                    // Display recovery suggestions
+                    let suggestions = e.recovery_suggestions();
+                    if !suggestions.is_empty() {
+                        eprintln!("\nRecovery steps:");
+                        for suggestion in suggestions {
+                            eprintln!("  • {suggestion}");
+                        }
+                    }
+
+                    // Exit with ConfigError code
+                    use codanna::io::ExitCode;
+                    let exit_code = ExitCode::from_error(&e);
+                    std::process::exit(exit_code as i32);
+                }
+
                 // Directory indexing
                 if let Some(max) = max_files {
                     println!(
@@ -1227,18 +1394,27 @@ async fn main() {
 
         Commands::McpTest {
             server_binary,
-            tool: _,
-            args: _,
+            tool,
+            args,
+            delay,
         } => {
             use codanna::mcp::client::CodeIntelligenceClient;
 
             // Get server binary path (default to current executable)
-            let server_path = server_binary.unwrap_or_else(|| {
+            let server_path = server_binary.clone().unwrap_or_else(|| {
                 std::env::current_exe().expect("Failed to get current executable path")
             });
 
             // Run the test
-            if let Err(e) = CodeIntelligenceClient::test_server(server_path).await {
+            if let Err(e) = CodeIntelligenceClient::test_server(
+                server_path,
+                cli.config.clone(),
+                tool.clone(),
+                args.clone(),
+                delay,
+            )
+            .await
+            {
                 eprintln!("MCP test failed: {e}");
                 std::process::exit(1);
             }
@@ -2467,13 +2643,9 @@ async fn main() {
             run_benchmark_command(&language, file);
         }
 
-        Commands::Parse {
-            file,
-            output,
-            max_depth,
-            all_nodes,
-        } => {
-            run_parse_command(&file, output, max_depth, all_nodes);
+        Commands::Parse { .. } => {
+            // Already handled with early return above
+            unreachable!("Parse command should have been handled earlier");
         }
     }
 }

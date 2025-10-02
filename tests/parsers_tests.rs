@@ -13,6 +13,9 @@ mod test_typescript_call_tracking;
 #[path = "parsers/typescript/test_nested_functions.rs"]
 mod test_typescript_nested_functions;
 
+#[path = "parsers/typescript/test_alias_resolution.rs"]
+mod test_typescript_alias_resolution;
+
 #[path = "parsers/c/test_resolution.rs"]
 mod test_c_resolution;
 

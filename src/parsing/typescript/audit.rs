@@ -42,11 +42,12 @@ impl TypeScriptParserAudit {
         Self::audit_code(&code)
     }
 
-    /// Run audit on TypeScript source code  
+    /// Run audit on TypeScript source code
     pub fn audit_code(code: &str) -> Result<Self, AuditError> {
         // First, discover all nodes in the file using tree-sitter directly
+        // Use TSX grammar (superset that handles TypeScript + JSX)
         let mut parser = Parser::new();
-        let language = tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into();
+        let language = tree_sitter_typescript::LANGUAGE_TSX.into();
         parser
             .set_language(&language)
             .map_err(|e| AuditError::LanguageSetup(e.to_string()))?;
@@ -116,7 +117,7 @@ impl TypeScriptParserAudit {
             "function_declaration",
             "method_definition",
             "public_field_definition",
-            "private_field_definition",
+            "accessibility_modifier", // Tracks private/protected/public modifiers
             "variable_declaration",
             "lexical_declaration",
             "arrow_function",
@@ -128,12 +129,14 @@ impl TypeScriptParserAudit {
             "named_imports",
             "required_parameter",
             "optional_parameter",
-            "rest_parameter",
+            "rest_pattern",
             "type_parameter",
             "type_annotation",
             "predefined_type",
-            "namespace_declaration",
+            "internal_module",
             "module_declaration",
+            "jsx_element",
+            "jsx_self_closing_element",
         ];
 
         let mut gaps = Vec::new();

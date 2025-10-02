@@ -1,20 +1,46 @@
 # Code Guidelines
 
-This document provides a strict and consolidated set of Rust development guidelines for this project, derived from implementation experience and common errors. Adherence to these rules is **mandatory** to ensure code quality, performance, and maintainability. These rules supersede any conflicting guidelines in other documents.
+This document provides Rust development guidelines for this project, derived from implementation experience and common patterns. Following these guidelines helps ensure code quality, performance, and maintainability.
 
-## 1. Function Signatures: Zero-Cost Abstractions are MANDATORY
+## Understanding Architectural Boundaries
 
-This is the most critical principle. Violations require immediate fixing. The goal is to maximize caller flexibility and eliminate unnecessary memory allocations.
+### Universal vs Language-Specific Concepts
+
+When determining where code belongs, consider whether the concept is universal or language-specific:
+
+**Universal concepts** (belong in base traits):
+- Module paths and qualified names (all languages have some form of namespacing)
+- Symbol visibility (public/private/protected)
+- Import resolution (all languages import/include code)
+- Scope levels (local, module, package, global)
+
+**Language-specific** (belong in language implementations):
+- Syntax details (`::` vs `.` vs `/` as separators)
+- Resolution order (see language-specific examples below)
+- Unique features (Rust lifetimes, Python MRO, TypeScript type space)
+- Language-specific keywords (`self`, `super`, `crate`)
+
+### Language Resolution Orders (Examples)
+
+**Rust**: local → imported → module → crate
+**Python (LEGB)**: Local → Enclosing → Global → Built-in
+**TypeScript**: local → function → module → global (+ type space)
+**Go**: local → package → universe → imports
+**PHP**: local → class → namespace → global → superglobals
+
+## 1. Function Signatures: Zero-Cost Abstractions
+
+This is a critical principle for performance. The goal is to maximize caller flexibility and eliminate unnecessary memory allocations.
 
 ### Parameters
-- **MUST** use borrowed types for read-only data: `&str` over `String`, `&[T]` over `Vec<T>`
-- **MUST** use owned types **only** when you need to store or transform the data
-- **MUST** use `impl Trait` instead of heap-allocated trait objects (`Box<dyn Trait>`)
+- Use borrowed types for read-only data: `&str` over `String`, `&[T]` over `Vec<T>`
+- Use owned types only when you need to store or transform the data
+- Prefer `impl Trait` over heap-allocated trait objects (`Box<dyn Trait>`)
 
 ### Return Values
-- **SHOULD** return iterators (`impl Iterator`) when it avoids allocation
-- **MUST NOT** return iterators if the caller always needs a collected result
-- **MUST** use `Cow<'_, str>` for conditional ownership scenarios
+- Return iterators (`impl Iterator`) when it avoids allocation AND callers vary in their needs
+- Return concrete types (`Vec<T>`) if callers always collect anyway
+- Use `Cow<'_, str>` for conditional ownership scenarios
 
 ```rust
 // ✅ CORRECT: Zero allocation, flexible for caller
@@ -39,24 +65,24 @@ fn get_all_ids(&self) -> impl Iterator<Item = UserId> {
 
 ## 2. Performance: Measure, Don't Guess
 
-Performance optimizations **MUST** be justified with measurements. Different rules apply to different code paths.
+Performance optimizations should be justified with measurements. Different rules apply to different code paths.
 
 ### Hot Path Rules (>1000 calls/second)
-- **MUST NOT** allocate memory - use iterators and borrowing
-- **MUST NOT** use `.clone()` unless measured and justified
-- **MUST** use `&[T]` over `Vec<T>`, `&str` over `String`
-- **MUST** pre-allocate collections when size is known: `Vec::with_capacity()`
+- Avoid memory allocation - use iterators and borrowing
+- Avoid `.clone()` unless measured and justified
+- Use `&[T]` over `Vec<T>`, `&str` over `String`
+- Pre-allocate collections when size is known: `Vec::with_capacity()`
 
 ### Setup/Configuration Code
-- **MAY** allocate memory for clarity
-- **SHOULD** optimize for readability over micro-performance
-- **MUST** still avoid unnecessary allocations
+- May allocate memory for clarity
+- Prioritize readability over micro-performance
+- Still avoid unnecessary allocations
 
 ### Performance Targets (Project-Specific)
-- Indexing: **MUST** achieve 10,000+ files/second
-- Search latency: **MUST** be <10ms for semantic search
-- Memory: **MUST** use ~100 bytes per symbol
-- Vector operations: **MUST** achieve <1μs per vector access
+- Indexing: Target 10,000+ files/second
+- Search latency: Target <10ms for semantic search
+- Memory: ~100 bytes per symbol
+- Vector operations: Target <1μs per vector access
 
 ```rust
 // ✅ CORRECT: Hot path with zero allocations
@@ -78,19 +104,19 @@ fn load_config() -> Config {
 }
 ```
 
-## 3. Type Safety: NO Primitive Obsession
+## 3. Type Safety: Avoid Primitive Obsession
 
-**MUST** create newtype wrappers for ALL domain-specific concepts. Raw primitives for IDs, scores, or domain values are **forbidden**.
+Create newtype wrappers for domain-specific concepts. Raw primitives for IDs, scores, or domain values should be wrapped for type safety.
 
-### Required Newtypes
-- **ALL** IDs: `UserId(NonZeroU32)`, `ClusterId(NonZeroU32)`, `VectorId(NonZeroU32)`
-- **ALL** domain values: `Score(f32)`, `Distance(f32)`, `Confidence(f32)`
-- **ALL** file paths with special meaning: `IndexPath(PathBuf)`, `ConfigPath(PathBuf)`
+### Recommended Newtypes
+- IDs: `UserId(NonZeroU32)`, `ClusterId(NonZeroU32)`, `VectorId(NonZeroU32)`
+- Domain values: `Score(f32)`, `Distance(f32)`, `Confidence(f32)`
+- File paths with special meaning: `IndexPath(PathBuf)`, `ConfigPath(PathBuf)`
 
-### Type Safety Rules
-- **MUST** use `NonZeroU32` for IDs that cannot be zero
-- **MUST** validate constraints in newtype constructors
-- **MUST** make invalid states unrepresentable at compile time
+### Type Safety Guidelines
+- Use `NonZeroU32` for IDs that cannot be zero
+- Validate constraints in newtype constructors
+- Make invalid states unrepresentable at compile time when practical
 
 ```rust
 // ✅ CORRECT: Type-safe, self-documenting
@@ -117,17 +143,17 @@ fn get_cluster(id: u32) -> Option<Cluster> { ... }
 
 ## 4. Error Handling: Structured and Actionable
 
-### Library Code Requirements
-- **MUST** use `thiserror` for all error types
-- **MUST** include "Suggestion:" in every error message
-- **MUST** provide actionable recovery steps
-- **MUST NOT** use `anyhow` in library code
+### Library Code Guidelines
+- Use `thiserror` for error types
+- Include "Suggestion:" in error messages when helpful
+- Provide actionable recovery steps
+- Avoid `anyhow` in library code (use it in binaries)
 
-### Application Code Requirements  
-- **MAY** use `anyhow` at the binary level only
-- **MUST** add context when crossing module boundaries
-- **MUST** use `Result<T, E>` - never `panic!` or `unwrap()`
-- **MAY** use `expect()` only for truly impossible states with clear messages
+### Application Code Guidelines
+- Use `anyhow` at the binary level for convenience
+- Add context when crossing module boundaries
+- Use `Result<T, E>` - avoid `panic!` or `unwrap()`
+- Use `expect()` only for impossible states with clear messages
 
 ```rust
 #[derive(Error, Debug)]
@@ -143,17 +169,17 @@ pub enum VectorError {
 }
 ```
 
-## 5. Function Design: Single Responsibility is MANDATORY
+## 5. Function Design: Single Responsibility
 
 ### Composition Over Size
-- **MUST** decompose complex operations into focused, composable helper methods
-- **SHOULD** extract distinct logical operations into named functions for clarity
-- **MUST** split functions that handle multiple responsibilities
+- Decompose complex operations into focused, composable helper methods
+- Extract distinct logical operations into named functions for clarity
+- Split functions that handle multiple responsibilities
 
-### Complexity Limits
-- **MUST NOT** have more than 2 levels of nesting
-- **MUST NOT** mix different responsibilities (parsing + validation + transformation)
-- **MUST** extract complex conditions into named predicates
+### Complexity Guidelines
+- Avoid more than 2 levels of nesting
+- Don't mix different responsibilities (parsing + validation + transformation)
+- Extract complex conditions into named predicates
 
 ```rust
 // ✅ CORRECT: Each function has one clear responsibility
@@ -177,24 +203,24 @@ pub fn process_file(path: &Path) -> Result<Symbols, Error> {
 }
 ```
 
-## 6. API Design: Ergonomics are MANDATORY
+## 6. API Design: Ergonomics
 
 ### Builder Pattern
-- **MUST** use builder pattern for any struct with ≥3 constructor parameters
-- **MUST** make builders infallible until `build()` is called
-- **SHOULD** provide sensible defaults via `Default` trait
+- Use builder pattern for structs with ≥3 constructor parameters
+- Make builders infallible until `build()` is called
+- Provide sensible defaults via `Default` trait
 
 ### Standard Traits
-- **MUST** derive `Debug` on ALL public types (exception: types containing secrets)
-- **MUST** implement `Clone` where logical (not for resources like file handles)
-- **MUST** implement `PartialEq`/`Eq` for types used as keys
-- **MUST** add `#[must_use]` to validation methods and builder finishers
+- Derive `Debug` on public types (exception: types containing secrets)
+- Implement `Clone` where logical (not for resources like file handles)
+- Implement `PartialEq`/`Eq` for types used as keys
+- Add `#[must_use]` to validation methods and builder finishers
 
 ### Method Naming
-- **MUST** use `into_*` for methods that consume `self`
-- **MUST** use `as_*` for methods that borrow `self`
-- **MUST** use `to_*` for methods that clone/allocate
-- **MUST** use `with_*` for builder methods
+- Use `into_*` for methods that consume `self`
+- Use `as_*` for methods that borrow `self`
+- Use `to_*` for methods that clone/allocate
+- Use `with_*` for builder methods
 
 ```rust
 // ✅ CORRECT: Ergonomic builder with proper traits
@@ -217,34 +243,34 @@ impl VectorIndexBuilder {
 }
 ```
 
-## 7. Code Quality: Standards are NOT Optional
+## 7. Code Quality Standards
 
 ### Clippy Compliance
-- **MUST** fix all warnings from `cargo clippy -- -W clippy::all`
-- **MUST** address clippy lints before merging
-- **SHOULD** enable additional lints for common mistakes
+- Fix warnings from `cargo clippy -- -W clippy::all`
+- Address clippy lints before merging
+- Consider enabling additional lints for common mistakes
 
 ### Documentation
-- **MUST** document all public APIs with examples
-- **MUST** include panic conditions in doc comments
-- **MUST** document performance characteristics for algorithms
+- Document public APIs with examples
+- Include panic conditions in doc comments
+- Document performance characteristics for algorithms
 
 ### Testing
-- **MUST** follow @tests/TEST_TEMPLATE.md structure
-- **MUST** test error conditions, not just happy paths
-- **MUST** include performance tests for critical paths
+- Follow @tests/TEST_TEMPLATE.md structure
+- Test error conditions, not just happy paths
+- Include performance tests for critical paths
 
 ## 8. Integration Patterns (Project-Specific)
 
 ### Working with DocumentIndex
-- **MUST** use batch operations when indexing multiple files
-- **MUST** handle transaction rollback properly
-- **MUST** warm caches after bulk operations
+- Use batch operations when indexing multiple files
+- Handle transaction rollback properly
+- Warm caches after bulk operations
 
 ### Vector Search Integration
-- **MUST** use `VectorUpdateCoordinator` for incremental updates
-- **MUST** detect symbol-level changes before re-embedding
-- **MUST** maintain consistency between text and vector indices
+- Use `VectorUpdateCoordinator` for incremental updates
+- Detect symbol-level changes before re-embedding
+- Maintain consistency between text and vector indices
 
 ```rust
 // ✅ CORRECT: Proper integration with existing systems
@@ -267,14 +293,14 @@ impl VectorSearchEngine {
 ## 9. Development Workflow
 
 ### Progress Tracking
-- **MUST** use TodoWrite tool for task tracking in complex features
-- **MUST** update progress before moving to next task
-- **SHOULD** break large tasks into trackable subtasks
+- Use TodoWrite tool for task tracking in complex features
+- Update progress before moving to next task
+- Break large tasks into trackable subtasks
 
 ### Quality Reviews
-- **MUST** pass quality-reviewer agent checks before integration
-- **MUST** address all "MUST FIX" issues before proceeding
-- **SHOULD** explain any guideline violations with clear justification
+- Pass quality-reviewer agent checks before integration
+- Address critical issues before proceeding
+- Explain any guideline violations with clear justification
 
 ## Enforcement
 
@@ -282,6 +308,6 @@ These guidelines are enforced through:
 1. Automated clippy checks in CI
 2. Quality reviewer agent validation
 3. Code review requirements
-4. Performance benchmarks that must pass
+4. Performance benchmarks
 
-Violations of **MUST** rules block merging. Violations of **SHOULD** rules require justification.
+Guidelines should be followed, with deviations explained when necessary.

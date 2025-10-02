@@ -1,7 +1,7 @@
 /target
 .codanna/
 .codanna/index/
-.fastembed_cache/
+.fastembed_cache
 .logs/
 
 # Build artifacts

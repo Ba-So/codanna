@@ -70,7 +70,12 @@ pub async fn serve_https(config: crate::Settings, watch: bool, bind: String) -> 
         let debounce_ms = config.file_watch.debounce_ms;
         let watcher_ct = ct.clone();
 
-        match FileSystemWatcher::new(watcher_indexer, debounce_ms, config.mcp.debug) {
+        match FileSystemWatcher::new(
+            watcher_indexer,
+            debounce_ms,
+            config.mcp.debug,
+            &config.index_path,
+        ) {
             Ok(watcher) => {
                 let watcher = watcher.with_broadcaster(watcher_broadcaster);
                 tokio::spawn(async move {

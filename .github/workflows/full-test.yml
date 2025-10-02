@@ -50,6 +50,10 @@ jobs:
       - name: Build (all features)
         run: cargo build --verbose --all-features
       
+      # Build debug binary for integration tests
+      - name: Build debug binary
+        run: cargo build --bin codanna
+
       # Run tests
       - name: Run tests
         run: cargo test --verbose
