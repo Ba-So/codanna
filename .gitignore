@@ -25,3 +25,4 @@
 /contributing/tree-sitter/target/
 /contributing/tree-sitter/.cache/
 /contributing/tree-sitter/.env
+logs
