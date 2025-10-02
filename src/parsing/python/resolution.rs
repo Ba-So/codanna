@@ -156,6 +156,17 @@ impl ResolutionScope for PythonResolutionContext {
 
         // 6. Check if it's a qualified name (contains .)
         if name.contains('.') {
+            // CRITICAL FIX: First try to resolve the full qualified path directly
+            // This handles cases where we have the full module path stored (e.g., "myapp.utils.helper.process")
+            // Check in all scopes for the full qualified name
+            if let Some(&id) = self.imported_symbols.get(name) {
+                return Some(id);
+            }
+            if let Some(&id) = self.global_scope.get(name) {
+                return Some(id);
+            }
+
+            // If full path not found, try to resolve as a 2-part path
             let parts: Vec<&str> = name.split('.').collect();
             if parts.len() == 2 {
                 let module_or_class = parts[0];

@@ -387,6 +387,12 @@ pub trait LanguageBehavior: Send + Sync {
         for symbol in file_symbols {
             if self.is_resolvable_symbol(&symbol) {
                 context.add_symbol(symbol.name.to_string(), symbol.id, ScopeLevel::Module);
+
+                // Also add by module_path for fully qualified resolution
+                // This allows resolving "crate::module::function" in addition to "function"
+                if let Some(module_path) = &symbol.module_path {
+                    context.add_symbol(module_path.to_string(), symbol.id, ScopeLevel::Module);
+                }
             }
         }
 
@@ -410,6 +416,11 @@ pub trait LanguageBehavior: Send + Sync {
             if self.is_symbol_visible_from_file(&symbol, file_id) {
                 // Add as global symbol (lower priority)
                 context.add_symbol(symbol.name.to_string(), symbol.id, ScopeLevel::Global);
+
+                // Also add by module_path for fully qualified resolution
+                if let Some(module_path) = &symbol.module_path {
+                    context.add_symbol(module_path.to_string(), symbol.id, ScopeLevel::Global);
+                }
             }
         }
 
@@ -530,6 +541,12 @@ pub trait LanguageBehavior: Send + Sync {
         for symbol in file_symbols {
             if self.is_resolvable_symbol(&symbol) {
                 context.add_symbol(symbol.name.to_string(), symbol.id, ScopeLevel::Module);
+
+                // Also add by module_path for fully qualified resolution
+                // This allows resolving "crate::module::function" in addition to "function"
+                if let Some(module_path) = &symbol.module_path {
+                    context.add_symbol(module_path.to_string(), symbol.id, ScopeLevel::Module);
+                }
             }
         }
 
@@ -583,6 +600,11 @@ pub trait LanguageBehavior: Send + Sync {
                 // Only add if it's visible from our file
                 if self.is_symbol_visible_from_file(&symbol, file_id) {
                     context.add_symbol(symbol.name.to_string(), symbol.id, ScopeLevel::Global);
+
+                    // Also add by module_path for fully qualified resolution
+                    if let Some(module_path) = &symbol.module_path {
+                        context.add_symbol(module_path.to_string(), symbol.id, ScopeLevel::Global);
+                    }
                 }
             }
         }
@@ -604,6 +626,11 @@ pub trait LanguageBehavior: Send + Sync {
             for symbol in minimal_symbols {
                 if symbol.file_id != file_id && self.is_symbol_visible_from_file(&symbol, file_id) {
                     context.add_symbol(symbol.name.to_string(), symbol.id, ScopeLevel::Global);
+
+                    // Also add by module_path for fully qualified resolution
+                    if let Some(module_path) = &symbol.module_path {
+                        context.add_symbol(module_path.to_string(), symbol.id, ScopeLevel::Global);
+                    }
                 }
             }
         } else {
@@ -732,6 +759,32 @@ pub trait LanguageBehavior: Send + Sync {
         None
     }
 
+    /// Check if a relationship between two symbol kinds is valid
+    ///
+    /// This delegates to the resolution context's implementation, which can be
+    /// overridden per language. The default implementation in ResolutionScope
+    /// provides universal rules, while language-specific contexts can override.
+    ///
+    /// # Parameters
+    /// - `from_kind`: The kind of the source symbol
+    /// - `to_kind`: The kind of the target symbol
+    /// - `rel_kind`: The type of relationship
+    /// - `file_id`: The file where the relationship originates
+    ///
+    /// # Returns
+    /// true if the relationship is valid, false otherwise
+    fn is_compatible_relationship(
+        &self,
+        from_kind: crate::SymbolKind,
+        to_kind: crate::SymbolKind,
+        rel_kind: crate::RelationKind,
+        file_id: FileId,
+    ) -> bool {
+        // Create a resolution context for the file and delegate to it
+        let context = self.create_resolution_context(file_id);
+        context.is_compatible_relationship(from_kind, to_kind, rel_kind)
+    }
+
     /// Map an unresolved call target to an external module + symbol name.
     ///
     /// Used when a call cannot be resolved to any in-repo symbol. Languages can
@@ -821,5 +874,164 @@ impl LanguageMetadata {
             node_kind_count: language.node_kind_count(),
             field_count: language.field_count(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{RelationKind, SymbolKind};
+
+    /// Test struct that implements LanguageBehavior with default behavior
+    struct TestBehavior;
+
+    impl LanguageBehavior for TestBehavior {
+        fn format_module_path(&self, base_path: &str, _symbol_name: &str) -> String {
+            base_path.to_string()
+        }
+
+        fn parse_visibility(&self, _signature: &str) -> crate::Visibility {
+            crate::Visibility::Public
+        }
+
+        fn module_separator(&self) -> &'static str {
+            "."
+        }
+
+        fn get_language(&self) -> tree_sitter::Language {
+            // Use a dummy language for testing
+            tree_sitter_rust::LANGUAGE.into()
+        }
+    }
+
+    #[test]
+    fn test_default_compatibility_function_calls_function() {
+        let behavior = TestBehavior;
+        assert!(behavior.is_compatible_relationship(
+            SymbolKind::Function,
+            SymbolKind::Function,
+            RelationKind::Calls,
+            FileId::new(1).unwrap()
+        ));
+    }
+
+    #[test]
+    fn test_default_compatibility_function_calls_method() {
+        let behavior = TestBehavior;
+        assert!(behavior.is_compatible_relationship(
+            SymbolKind::Function,
+            SymbolKind::Method,
+            RelationKind::Calls,
+            FileId::new(1).unwrap()
+        ));
+    }
+
+    #[test]
+    fn test_default_compatibility_method_calls_function() {
+        let behavior = TestBehavior;
+        assert!(behavior.is_compatible_relationship(
+            SymbolKind::Method,
+            SymbolKind::Function,
+            RelationKind::Calls,
+            FileId::new(1).unwrap()
+        ));
+    }
+
+    #[test]
+    fn test_default_compatibility_function_calls_class() {
+        let behavior = TestBehavior;
+        // Functions can call classes (constructors)
+        assert!(behavior.is_compatible_relationship(
+            SymbolKind::Function,
+            SymbolKind::Class,
+            RelationKind::Calls,
+            FileId::new(1).unwrap()
+        ));
+    }
+
+    #[test]
+    fn test_default_compatibility_function_cannot_call_constant() {
+        let behavior = TestBehavior;
+        // By default, constants are not callable
+        assert!(!behavior.is_compatible_relationship(
+            SymbolKind::Function,
+            SymbolKind::Constant,
+            RelationKind::Calls,
+            FileId::new(1).unwrap()
+        ));
+    }
+
+    #[test]
+    fn test_default_compatibility_function_cannot_call_variable() {
+        let behavior = TestBehavior;
+        // By default, variables are not callable
+        assert!(!behavior.is_compatible_relationship(
+            SymbolKind::Function,
+            SymbolKind::Variable,
+            RelationKind::Calls,
+            FileId::new(1).unwrap()
+        ));
+    }
+
+    #[test]
+    fn test_default_compatibility_macro_can_be_called() {
+        let behavior = TestBehavior;
+        assert!(behavior.is_compatible_relationship(
+            SymbolKind::Function,
+            SymbolKind::Macro,
+            RelationKind::Calls,
+            FileId::new(1).unwrap()
+        ));
+    }
+
+    #[test]
+    fn test_default_compatibility_class_extends_class() {
+        let behavior = TestBehavior;
+        assert!(behavior.is_compatible_relationship(
+            SymbolKind::Class,
+            SymbolKind::Class,
+            RelationKind::Extends,
+            FileId::new(1).unwrap()
+        ));
+    }
+
+    #[test]
+    fn test_default_compatibility_trait_extends_trait() {
+        let behavior = TestBehavior;
+        assert!(behavior.is_compatible_relationship(
+            SymbolKind::Trait,
+            SymbolKind::Trait,
+            RelationKind::Extends,
+            FileId::new(1).unwrap()
+        ));
+    }
+
+    #[test]
+    fn test_default_compatibility_class_implements_trait() {
+        let behavior = TestBehavior;
+        assert!(behavior.is_compatible_relationship(
+            SymbolKind::Class,
+            SymbolKind::Trait,
+            RelationKind::Implements,
+            FileId::new(1).unwrap()
+        ));
+    }
+
+    #[test]
+    fn test_default_compatibility_uses_always_valid() {
+        let behavior = TestBehavior;
+        // Uses relationship should always be valid (types can be used anywhere)
+        assert!(behavior.is_compatible_relationship(
+            SymbolKind::Function,
+            SymbolKind::Struct,
+            RelationKind::Uses,
+            FileId::new(1).unwrap()
+        ));
+        assert!(behavior.is_compatible_relationship(
+            SymbolKind::Method,
+            SymbolKind::Enum,
+            RelationKind::Uses,
+            FileId::new(1).unwrap()
+        ));
     }
 }

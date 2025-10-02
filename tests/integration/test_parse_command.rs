@@ -3,21 +3,94 @@
 //! Following TDD approach - tests written before implementation
 
 use serde_json::Value;
+use std::env;
+use std::path::PathBuf;
 use std::process::Command;
+
+/// Get the codanna binary path, using CODANNA_BIN env var or building debug binary
+fn get_codanna_binary() -> PathBuf {
+    // 1. Check environment variable (set by full-test.sh or CI)
+    if let Ok(bin_path) = env::var("CODANNA_BIN") {
+        let path = PathBuf::from(bin_path);
+        if path.exists() {
+            return path;
+        }
+        eprintln!(
+            "Warning: CODANNA_BIN set to '{}' but file doesn't exist",
+            path.display()
+        );
+    }
+
+    // 2. For standalone tests, ensure debug binary exists
+    // Use absolute path based on CARGO_MANIFEST_DIR to handle CI working directory issues
+    let manifest_dir = env::var("CARGO_MANIFEST_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| env::current_dir().expect("Failed to get current directory"));
+
+    let debug_bin = manifest_dir.join("target/debug/codanna");
+
+    if !debug_bin.exists() {
+        eprintln!("Building debug binary for tests...");
+        eprintln!("Expected at: {}", debug_bin.display());
+
+        // Skip building in CI - binary should already exist
+        if env::var("CI").is_ok() || env::var("GITHUB_ACTIONS").is_ok() {
+            panic!(
+                "Debug binary not found at {} in CI environment. Check build step.",
+                debug_bin.display()
+            );
+        }
+
+        let status = Command::new("cargo")
+            .args(["build", "--bin", "codanna"])
+            .current_dir(&manifest_dir)
+            .status()
+            .expect("Failed to build codanna binary");
+
+        if !status.success() {
+            panic!("Failed to build codanna binary");
+        }
+    }
+
+    debug_bin
+}
 
 /// Helper to run codanna parse and capture output
 fn run_parse_command(code: &str, lang_ext: &str, max_depth: Option<usize>) -> String {
-    // Create a temporary file with the code - use unique name to avoid conflicts
+    // Create a truly unique temporary file using uuid-like naming
     use std::sync::atomic::{AtomicUsize, Ordering};
     static COUNTER: AtomicUsize = AtomicUsize::new(0);
-    let id = COUNTER.fetch_add(1, Ordering::SeqCst);
-    let temp_dir = std::env::temp_dir();
-    let temp_file = temp_dir.join(format!("test_{id}.{lang_ext}"));
-    std::fs::write(&temp_file, code).expect("Failed to write test file");
 
-    // Build the command
-    let mut cmd = Command::new("cargo");
-    cmd.arg("run").arg("--").arg("parse").arg(&temp_file);
+    // Generate a unique ID combining multiple factors for guaranteed uniqueness
+    let id = COUNTER.fetch_add(1, Ordering::SeqCst);
+    let thread_id = format!("{:?}", std::thread::current().id())
+        .replace("ThreadId(", "")
+        .replace(")", "");
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+
+    let temp_dir = std::env::temp_dir();
+    let temp_file = temp_dir.join(format!(
+        "codanna_test_{}_{}_{}_{}.{}",
+        std::process::id(),
+        thread_id,
+        timestamp,
+        id,
+        lang_ext
+    ));
+
+    // Write the test file
+    if let Err(e) = std::fs::write(&temp_file, code) {
+        panic!("Failed to write test file {}: {}", temp_file.display(), e);
+    }
+
+    // Get the binary path using our centralized helper
+    let binary_path = get_codanna_binary();
+
+    let mut cmd = Command::new(&binary_path);
+    cmd.arg("parse").arg(&temp_file);
 
     if let Some(depth) = max_depth {
         cmd.arg("--max-depth").arg(depth.to_string());
@@ -26,7 +99,18 @@ fn run_parse_command(code: &str, lang_ext: &str, max_depth: Option<usize>) -> St
     let output = cmd.output().expect("Failed to run parse command");
 
     // Clean up temp file
-    std::fs::remove_file(temp_file).ok();
+    std::fs::remove_file(&temp_file).ok();
+
+    // Check if the command failed
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        panic!(
+            "Parse command failed with exit code {:?}\nstderr: {}\nstdout: {}",
+            output.status.code(),
+            stderr,
+            String::from_utf8_lossy(&output.stdout)
+        );
+    }
 
     String::from_utf8_lossy(&output.stdout).to_string()
 }

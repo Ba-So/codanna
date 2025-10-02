@@ -1,7 +1,7 @@
 === TypeScript Language ABI-15 COMPREHENSIVE NODE MAPPING ===
-  Generated: 2025-09-13 22:47:31 UTC
+  Generated: 2025-09-30 23:32:49 UTC
   ABI Version: 14
-  Node kind count: 193
+  Node kind count: 198
 
 === IMPORT/EXPORT NODES ===
   ✓ import_statement                    -> ID: 174
@@ -45,7 +45,7 @@
 
 === FUNCTION NODES ===
   ✓ function_declaration                -> ID: 224
-  ✗ function_expression                 NOT FOUND
+  ✓ function_expression                 -> ID: 223
   ✓ arrow_function                      -> ID: 227
   ✗ generator_function                  NOT FOUND
   ✓ generator_function_declaration      -> ID: 226
@@ -105,6 +105,7 @@
   ✓ +                                   -> ID: 79
   ✓ ++                                  -> ID: 97
   ✓ ,                                   -> ID: 11
+  ✓ -                                   -> ID: 80
   ✓ .                                   -> ID: 47
   ✓ ...                                 -> ID: 70
   ✓ /                                   -> ID: 81
@@ -215,6 +216,7 @@
   ✓ template_string                     -> ID: 248
   ✓ template_substitution               -> ID: 249
   ✓ template_type                       -> ID: 315
+  ✓ ternary_expression                  -> ID: 242
   ✓ this                                -> ID: 114
   ✓ this_type                           -> ID: 381
   ✓ true                                -> ID: 116
@@ -226,6 +228,8 @@
   ✓ undefined                           -> ID: 119
   ✓ unknown                             -> ID: 155
   ✓ update_expression                   -> ID: 245
+  ✓ var                                 -> ID: 18
+  ✓ variable_declaration                -> ID: 183
   ✓ variable_declarator                 -> ID: 185
   ✓ void                                -> ID: 95
   ✓ while                               -> ID: 32

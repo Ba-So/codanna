@@ -187,6 +187,48 @@ pub fn safe_truncate_str(s: &str, max_bytes: usize) -> &str {
     &s[..boundary]
 }
 
+/// Safely extract a substring window from source code, respecting UTF-8 boundaries.
+///
+/// This function creates a window of up to `window_size` bytes before the `end_byte` position,
+/// ensuring we never slice in the middle of a UTF-8 character.
+///
+/// # Arguments
+/// * `code` - The source code string
+/// * `end_byte` - The ending byte position (exclusive)
+/// * `window_size` - Maximum size of the window in bytes
+///
+/// # Returns
+/// A slice of the code that:
+/// - Ends at `end_byte`
+/// - Starts at most `window_size` bytes before `end_byte`
+/// - Respects UTF-8 character boundaries
+///
+/// # Example
+/// ```ignore
+/// let code = "export class 🔍 Scanner";
+/// let window = safe_substring_window(code, 20, 10);
+/// // Returns a safe slice without cutting the emoji
+/// ```
+pub fn safe_substring_window(code: &str, end_byte: usize, window_size: usize) -> &str {
+    // Clamp end_byte to string length
+    let end = end_byte.min(code.len());
+
+    // Calculate the desired start position
+    let start_raw = end.saturating_sub(window_size);
+
+    // Find the nearest valid UTF-8 character boundary
+    let start = if start_raw > 0 && !code.is_char_boundary(start_raw) {
+        // Search forward for a valid boundary (up to 3 bytes for UTF-8)
+        (start_raw..=start_raw.saturating_add(3).min(end))
+            .find(|&i| code.is_char_boundary(i))
+            .unwrap_or(end) // If no boundary found, return empty string
+    } else {
+        start_raw
+    };
+
+    &code[start..end]
+}
+
 /// Creates a truncated preview with ellipsis for display purposes.
 /// Used for signatures and previews in parsers.
 #[inline]

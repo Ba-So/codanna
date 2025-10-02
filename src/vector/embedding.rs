@@ -188,6 +188,7 @@ impl FastEmbedGenerator {
     pub fn new() -> Result<Self, VectorError> {
         let model = TextEmbedding::try_new(
             InitOptions::new(EmbeddingModel::AllMiniLML6V2)
+                .with_cache_dir(crate::init::models_dir())
                 .with_show_download_progress(false),
         )
         .map_err(|e| VectorError::EmbeddingFailed(
@@ -207,6 +208,7 @@ impl FastEmbedGenerator {
     pub fn new_with_progress() -> Result<Self, VectorError> {
         let model = TextEmbedding::try_new(
             InitOptions::new(EmbeddingModel::AllMiniLML6V2)
+                .with_cache_dir(crate::init::models_dir())
                 .with_show_download_progress(true),
         )
         .map_err(|e| VectorError::EmbeddingFailed(

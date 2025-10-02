@@ -182,7 +182,13 @@ impl PythonParser {
 
                 // Set current class for parent tracking
                 if let Some(name) = class_name {
-                    context.set_current_class(Some(name.to_string()));
+                    // Build full class path for nested classes
+                    let full_class_name = if let Some(parent_class) = context.current_class() {
+                        format!("{parent_class}.{name}")
+                    } else {
+                        name.to_string()
+                    };
+                    context.set_current_class(Some(full_class_name));
                 }
 
                 // Continue processing children to find methods inside the class
@@ -294,7 +300,14 @@ impl PythonParser {
         // Build function signature with type annotations
         let signature = self.build_function_signature(node, code);
 
-        let mut symbol = Symbol::new(symbol_id, name, kind, file_id, range);
+        // For methods inside nested classes, use the full qualified name
+        let symbol_name = if let Some(class_name) = context.current_class() {
+            format!("{class_name}.{name}")
+        } else {
+            name.to_string()
+        };
+
+        let mut symbol = Symbol::new(symbol_id, symbol_name.as_str(), kind, file_id, range);
         symbol.doc_comment = doc_comment;
         symbol.signature = signature.map(|s| s.into_boxed_str());
         // Set the scope context based on where the function is defined
@@ -858,9 +871,11 @@ impl PythonParser {
                 Some(&code[function_node.byte_range()])
             }
             "attribute" => {
-                // Method call: obj.method() - should NOT be tracked by find_calls
-                // Return None to exclude method calls from function call tracking
-                None
+                // Cross-module or method call: module.func() or obj.method()
+                // Return the full qualified path for cross-module tracking
+                // This allows tracking calls like app.utils.helper.process_data()
+                // The attribute node's byte_range already contains the full dotted path
+                Some(&code[function_node.byte_range()])
             }
             _ => None,
         }
@@ -1525,12 +1540,12 @@ class Calculator:
         assert!(
             symbols
                 .iter()
-                .any(|s| s.name.as_ref() == "__init__" && s.kind == SymbolKind::Method)
+                .any(|s| s.name.as_ref() == "Calculator.__init__" && s.kind == SymbolKind::Method)
         );
         assert!(
             symbols
                 .iter()
-                .any(|s| s.name.as_ref() == "add" && s.kind == SymbolKind::Method)
+                .any(|s| s.name.as_ref() == "Calculator.add" && s.kind == SymbolKind::Method)
         );
 
         let class = symbols
@@ -1539,9 +1554,12 @@ class Calculator:
             .unwrap();
         let init_method = symbols
             .iter()
-            .find(|s| s.name.as_ref() == "__init__")
+            .find(|s| s.name.as_ref() == "Calculator.__init__")
             .unwrap();
-        let add_method = symbols.iter().find(|s| s.name.as_ref() == "add").unwrap();
+        let add_method = symbols
+            .iter()
+            .find(|s| s.name.as_ref() == "Calculator.add")
+            .unwrap();
 
         println!(
             "✓ Found class_definition \"{}\" at {}:{}-{}:{}",
@@ -2444,10 +2462,13 @@ class APIClient:
         // Should find module, class, both methods, and response variable (enhanced extraction)
         assert_eq!(symbols.len(), 5);
 
-        let fetch_method = symbols.iter().find(|s| s.name.as_ref() == "fetch").unwrap();
+        let fetch_method = symbols
+            .iter()
+            .find(|s| s.name.as_ref() == "APIClient.fetch")
+            .unwrap();
         let sync_method = symbols
             .iter()
-            .find(|s| s.name.as_ref() == "sync_method")
+            .find(|s| s.name.as_ref() == "APIClient.sync_method")
             .unwrap();
 
         // Both should be methods (inside class)
@@ -2598,11 +2619,11 @@ async def process_batch(items: List[str]) -> Dict[str, Any]:
             .unwrap();
         let async_method = symbols
             .iter()
-            .find(|s| s.name.as_ref() == "fetch_user")
+            .find(|s| s.name.as_ref() == "AsyncWebService.fetch_user")
             .unwrap();
         let sync_method = symbols
             .iter()
-            .find(|s| s.name.as_ref() == "get_cache_key")
+            .find(|s| s.name.as_ref() == "AsyncWebService.get_cache_key")
             .unwrap();
         let async_func = symbols
             .iter()
@@ -2976,8 +2997,10 @@ class ClassWithDocs:
     #[test]
     fn test_comprehensive_docstring_extraction() {
         let mut parser = PythonParser::new().unwrap();
-        let code = std::fs::read_to_string("examples/python/comprehensive.py")
-            .expect("Should find comprehensive test file");
+        // Use relative path from the workspace root
+        let test_file = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("examples/python/comprehensive.py");
+        let code = std::fs::read_to_string(test_file).expect("Should find comprehensive test file");
 
         println!("=== COMPREHENSIVE PYTHON DOCSTRING EXTRACTION TEST ===");
         let symbols = parser.parse(&code, FileId::new(1).unwrap(), &mut SymbolCounter::new());
@@ -3045,5 +3068,64 @@ class ClassWithDocs:
         if let Some(constant) = module_constant {
             println!("  Has docstring: {}", constant.doc_comment.is_some());
         }
+    }
+
+    #[test]
+    fn test_qualified_calls() {
+        let code = r#"
+def init_config_file():
+    """Initialize configuration file."""
+    # Cross-module function call
+    app.utils.helper.process_data()
+
+    # Another cross-module call
+    database.connection.manager.connect()
+
+    # Simple function call
+    print("Initializing")
+
+def process_data():
+    """Process data locally."""
+    print("Processing")
+"#;
+
+        let mut parser = PythonParser::new().unwrap();
+        let calls = parser.find_calls(code);
+
+        println!("\n=== Testing Python qualified calls extraction ===");
+        println!("Found {} calls:", calls.len());
+        for (from, to, _) in &calls {
+            println!("  '{from}' -> '{to}'");
+        }
+
+        // Check that we find the qualified calls
+        let has_app_utils_call = calls
+            .iter()
+            .any(|(f, t, _)| *f == "init_config_file" && *t == "app.utils.helper.process_data");
+
+        let has_database_call = calls.iter().any(|(f, t, _)| {
+            *f == "init_config_file" && *t == "database.connection.manager.connect"
+        });
+
+        let has_print_call = calls
+            .iter()
+            .any(|(f, t, _)| *f == "init_config_file" && *t == "print");
+
+        assert!(
+            has_app_utils_call,
+            "Should find call from init_config_file to app.utils.helper.process_data\nFound calls: {calls:?}"
+        );
+
+        assert!(
+            has_database_call,
+            "Should find call from init_config_file to database.connection.manager.connect\nFound calls: {calls:?}"
+        );
+
+        assert!(
+            has_print_call,
+            "Should find simple call from init_config_file to print\nFound calls: {calls:?}"
+        );
+
+        println!("SUCCESS: Python now tracks cross-module calls correctly!");
     }
 }

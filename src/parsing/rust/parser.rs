@@ -2908,4 +2908,36 @@ pub struct DocumentedStruct {
 
         println!("=== SUCCESS: Inner doc comments now supported! ===");
     }
+
+    #[test]
+    fn test_qualified_calls() {
+        let code = r#"
+pub fn init_config_file() {
+    crate::init::init_global_dirs();
+}
+
+pub fn init_global_dirs() {
+    println!("Initializing");
+}
+"#;
+
+        let mut parser = RustParser::new().unwrap();
+        let calls = parser.find_calls(code);
+
+        println!("\n=== Testing qualified calls extraction ===");
+        println!("Found {} calls:", calls.len());
+        for (from, to, _) in &calls {
+            println!("  '{from}' -> '{to}'");
+        }
+
+        // Check that we find the qualified call
+        let has_qualified_call = calls
+            .iter()
+            .any(|(f, t, _)| *f == "init_config_file" && *t == "crate::init::init_global_dirs");
+
+        assert!(
+            has_qualified_call,
+            "Should find call from init_config_file to crate::init::init_global_dirs\nFound calls: {calls:?}"
+        );
+    }
 }

@@ -13,6 +13,7 @@ pub mod config;
 pub mod display;
 pub mod error;
 pub mod indexing;
+pub mod init;
 pub mod io;
 pub mod mcp;
 pub mod parsing;

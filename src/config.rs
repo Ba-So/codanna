@@ -207,7 +207,9 @@ fn default_version() -> u32 {
     1
 }
 fn default_index_path() -> PathBuf {
-    PathBuf::from(".codanna/index")
+    // Use configurable directory name from init module
+    let local_dir = crate::init::local_dir_name();
+    PathBuf::from(local_dir).join("index")
 }
 fn default_parallel_threads() -> usize {
     num_cpus::get()
@@ -486,9 +488,10 @@ impl Settings {
 
     /// Load configuration from all sources
     pub fn load() -> Result<Self, Box<figment::Error>> {
-        // Try to find the workspace root by looking for .codanna directory
+        // Try to find the workspace root by looking for config directory
+        let local_dir = crate::init::local_dir_name();
         let config_path = Self::find_workspace_config()
-            .unwrap_or_else(|| PathBuf::from(".codanna/settings.toml"));
+            .unwrap_or_else(|| PathBuf::from(local_dir).join("settings.toml"));
 
         Figment::new()
             // Start with defaults
@@ -520,9 +523,10 @@ impl Settings {
     /// Searches from current directory up to root
     fn find_workspace_config() -> Option<PathBuf> {
         let current = std::env::current_dir().ok()?;
+        let local_dir = crate::init::local_dir_name();
 
         for ancestor in current.ancestors() {
-            let config_dir = ancestor.join(".codanna");
+            let config_dir = ancestor.join(local_dir);
             if config_dir.exists() && config_dir.is_dir() {
                 return Some(config_dir.join("settings.toml"));
             }
@@ -563,12 +567,13 @@ impl Settings {
         Ok(())
     }
 
-    /// Get the workspace root directory (where .codanna is located)
+    /// Get the workspace root directory (where config directory is located)
     pub fn workspace_root() -> Option<PathBuf> {
         let current = std::env::current_dir().ok()?;
+        let local_dir = crate::init::local_dir_name();
 
         for ancestor in current.ancestors() {
-            let config_dir = ancestor.join(".codanna");
+            let config_dir = ancestor.join(local_dir);
             if config_dir.exists() && config_dir.is_dir() {
                 return Some(ancestor.to_path_buf());
             }
@@ -603,7 +608,9 @@ impl Settings {
 
     /// Create a default settings file with helpful comments
     pub fn init_config_file(force: bool) -> Result<PathBuf, Box<dyn std::error::Error>> {
-        let config_path = PathBuf::from(".codanna/settings.toml");
+        // Use configurable directory name from init module
+        let local_dir = crate::init::local_dir_name();
+        let config_path = PathBuf::from(local_dir).join("settings.toml");
 
         if !force && config_path.exists() {
             return Err("Configuration file already exists. Use --force to overwrite".into());
@@ -636,6 +643,34 @@ impl Settings {
 
         // Create default .codannaignore file
         Self::create_default_ignore_file(force)?;
+
+        // Initialize global directories and symlink
+        crate::init::init_global_dirs()?;
+        crate::init::create_fastembed_symlink()?;
+
+        // Check if project is already registered (by path in registry or by local file)
+        let local_dir = crate::init::local_dir_name();
+        let project_id_path = PathBuf::from(local_dir).join(".project-id");
+        let project_path = std::env::current_dir()?;
+
+        // Always use register_or_update which checks for existing projects by path
+        let project_id = crate::init::ProjectRegistry::register_or_update_project(&project_path)?;
+
+        // Check if we need to update the local .project-id file
+        if project_id_path.exists() {
+            let existing_id = std::fs::read_to_string(&project_id_path)?;
+            if existing_id.trim() != project_id {
+                // Update the file if the ID changed (shouldn't happen normally)
+                std::fs::write(&project_id_path, &project_id)?;
+                println!("Updated project ID: {project_id}");
+            } else {
+                println!("Project already registered with ID: {project_id}");
+            }
+        } else {
+            // Create .project-id file for the first time
+            std::fs::write(&project_id_path, &project_id)?;
+            println!("Project registered with ID: {project_id}");
+        }
 
         Ok(config_path)
     }
@@ -854,7 +889,9 @@ mod tests {
     fn test_default_settings() {
         let settings = Settings::default();
         assert_eq!(settings.version, 1);
-        assert_eq!(settings.index_path, PathBuf::from(".codanna/index"));
+        // Use the correct local dir name for test mode
+        let expected_index_path = PathBuf::from(format!("{}/index", crate::init::local_dir_name()));
+        assert_eq!(settings.index_path, expected_index_path);
         assert!(settings.indexing.parallel_threads > 0);
         assert!(settings.languages.contains_key("rust"));
     }
@@ -942,8 +979,8 @@ enabled = true
         let original_dir = std::env::current_dir().unwrap();
         std::env::set_current_dir(&temp_dir).unwrap();
 
-        // Create config directory
-        let config_dir = temp_dir.path().join(".codanna");
+        // Create config directory using the correct test directory name
+        let config_dir = temp_dir.path().join(crate::init::local_dir_name());
         fs::create_dir_all(&config_dir).unwrap();
 
         // Create a config file

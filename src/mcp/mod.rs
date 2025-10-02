@@ -223,7 +223,9 @@ impl CodeIntelligenceServer {
         }
     }
 
-    pub async fn from_persistence(settings: &Settings) -> Result<Self, Box<dyn std::error::Error>> {
+    pub async fn from_persistence(
+        settings: Arc<Settings>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let persistence = IndexPersistence::new(settings.index_path.clone());
 
         let indexer = if persistence.exists() {
@@ -231,19 +233,19 @@ impl CodeIntelligenceServer {
                 "Loading existing index from {}",
                 settings.index_path.display()
             );
-            match persistence.load() {
+            match persistence.load_with_settings(settings.clone(), false) {
                 Ok(loaded) => {
                     eprintln!("Loaded index with {} symbols", loaded.symbol_count());
                     loaded
                 }
                 Err(e) => {
                     eprintln!("Warning: Could not load index: {e}. Creating new index.");
-                    SimpleIndexer::new()
+                    SimpleIndexer::with_settings(settings.clone())
                 }
             }
         } else {
             eprintln!("No existing index found. Please run 'index' command first.");
-            SimpleIndexer::new()
+            SimpleIndexer::with_settings(settings.clone())
         };
 
         Ok(Self::new(indexer))
@@ -368,7 +370,9 @@ impl CodeIntelligenceServer {
         Ok(CallToolResult::success(vec![Content::text(result)]))
     }
 
-    #[tool(description = "Get all functions that a given function calls")]
+    #[tool(
+        description = "Get functions that a given function CALLS (invokes with parentheses).\n\nShows: function_name() → what it calls\nDoes NOT show: Type usage, component rendering, or who calls this function.\n\nUse analyze_impact for: Type dependencies, component usage (JSX), or reverse lookups."
+    )]
     pub async fn get_calls(
         &self,
         Parameters(GetCallsRequest { function_name }): Parameters<GetCallsRequest>,
@@ -461,7 +465,9 @@ impl CodeIntelligenceServer {
         Ok(CallToolResult::success(vec![Content::text(result)]))
     }
 
-    #[tool(description = "Find all functions that call a given function")]
+    #[tool(
+        description = "Find functions that CALL a given function (invoke it with parentheses).\n\nShows: what calls → function_name()\nDoes NOT show: Type references, component rendering, or what this function calls.\n\nUse analyze_impact for: Complete dependency graph including type usage and composition."
+    )]
     pub async fn find_callers(
         &self,
         Parameters(FindCallersRequest { function_name }): Parameters<FindCallersRequest>,
@@ -561,7 +567,9 @@ impl CodeIntelligenceServer {
         Ok(CallToolResult::success(vec![Content::text(result)]))
     }
 
-    #[tool(description = "Analyze the impact radius of changing a symbol")]
+    #[tool(
+        description = "Analyze complete impact of changing a symbol. Shows ALL relationships: function calls, type usage, composition.\n\nShows:\n- What CALLS this function\n- What USES this as a type (fields, parameters, returns)\n- What RENDERS/COMPOSES this (JSX: <Component>, Rust: struct fields, etc.)\n- Full dependency graph across files\n\nUse this when: You need to see everything that depends on a symbol."
+    )]
     pub async fn analyze_impact(
         &self,
         Parameters(AnalyzeImpactRequest {
@@ -696,10 +704,36 @@ impl CodeIntelligenceServer {
     ) -> Result<CallToolResult, McpError> {
         let indexer = self.indexer.read().await;
 
+        // Use MCP debug flag for cleaner output
+        if indexer.settings().mcp.debug {
+            eprintln!("MCP DEBUG: semantic_search_docs called");
+            eprintln!(
+                "MCP DEBUG: Indexer symbol count: {}",
+                indexer.symbol_count()
+            );
+            eprintln!("MCP DEBUG: Has semantic: {}", indexer.has_semantic_search());
+        }
+
         if !indexer.has_semantic_search() {
-            return Ok(CallToolResult::error(vec![Content::text(
-                "Semantic search is not enabled. The index needs to be rebuilt with semantic search enabled.",
-            )]));
+            // Check if semantic files exist
+            let semantic_path = indexer.settings().index_path.join("semantic");
+            let metadata_exists = semantic_path.join("metadata.json").exists();
+            let vectors_exist = semantic_path.join("segment_0.vec").exists();
+            let symbol_count = indexer.symbol_count();
+
+            // Get current working directory for debugging
+            let cwd = std::env::current_dir()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|_| "unknown".to_string());
+
+            return Ok(CallToolResult::error(vec![Content::text(format!(
+                "Semantic search is not enabled. The index needs to be rebuilt with semantic search enabled.\n\nDEBUG INFO:\n- Index path: {}\n- Symbol count: {}\n- Semantic files exist: {}\n- Has semantic search: {}\n- Working dir: {}",
+                indexer.settings().index_path.display(),
+                symbol_count,
+                metadata_exists && vectors_exist,
+                indexer.has_semantic_search(),
+                cwd
+            ))]));
         }
 
         let results = match threshold {
@@ -773,7 +807,7 @@ impl CodeIntelligenceServer {
     }
 
     #[tool(
-        description = "Search documentation with full context including dependencies, callers, and impact"
+        description = "Search by natural language and get full context: documentation, dependencies, callers, impact.\n\nReturns symbols with:\n- Their documentation\n- What calls them\n- What they call\n- Complete impact graph (includes ALL relationships: calls, type usage, composition)\n\nUse this when: You want to find and understand symbols with their complete usage context."
     )]
     pub async fn semantic_search_with_context(
         &self,
@@ -787,9 +821,30 @@ impl CodeIntelligenceServer {
         let indexer = self.indexer.read().await;
 
         if !indexer.has_semantic_search() {
-            return Ok(CallToolResult::error(vec![Content::text(
-                "Semantic search is not enabled. The index needs to be rebuilt with semantic search enabled.",
-            )]));
+            if indexer.settings().mcp.debug {
+                eprintln!("DEBUG: Semantic search check failed in semantic_search_with_context");
+                eprintln!(
+                    "DEBUG: Indexer settings index_path: {}",
+                    indexer.settings().index_path.display()
+                );
+                eprintln!(
+                    "DEBUG: Indexer has_semantic_search: {}",
+                    indexer.has_semantic_search()
+                );
+            }
+            // Check if semantic files exist
+            let semantic_path = indexer.settings().index_path.join("semantic");
+            let metadata_exists = semantic_path.join("metadata.json").exists();
+            let vectors_exist = semantic_path.join("segment_0.vec").exists();
+
+            return Ok(CallToolResult::error(vec![Content::text(format!(
+                "Semantic search is not enabled. The index needs to be rebuilt with semantic search enabled.\n\nDEBUG INFO:\n- Index path: {}\n- Has semantic search: {}\n- Semantic path: {}\n- Metadata exists: {}\n- Vectors exist: {}",
+                indexer.settings().index_path.display(),
+                indexer.has_semantic_search(),
+                semantic_path.display(),
+                metadata_exists,
+                vectors_exist
+            ))]));
         }
 
         // First, perform semantic search

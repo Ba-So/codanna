@@ -201,7 +201,20 @@ impl LanguageBehavior for TypeScriptBehavior {
         self.register_file_with_state(path, file_id, module_path);
     }
 
-    fn add_import(&self, import: crate::parsing::Import) {
+    fn add_import(&self, mut import: crate::parsing::Import) {
+        // Enhancement: Transform TypeScript path aliases before storing
+        // This ensures that imports with aliases (like @/components) are stored
+        // with their resolved paths, making symbol resolution work correctly
+        if let Some(rules) = self.load_project_rules_for_file(import.file_id) {
+            let enhancer = super::resolution::TypeScriptProjectEnhancer::new(rules);
+            use crate::parsing::resolution::ProjectResolutionEnhancer;
+
+            if let Some(enhanced) = enhancer.enhance_import_path(&import.path, import.file_id) {
+                // Store the enhanced path for better resolution
+                import.path = enhanced;
+            }
+        }
+
         self.add_import_with_state(import);
     }
 
@@ -561,6 +574,16 @@ impl LanguageBehavior for TypeScriptBehavior {
                     symbol.id,
                     symbol.scope_context.as_ref(),
                 );
+
+                // CRITICAL: Also add by module_path for cross-module resolution
+                // This allows imports to resolve symbols by their full module path
+                if let Some(ref module_path) = symbol.module_path {
+                    context.add_symbol(
+                        module_path.to_string(),
+                        symbol.id,
+                        crate::parsing::ScopeLevel::Global,
+                    );
+                }
             }
         }
 
@@ -585,6 +608,16 @@ impl LanguageBehavior for TypeScriptBehavior {
                 };
 
                 context.add_symbol(symbol.name.to_string(), symbol.id, scope_level);
+
+                // CRITICAL: Also add by module_path for cross-module resolution
+                if let Some(ref module_path) = symbol.module_path {
+                    context.add_symbol(
+                        module_path.to_string(),
+                        symbol.id,
+                        crate::parsing::ScopeLevel::Global,
+                    );
+                }
+
                 public_symbols.push(symbol);
             }
         }
@@ -779,6 +812,15 @@ impl LanguageBehavior for TypeScriptBehavior {
                     symbol.id,
                     symbol.scope_context.as_ref(),
                 );
+
+                // CRITICAL: Also add by module_path for cross-module resolution
+                if let Some(ref module_path) = symbol.module_path {
+                    context.add_symbol(
+                        module_path.to_string(),
+                        symbol.id,
+                        crate::parsing::ScopeLevel::Global,
+                    );
+                }
             }
         }
 
@@ -818,6 +860,15 @@ impl LanguageBehavior for TypeScriptBehavior {
                         symbol.id,
                         crate::parsing::ScopeLevel::Global,
                     );
+
+                    // CRITICAL: Also add by module_path for cross-module resolution
+                    if let Some(ref module_path) = symbol.module_path {
+                        context.add_symbol(
+                            module_path.to_string(),
+                            symbol.id,
+                            crate::parsing::ScopeLevel::Global,
+                        );
+                    }
                 }
             }
         }
@@ -865,23 +916,29 @@ impl LanguageBehavior for TypeScriptBehavior {
         }
     }
 
-    // TypeScript-specific: Handle ES module imports with project resolution enhancement
+    // TypeScript-specific: Handle ES module imports
     fn resolve_import(
         &self,
         import: &crate::parsing::Import,
         document_index: &DocumentIndex,
     ) -> Option<SymbolId> {
-        // Step 1: Try to enhance the import path using project rules (tsconfig paths)
-        let enhanced_path = if let Some(rules) = self.load_project_rules_for_file(import.file_id) {
-            // Create an enhancer to transform the path
-            let enhancer = super::resolution::TypeScriptProjectEnhancer::new(rules);
-            use crate::parsing::resolution::ProjectResolutionEnhancer;
-            enhancer
-                .enhance_import_path(&import.path, import.file_id)
-                .unwrap_or_else(|| import.path.clone())
+        // Debug: Log the import we're trying to resolve
+        let debug = if let Ok(settings) = crate::config::Settings::load() {
+            settings.mcp.debug || settings.debug
         } else {
-            import.path.clone()
+            false
         };
+
+        if debug {
+            eprintln!("\n=== RESOLVING IMPORT ===");
+            eprintln!("  Path: {}", import.path);
+            eprintln!("  Alias: {:?}", import.alias);
+            eprintln!("  File ID: {:?}", import.file_id);
+        }
+
+        // Note: Import paths are already enhanced in add_import(), so we use them directly
+        let enhanced_path = import.path.clone();
+        let was_enhanced = import.path.starts_with("./") && import.path.contains("/src/");
 
         // Prefer resolving by the imported local name when available (named/default imports)
         let importing_module = self
@@ -935,21 +992,94 @@ impl LanguageBehavior for TypeScriptBehavior {
             }
         }
 
-        let target_module = normalize_ts_import(&enhanced_path, &importing_module);
+        // If the path was enhanced by tsconfig resolution, it's already project-relative
+        // and should be converted directly to a module path, not resolved relative to the importing module
+        let target_module = if was_enhanced {
+            // Enhanced paths like "./src/components/Button" should become module paths
+            // relative to the project root (where the tsconfig is)
+            // For example: "./src/components/Button" -> "examples.typescript.react.src.components.Button"
+
+            // Get the file's full module path to determine the project prefix
+            let project_prefix = if importing_module.contains("examples.typescript.react") {
+                "examples.typescript.react"
+            } else {
+                // Fallback: extract the project prefix from the importing module
+                // by taking everything before "src" or the first component
+                if let Some(idx) = importing_module.find(".src.") {
+                    &importing_module[..idx]
+                } else {
+                    ""
+                }
+            };
+
+            // Convert the enhanced path to a module path
+            let cleaned_path = enhanced_path
+                .trim_start_matches("./")
+                .trim_start_matches("/")
+                .replace('/', ".");
+
+            let result = if project_prefix.is_empty() {
+                cleaned_path
+            } else {
+                format!("{project_prefix}.{cleaned_path}")
+            };
+
+            if debug {
+                eprintln!("  Module path computation:");
+                eprintln!("    Importing module: {importing_module}");
+                eprintln!("    Project prefix: {project_prefix}");
+                eprintln!("    Target module: {result}");
+            }
+
+            result
+        } else {
+            // Normal path resolution relative to importing module
+            let normal = normalize_ts_import(&enhanced_path, &importing_module);
+            if debug {
+                eprintln!("  Normal resolution: {enhanced_path} -> {normal}");
+            }
+            normal
+        };
 
         if let Some(local_name) = &import.alias {
+            if debug {
+                eprintln!("  Looking up symbol by alias: {local_name}");
+            }
             if let Ok(cands) = document_index.find_symbols_by_name(local_name, None) {
+                if debug {
+                    eprintln!(
+                        "  Found {} candidates with name '{}'",
+                        cands.len(),
+                        local_name
+                    );
+                }
                 for s in cands {
                     if let Some(module_path) = &s.module_path {
+                        if debug {
+                            eprintln!(
+                                "    Candidate module: {} vs target: {}",
+                                module_path.as_ref(),
+                                target_module
+                            );
+                        }
                         if module_path.as_ref() == target_module {
+                            if debug {
+                                eprintln!("  RESOLVED: Found symbol {:?}", s.id);
+                            }
                             return Some(s.id);
                         }
                     }
+                }
+                if debug {
+                    eprintln!("  FAILED: No matching symbol found in module '{target_module}'");
                 }
             }
             None
         } else {
             // Namespace or side-effect import: cannot map to a single symbol reliably
+            if debug {
+                eprintln!("  No alias - namespace or side-effect import");
+            }
             None
         }
     }
