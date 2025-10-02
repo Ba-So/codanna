@@ -1,9 +1,5 @@
 {
   "mcpServers": {
-    "Context7": {
-      "command": "npx",
-      "args": ["-y", "@upstash/context7-mcp"]
-    },
     "codanna-stdio": {
       "command": "codanna",
       "args": ["serve", "--watch", "--watch-interval", "5"]
@@ -14,6 +10,14 @@
       "args": [
         "/home/baso/dev/codanna"
       ]
+    },
+    "cratedocs": {
+      "type": "stdio",
+      "command": "cratedocs",
+      "args": [
+        "stdio"
+      ],
+      "env": {}
     },
     "cargo": {
       "type": "stdio",
