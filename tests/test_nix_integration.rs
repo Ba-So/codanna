@@ -34,6 +34,7 @@ struct ExpectedSymbol {
     name: String,
     kind: String,
     has_signature: bool,
+    #[allow(dead_code)]
     has_doc: bool,
 }
 
@@ -58,7 +59,7 @@ fn load_test_fixtures() -> Vec<TestFixture> {
         if path.extension().and_then(|s| s.to_str()) == Some("nix") {
             let filename = path.file_name().unwrap().to_str().unwrap();
             let content = fs::read_to_string(&path)
-                .expect(&format!("Failed to read fixture file: {}", filename));
+                .unwrap_or_else(|_| panic!("Failed to read fixture file: {filename}"));
 
             // Get expected results for this file
             if let Some(file_expected) = expected.get(filename) {
@@ -268,9 +269,7 @@ fn test_parsing_performance() {
 
     assert!(
         symbols_per_second >= TARGET_SYMBOLS_PER_SECOND,
-        "Performance target not met: {:.2} < {:.2} symbols/second",
-        symbols_per_second,
-        TARGET_SYMBOLS_PER_SECOND
+        "Performance target not met: {symbols_per_second:.2} < {TARGET_SYMBOLS_PER_SECOND:.2} symbols/second"
     );
 }
 
@@ -282,7 +281,7 @@ fn test_error_handling() {
     let file_id = FileId(1);
 
     // Test various malformed Nix code
-    let malformed_cases = vec![
+    let malformed_cases = [
         "{ unclosed = \"string;", // Unclosed string
         "let x = 1 in",           // Incomplete let expression
         "{ name = ; }",           // Missing value
@@ -390,22 +389,23 @@ fn generate_large_nix_file(num_bindings: usize) -> String {
         match i % 4 {
             0 => {
                 // Variable binding
-                content.push_str(&format!("  var{} = \"value{}\";\n", i, i));
+                content.push_str(&format!("  var{i} = \"value{i}\";\n"));
             }
             1 => {
                 // Function binding
-                content.push_str(&format!("  func{} = x: x + {};\n", i, i));
+                content.push_str(&format!("  func{i} = x: x + {i};\n"));
             }
             2 => {
                 // Attribute set binding
                 content.push_str(&format!(
-                    "  obj{} = {{ name = \"obj{}\"; value = {}; }};\n",
-                    i, i, i
+                    "  obj{i} = {{ name = \"obj{i}\"; value = {i}; }};\n",
                 ));
             }
             3 => {
                 // List binding
-                content.push_str(&format!("  list{} = [ {} {} {} ];\n", i, i, i + 1, i + 2));
+                let i_plus_1 = i + 1;
+                let i_plus_2 = i + 2;
+                content.push_str(&format!("  list{i} = [ {i} {i_plus_1} {i_plus_2} ];\n"));
             }
             _ => unreachable!(),
         }
@@ -456,8 +456,7 @@ fn test_parsing_benchmarks() {
         let symbols_per_second = (total_symbols as f64) / duration.as_secs_f64();
 
         println!(
-            "{}: {:.2}ms avg, {:.0} symbols/sec ({} symbols total)",
-            name, avg_time, symbols_per_second, total_symbols
+            "{name}: {avg_time:.2}ms avg, {symbols_per_second:.0} symbols/sec ({total_symbols} symbols total)"
         );
     }
 }

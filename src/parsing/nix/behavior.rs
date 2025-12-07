@@ -527,6 +527,7 @@ mod tests {
             signature: None,
             module_path: None,
             file_id: FileId::new(1).unwrap(),
+            file_path: "test.nix".into(),
             range: Range {
                 start_line: 1,
                 start_column: 1,

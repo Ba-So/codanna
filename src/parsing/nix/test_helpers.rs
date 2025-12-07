@@ -259,7 +259,7 @@ pub fn generate_large_nix_code(num_bindings: usize) -> String {
     let mut code = String::from("{\n");
 
     for i in 0..num_bindings {
-        code.push_str(&format!("  var{} = \"value{}\";\n", i, i));
+        code.push_str(&format!("  var{i} = \"value{i}\";\n"));
     }
 
     code.push_str("}\n");

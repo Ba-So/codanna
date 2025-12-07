@@ -5,9 +5,11 @@
 
 use codanna::FileId;
 use codanna::parsing::nix::NixParser;
+use codanna::parsing::LanguageParser;
 use codanna::types::SymbolCounter;
-use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use std::fs;
+use std::hint::black_box;
 
 /// Load real Nix files for benchmarking
 fn load_benchmark_files() -> Vec<(String, String)> {
@@ -46,36 +48,30 @@ fn generate_nix_code(num_bindings: usize) -> String {
         match i % 5 {
             0 => {
                 // Simple variable
-                code.push_str(&format!("  var{} = \"value{}\";\n", i, i));
+                code.push_str(&format!("  var{i} = \"value{i}\";\n"));
             }
             1 => {
                 // Function definition
-                code.push_str(&format!("  func{} = x: y: x + y + {};\n", i, i));
+                code.push_str(&format!("  func{i} = x: y: x + y + {i};\n"));
             }
             2 => {
                 // Attribute set
                 code.push_str(&format!(
-                    "  obj{} = {{ name = \"obj{}\"; value = {}; enabled = true; }};\n",
-                    i, i, i
+                    "  obj{i} = {{ name = \"obj{i}\"; value = {i}; enabled = true; }};\n"
                 ));
             }
             3 => {
                 // List with interpolation
+                let func_idx = i % 10;
+                let i_plus_1 = i + 1;
                 code.push_str(&format!(
-                    "  list{} = [ {} \"item-${{toString {}}}\" (func{} {} {}) ];\n",
-                    i,
-                    i,
-                    i,
-                    i % 10,
-                    i,
-                    i + 1
+                    "  list{i} = [ {i} \"item-${{toString {i}}}\" (func{func_idx} {i} {i_plus_1}) ];\n"
                 ));
             }
             4 => {
                 // Complex expression with let-in
                 code.push_str(&format!(
-                    "  complex{} = let x = {}; y = x * 2; in {{ inherit x y; sum = x + y; }};\n",
-                    i, i
+                    "  complex{i} = let x = {i}; y = x * 2; in {{ inherit x y; sum = x + y; }};\n"
                 ));
             }
             _ => unreachable!(),
@@ -102,7 +98,7 @@ fn bench_symbol_extraction(c: &mut Criterion) {
         };
 
         group.bench_with_input(
-            BenchmarkId::new("parse", format!("{} ({} symbols)", name, symbol_count)),
+            BenchmarkId::new("parse", format!("{name} ({symbol_count} symbols)")),
             &content,
             |b, content| {
                 let mut parser = NixParser::new().unwrap();
@@ -144,7 +140,7 @@ fn bench_throughput(c: &mut Criterion) {
         };
 
         group.bench_with_input(
-            BenchmarkId::new("symbols_per_second", format!("{}_bindings", size)),
+            BenchmarkId::new("symbols_per_second", format!("{size}_bindings")),
             &content,
             |b, content| {
                 let mut parser = NixParser::new().unwrap();
@@ -164,8 +160,7 @@ fn bench_throughput(c: &mut Criterion) {
                     // Calculate symbols per second
                     let symbols_per_second = (total_symbols as f64) / duration.as_secs_f64();
                     println!(
-                        "Size {}: {:.0} symbols/second ({} symbols per iteration)",
-                        size, symbols_per_second, symbol_count
+                        "Size {size}: {symbols_per_second:.0} symbols/second ({symbol_count} symbols per iteration)"
                     );
 
                     duration
@@ -283,7 +278,7 @@ fn bench_memory_usage(c: &mut Criterion) {
         let content = generate_nix_code(*size);
 
         group.bench_with_input(
-            BenchmarkId::new("parse_and_hold", format!("{}_symbols", size)),
+            BenchmarkId::new("parse_and_hold", format!("{size}_symbols")),
             &content,
             |b, content| {
                 b.iter(|| {
