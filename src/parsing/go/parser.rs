@@ -6,6 +6,7 @@
 //! When migrating or updating the parser, ensure compatibility with ABI-15 features.
 
 use crate::parsing::Import;
+use crate::parsing::parser::check_recursion_depth;
 use crate::parsing::{
     HandledNode, LanguageParser, MethodCall, NodeTracker, NodeTrackingState, ParserContext,
     ScopeType,
@@ -55,6 +56,7 @@ impl GoParser {
                     symbol_counter,
                     &mut symbols,
                     "", // Module path will be determined by behavior
+                    0,
                 );
             }
             None => {
@@ -128,10 +130,14 @@ impl GoParser {
         counter: &mut SymbolCounter,
         symbols: &mut Vec<Symbol>,
         module_path: &str,
+        depth: usize,
     ) {
+        if !check_recursion_depth(depth, node) {
+            return;
+        }
         match node.kind() {
             "function_declaration" => {
-                self.register_handled_node("function_declaration", node.kind_id());
+                self.register_node_recursively(node);
                 // Extract function name for parent tracking
                 let func_name = node
                     .child_by_field_name("name")
@@ -177,6 +183,7 @@ impl GoParser {
                             counter,
                             symbols,
                             module_path,
+                            depth + 1,
                         );
                     }
                 }
@@ -189,7 +196,7 @@ impl GoParser {
                 self.context.set_current_class(saved_class);
             }
             "method_declaration" => {
-                self.register_handled_node("method_declaration", node.kind_id());
+                self.register_node_recursively(node);
                 // Extract method name for parent tracking
                 let method_name = node
                     .child_by_field_name("name")
@@ -249,6 +256,7 @@ impl GoParser {
                             counter,
                             symbols,
                             module_path,
+                            depth + 1,
                         );
                     }
                 }
@@ -259,16 +267,24 @@ impl GoParser {
                 self.context.set_current_class(saved_class);
             }
             "type_declaration" => {
-                self.register_handled_node("type_declaration", node.kind_id());
+                self.register_node_recursively(node);
                 self.process_type_declaration(node, code, file_id, counter, symbols, module_path);
             }
             "var_declaration" => {
-                self.register_handled_node("var_declaration", node.kind_id());
+                self.register_node_recursively(node);
                 self.process_var_declaration(node, code, file_id, counter, symbols, module_path);
             }
             "const_declaration" => {
-                self.register_handled_node("const_declaration", node.kind_id());
+                self.register_node_recursively(node);
                 self.process_const_declaration(node, code, file_id, counter, symbols, module_path);
+            }
+            "package_clause" => {
+                self.register_node_recursively(node);
+                // Package name is handled by behavior module
+            }
+            "import_declaration" => {
+                self.register_node_recursively(node);
+                // Imports are processed by find_imports() method
             }
             "if_statement" => {
                 self.register_handled_node("if_statement", node.kind_id());
@@ -284,6 +300,7 @@ impl GoParser {
                         counter,
                         symbols,
                         module_path,
+                        depth + 1,
                     );
                 }
 
@@ -304,6 +321,7 @@ impl GoParser {
                             counter,
                             symbols,
                             module_path,
+                            depth,
                         );
                     } else {
                         self.extract_symbols_from_node(
@@ -313,6 +331,7 @@ impl GoParser {
                             counter,
                             symbols,
                             module_path,
+                            depth + 1,
                         );
                     }
                 }
@@ -333,6 +352,7 @@ impl GoParser {
                         counter,
                         symbols,
                         module_path,
+                        depth + 1,
                     );
                 }
 
@@ -352,6 +372,7 @@ impl GoParser {
                         counter,
                         symbols,
                         module_path,
+                        depth + 1,
                     );
                 }
 
@@ -371,6 +392,7 @@ impl GoParser {
                         counter,
                         symbols,
                         module_path,
+                        depth + 1,
                     );
                 }
 
@@ -399,6 +421,7 @@ impl GoParser {
                         counter,
                         symbols,
                         module_path,
+                        depth + 1,
                     );
                 }
             }
@@ -1194,6 +1217,7 @@ impl GoParser {
         counter: &mut SymbolCounter,
         symbols: &mut Vec<Symbol>,
         module_path: &str,
+        depth: usize,
     ) {
         // Range clause format: index, value := range items
         // Extract the variable names from the left side
@@ -1222,6 +1246,7 @@ impl GoParser {
                         counter,
                         symbols,
                         module_path,
+                        depth + 1,
                     );
                 }
             }
@@ -2122,6 +2147,18 @@ impl NodeTracker for GoParser {
 
     fn register_handled_node(&mut self, node_kind: &str, node_id: u16) {
         self.node_tracker.register_handled_node(node_kind, node_id)
+    }
+}
+
+impl GoParser {
+    /// Recursively register all nodes for audit tracking
+    /// This ensures child nodes (type_identifier, field_identifier, etc.) are counted
+    fn register_node_recursively(&mut self, node: Node) {
+        self.register_handled_node(node.kind(), node.kind_id());
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            self.register_node_recursively(child);
+        }
     }
 }
 

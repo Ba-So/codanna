@@ -239,24 +239,31 @@ pub fn execute_parse(
             extension: extension.to_string(),
         })?;
 
-    // Read file content
-    let code = std::fs::read_to_string(file_path).map_err(|e| ParseError::FileReadError {
+    // Read file content with lossy UTF-8 conversion
+    // This handles files with invalid UTF-8 sequences by replacing them with �
+    let bytes = std::fs::read(file_path).map_err(|e| ParseError::FileReadError {
         path: file_path.display().to_string(),
         source: e,
     })?;
+    let code = String::from_utf8_lossy(&bytes).into_owned();
 
     // Create tree-sitter parser for the language
     let mut parser = tree_sitter::Parser::new();
     let ts_language = match language {
         Language::Rust => tree_sitter_rust::LANGUAGE.into(),
         Language::Python => tree_sitter_python::LANGUAGE.into(),
-        Language::TypeScript => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
+        Language::TypeScript => tree_sitter_typescript::LANGUAGE_TSX.into(),
         Language::JavaScript => tree_sitter_javascript::LANGUAGE.into(),
         Language::Php => tree_sitter_php::LANGUAGE_PHP.into(),
         Language::Go => tree_sitter_go::LANGUAGE.into(),
         Language::Nix => tree_sitter_nix::LANGUAGE.into(),
         Language::C => tree_sitter_c::LANGUAGE.into(),
         Language::Cpp => tree_sitter_cpp::LANGUAGE.into(),
+        Language::CSharp => tree_sitter_c_sharp::LANGUAGE.into(),
+        Language::Gdscript => tree_sitter_gdscript::LANGUAGE.into(),
+        Language::Java => tree_sitter_java::LANGUAGE.into(),
+        Language::Kotlin => tree_sitter_kotlin::language(),
+        Language::Swift => tree_sitter_swift::LANGUAGE.into(),
     };
 
     parser

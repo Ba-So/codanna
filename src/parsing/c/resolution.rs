@@ -3,6 +3,7 @@
 //! This module provides C language resolution following the same pattern
 //! as Rust and TypeScript implementations.
 
+use crate::parsing::resolution::ImportBinding;
 use crate::parsing::{InheritanceResolver, ResolutionScope, ScopeLevel, ScopeType};
 use crate::{FileId, SymbolId};
 use std::collections::HashMap;
@@ -34,6 +35,9 @@ pub struct CResolutionContext {
 
     /// Include tracking (header paths)
     includes: Vec<String>,
+
+    /// Binding info for imports keyed by visible name
+    import_bindings: HashMap<String, ImportBinding>,
 }
 
 impl CResolutionContext {
@@ -46,6 +50,7 @@ impl CResolutionContext {
             global_symbols: HashMap::new(),
             scope_stack: Vec::new(),
             includes: Vec::new(),
+            import_bindings: HashMap::new(),
         }
     }
 
@@ -168,6 +173,22 @@ impl ResolutionScope for CResolutionContext {
         }
 
         symbols
+    }
+
+    fn populate_imports(&mut self, imports: &[crate::parsing::Import]) {
+        // Store raw import paths (header files in C)
+        for import in imports {
+            self.includes.push(import.path.clone());
+        }
+    }
+
+    fn register_import_binding(&mut self, binding: ImportBinding) {
+        self.import_bindings
+            .insert(binding.exposed_name.clone(), binding);
+    }
+
+    fn import_binding(&self, name: &str) -> Option<ImportBinding> {
+        self.import_bindings.get(name).cloned()
     }
 }
 

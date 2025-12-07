@@ -12,6 +12,13 @@ echo "🔧 Auto-fixing common issues..."
 echo "================================"
 echo ""
 
+# Ensure we're using the latest stable Rust (matches GitHub Actions)
+echo "0️⃣ Ensuring Rust toolchain is up-to-date..."
+rustup update stable --no-self-update > /dev/null 2>&1 || true
+current_version=$(rustc --version)
+echo "   Using: $current_version"
+echo ""
+
 # Auto-format code
 echo "1️⃣ Auto-formatting code..."
 cargo fmt

@@ -89,6 +89,31 @@ pub fn init_global_dirs() -> Result<(), std::io::Error> {
         println!("Using existing models directory: {}", models.display());
     }
 
+    // Initialize profile infrastructure
+    init_profile_infrastructure()?;
+
+    Ok(())
+}
+
+/// Initialize profile system infrastructure
+/// Creates ~/.codanna/providers.json if it doesn't exist
+pub fn init_profile_infrastructure() -> Result<(), std::io::Error> {
+    let providers_file = global_dir().join("providers.json");
+
+    // Create empty providers registry if it doesn't exist
+    if !providers_file.exists() {
+        let empty_registry = serde_json::json!({
+            "version": 1,
+            "providers": {}
+        });
+
+        let content =
+            serde_json::to_string_pretty(&empty_registry).map_err(std::io::Error::other)?;
+
+        std::fs::write(&providers_file, content)?;
+        println!("Created provider registry: {}", providers_file.display());
+    }
+
     Ok(())
 }
 

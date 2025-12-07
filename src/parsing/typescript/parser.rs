@@ -6,6 +6,7 @@
 //! When migrating or updating the parser, ensure compatibility with ABI-14 features.
 
 use crate::parsing::Import;
+use crate::parsing::parser::check_recursion_depth;
 use crate::parsing::{
     LanguageParser, MethodCall, NodeTracker, NodeTrackingState, ParserContext, ScopeType,
 };
@@ -21,6 +22,8 @@ pub struct TypeScriptParser {
     node_tracker: NodeTrackingState,
     /// Track symbols that are default exported (e.g., export default Container)
     default_exported_symbols: std::collections::HashSet<String>,
+    /// Track symbols that are named exported (e.g., export { Card, CardHeader })
+    named_exported_symbols: std::collections::HashSet<String>,
     /// Track JSX component usages (caller -> component name)
     component_usages: Vec<(String, String)>,
 }
@@ -65,9 +68,10 @@ impl TypeScriptParser {
         file_id: FileId,
         symbol_counter: &mut SymbolCounter,
     ) -> Vec<Symbol> {
-        // Reset context and default exports for each file
+        // Reset context and exports for each file
         self.context = ParserContext::new();
         self.default_exported_symbols.clear();
+        self.named_exported_symbols.clear();
         self.component_usages.clear();
         let mut symbols = Vec::new();
 
@@ -81,6 +85,7 @@ impl TypeScriptParser {
                     symbol_counter,
                     &mut symbols,
                     "", // Module path will be determined by behavior
+                    0,
                 );
             }
             None => {
@@ -97,6 +102,13 @@ impl TypeScriptParser {
                         symbol.name
                     );
                 }
+                symbol.visibility = Visibility::Public;
+            }
+        }
+
+        // Update visibility for named exported symbols
+        for symbol in &mut symbols {
+            if self.named_exported_symbols.contains(symbol.name.as_ref()) {
                 symbol.visibility = Visibility::Public;
             }
         }
@@ -119,6 +131,7 @@ impl TypeScriptParser {
             context: ParserContext::new(),
             node_tracker: NodeTrackingState::new(),
             default_exported_symbols: std::collections::HashSet::new(),
+            named_exported_symbols: std::collections::HashSet::new(),
             component_usages: Vec::new(),
         })
     }
@@ -132,7 +145,12 @@ impl TypeScriptParser {
         counter: &mut SymbolCounter,
         symbols: &mut Vec<Symbol>,
         module_path: &str,
+        depth: usize,
     ) {
+        // Guard against stack overflow
+        if !check_recursion_depth(depth, node) {
+            return;
+        }
         match node.kind() {
             "function_declaration" | "generator_function_declaration" => {
                 // Register ALL child nodes for audit (including type_parameters, parameters, etc.)
@@ -171,6 +189,7 @@ impl TypeScriptParser {
                         counter,
                         symbols,
                         module_path,
+                        depth + 1,
                     );
                 }
 
@@ -204,7 +223,15 @@ impl TypeScriptParser {
                     self.context.set_current_class(class_name.clone());
 
                     // Extract class members
-                    self.extract_class_members(node, code, file_id, counter, symbols, module_path);
+                    self.extract_class_members(
+                        node,
+                        code,
+                        file_id,
+                        counter,
+                        symbols,
+                        module_path,
+                        depth + 1,
+                    );
 
                     // Exit scope first (this clears the current context)
                     self.context.exit_scope();
@@ -240,7 +267,7 @@ impl TypeScriptParser {
                 }
             }
             "lexical_declaration" | "variable_declaration" => {
-                self.register_handled_node(node.kind(), node.kind_id());
+                self.register_node_recursively(node);
                 self.process_variable_declaration(
                     node,
                     code,
@@ -248,6 +275,7 @@ impl TypeScriptParser {
                     counter,
                     symbols,
                     module_path,
+                    depth + 1,
                 );
             }
             "arrow_function" => {
@@ -258,6 +286,12 @@ impl TypeScriptParser {
                 {
                     symbols.push(symbol);
                 }
+            }
+            "function_expression" => {
+                // Register function_expression and all its children for audit
+                self.register_node_recursively(node);
+                // Function expressions are handled similarly to arrow functions
+                // when assigned to variables (processed in variable_declarator)
             }
             "ERROR" => {
                 // ERROR nodes occur when tree-sitter can't parse something
@@ -326,6 +360,7 @@ impl TypeScriptParser {
                         counter,
                         symbols,
                         module_path,
+                        depth + 1,
                     );
                     i += 1;
                 }
@@ -358,6 +393,65 @@ impl TypeScriptParser {
                     }
                 }
 
+                // Check for "export type *" pattern (grammar produces ERROR for "type")
+                // AST structure: export_statement > ERROR("type") + namespace_export > identifier
+                let has_error = children.iter().any(|c| c.kind() == "ERROR");
+                if has_error {
+                    for child in &children {
+                        if child.kind() == "namespace_export" {
+                            // Found "export type * as Name" pattern
+                            // Find the identifier child of namespace_export
+                            let mut ns_cursor = child.walk();
+                            for ns_child in child.children(&mut ns_cursor) {
+                                if ns_child.kind() == "identifier" {
+                                    let export_name = &code[ns_child.byte_range()];
+                                    let symbol_id = counter.next_id();
+                                    let range = Range::new(
+                                        node.start_position().row as u32,
+                                        node.start_position().column as u16,
+                                        node.end_position().row as u32,
+                                        node.end_position().column as u16,
+                                    );
+                                    let mut symbol = Symbol::new(
+                                        symbol_id,
+                                        export_name.to_string(),
+                                        SymbolKind::Module,
+                                        file_id,
+                                        range,
+                                    );
+                                    symbol = symbol
+                                        .with_visibility(Visibility::Public)
+                                        .with_signature(format!("export type * as {export_name}"));
+                                    if !module_path.is_empty() {
+                                        symbol = symbol.with_module_path(module_path.to_string());
+                                    }
+                                    symbol.scope_context =
+                                        Some(self.context.current_scope_context());
+                                    symbols.push(symbol);
+                                    return; // Handled this export
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Check for named export lists (export { Card, CardHeader })
+                for child in &children {
+                    if child.kind() == "export_clause" {
+                        // Process export specifiers within the export clause
+                        let mut export_cursor = child.walk();
+                        for export_child in child.children(&mut export_cursor) {
+                            if export_child.kind() == "export_specifier" {
+                                // Get the name being exported
+                                if let Some(name_node) = export_child.child_by_field_name("name") {
+                                    let symbol_name = &code[name_node.byte_range()];
+                                    self.named_exported_symbols.insert(symbol_name.to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+
                 // Still process children for nested declarations (e.g., export function foo())
                 if !found_default {
                     for child in children {
@@ -368,13 +462,14 @@ impl TypeScriptParser {
                             counter,
                             symbols,
                             module_path,
+                            depth + 1,
                         );
                     }
                 }
             }
             "jsx_element" | "jsx_self_closing_element" => {
                 // Track JSX component usage as Uses relationship
-                self.register_handled_node(node.kind(), node.kind_id());
+                self.register_node_recursively(node);
 
                 if crate::config::is_global_debug_enabled() {
                     eprintln!(
@@ -401,6 +496,24 @@ impl TypeScriptParser {
                         counter,
                         symbols,
                         module_path,
+                        depth + 1,
+                    );
+                }
+            }
+            // Ambient declarations: declare module "foo" { }
+            "ambient_declaration" | "module" => {
+                self.register_node_recursively(node);
+                // Process children for nested declarations
+                let mut cursor = node.walk();
+                for child in node.children(&mut cursor) {
+                    self.extract_symbols_from_node(
+                        child,
+                        code,
+                        file_id,
+                        counter,
+                        symbols,
+                        module_path,
+                        depth + 1,
                     );
                 }
             }
@@ -417,6 +530,7 @@ impl TypeScriptParser {
                         counter,
                         symbols,
                         module_path,
+                        depth + 1,
                     );
                 }
             }
@@ -503,6 +617,7 @@ impl TypeScriptParser {
         counter: &mut SymbolCounter,
         symbols: &mut Vec<Symbol>,
         module_path: &str,
+        depth: usize,
     ) {
         if let Some(body) = class_node.child_by_field_name("body") {
             let mut cursor = body.walk();
@@ -544,6 +659,7 @@ impl TypeScriptParser {
                                 counter,
                                 symbols,
                                 module_path,
+                                depth + 1,
                             );
 
                             // Exit scope first (this clears the current context)
@@ -680,6 +796,7 @@ impl TypeScriptParser {
         counter: &mut SymbolCounter,
         symbols: &mut Vec<Symbol>,
         module_path: &str,
+        depth: usize,
     ) {
         let mut cursor = node.walk();
         for child in node.children(&mut cursor) {
@@ -792,6 +909,7 @@ impl TypeScriptParser {
                                             counter,
                                             symbols,
                                             module_path,
+                                            depth + 1,
                                         );
 
                                         // Exit scope and restore context
@@ -1593,6 +1711,33 @@ impl TypeScriptParser {
                                         if p.kind() == "variable_declarator" {
                                             if let Some(name_node) = p.child_by_field_name("name") {
                                                 ctx = Some(&code[name_node.byte_range()]);
+                                                break;
+                                            }
+                                        } else if p.kind() == "pair" {
+                                            // Handle object property: { propertyName: () => { ... } }
+                                            // Look for the parent object's variable name
+                                            let mut obj_anc = p.parent();
+                                            while let Some(oa) = obj_anc {
+                                                if oa.kind() == "object" {
+                                                    // Found the object, now find its variable declarator
+                                                    if let Some(obj_parent) = oa.parent() {
+                                                        if obj_parent.kind()
+                                                            == "variable_declarator"
+                                                        {
+                                                            if let Some(name_node) = obj_parent
+                                                                .child_by_field_name("name")
+                                                            {
+                                                                ctx = Some(
+                                                                    &code[name_node.byte_range()],
+                                                                );
+                                                                break;
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                                obj_anc = oa.parent();
+                                            }
+                                            if ctx.is_some() {
                                                 break;
                                             }
                                         }

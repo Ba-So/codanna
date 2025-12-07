@@ -81,6 +81,8 @@ impl<'de> Deserialize<'de> for LanguageId {
             "typescript" => "typescript",
             "php" => "php",
             "go" => "go",
+            "csharp" => "csharp",
+            "kotlin" => "kotlin",
             // For unknown languages, we leak the string to get 'static lifetime
             // This is safe because language identifiers are typically created once
             // at startup and live for the entire program
@@ -372,13 +374,16 @@ fn initialize_registry(registry: &mut LanguageRegistry) {
     super::python::register(registry);
     super::php::register(registry);
     super::typescript::register(registry);
+    super::javascript::register(registry);
     super::go::register(registry);
     super::nix::register(registry);
     super::c::register(registry);
     super::cpp::register(registry);
-
-    // Future languages will be added here:
-    // super::javascript_definition::register(registry);
+    super::csharp::register(registry);
+    super::gdscript::register(registry);
+    super::java::register(registry);
+    super::kotlin::register(registry);
+    super::swift::register(registry);
 }
 
 /// Get the global registry

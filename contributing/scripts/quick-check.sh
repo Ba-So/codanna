@@ -13,6 +13,13 @@ echo "🚀 Quick CI check (matches GitHub Actions quick-check.yml)"
 echo "This should complete in ~2-3 minutes"
 echo ""
 
+# Ensure we're using the latest stable Rust (matches GitHub Actions)
+echo "0️⃣ Ensuring Rust toolchain is up-to-date..."
+rustup update stable --no-self-update > /dev/null 2>&1 || true
+current_version=$(rustc --version)
+echo "   Using: $current_version"
+echo ""
+
 # Format check - should be instant
 echo "1️⃣ Check formatting (not modifying files)..."
 cargo fmt --all -- --check

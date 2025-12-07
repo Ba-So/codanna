@@ -59,9 +59,9 @@ pub struct TsConfig {
     pub compilerOptions: CompilerOptions,
 }
 
-/// JSONC parsing helper using json5 for comment and trailing comma support
+/// JSONC parsing helper using serde_json5 for comment and trailing comma support
 pub fn parse_jsonc_tsconfig(content: &str) -> ResolutionResult<TsConfig> {
-    json5::from_str(content)
+    serde_json5::from_str(content)
         .map_err(|e| ResolutionError::invalid_cache(
             format!("Failed to parse tsconfig.json: {e}\nSuggestion: Check JSON syntax, comments, and trailing commas")
         ))
@@ -210,9 +210,17 @@ impl PathAliasResolver {
     pub fn from_tsconfig(config: &TsConfig) -> ResolutionResult<Self> {
         let mut rules = Vec::new();
 
-        // Compile path patterns in deterministic order (sorted by pattern)
+        // Compile path patterns in SPECIFICITY order (most specific first)
+        // More specific patterns (longer, fewer wildcards) should match before catch-all patterns
+        // Example: "@/registry/*" should be tried before "@/*"
         let mut paths: Vec<_> = config.compilerOptions.paths.iter().collect();
-        paths.sort_by_key(|(pattern, _)| pattern.as_str());
+        paths.sort_by_key(|(pattern, _)| {
+            // Sort by:
+            // 1. Length (descending) - longer patterns are more specific
+            // 2. Number of wildcards (ascending) - fewer wildcards are more specific
+            let wildcard_count = pattern.matches('*').count();
+            (-(pattern.len() as isize), wildcard_count)
+        });
 
         for (pattern, targets) in paths {
             let rule = PathRule::new(pattern.clone(), targets.clone())?;

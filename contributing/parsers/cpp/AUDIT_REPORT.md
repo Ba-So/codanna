@@ -1,11 +1,12 @@
 # C++ Parser Coverage Report
 
-*Generated: 2025-09-30 23:32:49 UTC*
+*Generated: 2025-12-01 15:24:41 UTC*
 
 ## Summary
-- Nodes in file: 131
-- Nodes handled by parser: 131
-- Symbol kinds extracted: 2
+- Key nodes: 26/26 (100%)
+- Symbol kinds extracted: 5
+
+> **Note:** Key nodes are symbol-producing constructs (classes, functions, templates).
 
 ## Coverage Table
 
@@ -14,24 +15,29 @@
 | translation_unit | 219 | ✅ implemented |
 | function_definition | 254 | ✅ implemented |
 | class_specifier | 379 | ✅ implemented |
-| struct_specifier | - | ❌ not found |
-| union_specifier | - | ❌ not found |
-| enum_specifier | - | ❌ not found |
+| struct_specifier | 303 | ✅ implemented |
+| union_specifier | 304 | ✅ implemented |
+| enum_specifier | 301 | ✅ implemented |
 | namespace_definition | 430 | ✅ implemented |
 | template_declaration | 386 | ✅ implemented |
-| template_instantiation | - | ❌ not found |
+| template_function | 428 | ✅ implemented |
+| template_type | 426 | ✅ implemented |
 | function_declarator | 286 | ✅ implemented |
 | init_declarator | 294 | ✅ implemented |
 | parameter_declaration | 311 | ✅ implemented |
 | field_declaration | 307 | ✅ implemented |
+| type_definition | 256 | ✅ implemented |
+| alias_declaration | 435 | ✅ implemented |
 | access_specifier | 411 | ✅ implemented |
 | base_class_clause | 383 | ✅ implemented |
-| constructor_definition | - | ❌ not found |
-| destructor_definition | - | ❌ not found |
-| operator_overload | - | ❌ not found |
+| destructor_name | 479 | ✅ implemented |
+| operator_name | 489 | ✅ implemented |
+| field_initializer_list | 398 | ✅ implemented |
 | lambda_expression | 464 | ✅ implemented |
-| using_declaration | - | ❌ not found |
-| typedef_declaration | - | ❌ not found |
+| using_declaration | 434 | ✅ implemented |
+| call_expression | 350 | ✅ implemented |
+| field_expression | 361 | ✅ implemented |
+| qualified_identifier | 485 | ✅ implemented |
 
 ## Legend
 
@@ -41,16 +47,4 @@
 
 ## Recommended Actions
 
-### Priority 2: Missing Examples
-These nodes aren't in the comprehensive example. Consider:
-
-- `struct_specifier`: Add example to comprehensive.cpp or verify node name
-- `union_specifier`: Add example to comprehensive.cpp or verify node name
-- `enum_specifier`: Add example to comprehensive.cpp or verify node name
-- `template_instantiation`: Add example to comprehensive.cpp or verify node name
-- `constructor_definition`: Add example to comprehensive.cpp or verify node name
-- `destructor_definition`: Add example to comprehensive.cpp or verify node name
-- `operator_overload`: Add example to comprehensive.cpp or verify node name
-- `using_declaration`: Add example to comprehensive.cpp or verify node name
-- `typedef_declaration`: Add example to comprehensive.cpp or verify node name
-
+✨ **Excellent coverage!** All key nodes are implemented.

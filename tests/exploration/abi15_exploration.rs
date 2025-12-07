@@ -1259,6 +1259,492 @@ class DatabaseLogger implements Logger {
     }
 
     #[test]
+    fn explore_csharp_abi15_comprehensive() {
+        let language: Language = tree_sitter_c_sharp::LANGUAGE.into();
+
+        println!("=== C# Language ABI-15 COMPREHENSIVE NODE MAPPING ===");
+        println!("  ABI Version: {}", language.abi_version());
+        println!("  Node kind count: {}", language.node_kind_count());
+
+        println!("\n=== CLASS-RELATED NODES ===");
+        for node_kind in &[
+            "class",
+            "class_declaration",
+            "abstract_class_declaration",
+            "partial_class_declaration",
+            "sealed_class_declaration",
+            "static_class_declaration",
+            "class_body",
+            "base_list",
+            "constructor_declaration",
+            "destructor_declaration",
+            "field_declaration",
+            "property_declaration",
+            "method_declaration",
+            "operator_declaration",
+            "indexer_declaration",
+            "event_declaration",
+            "event_field_declaration",
+        ] {
+            let id = language.id_for_node_kind(node_kind, true);
+            if id != 0 {
+                println!("  ✓ {node_kind:30} -> ID: {id}");
+            } else {
+                println!("  ✗ {node_kind:30} NOT FOUND");
+            }
+        }
+
+        println!("\n=== INTERFACE-RELATED NODES ===");
+        for node_kind in &[
+            "interface",
+            "interface_declaration",
+            "interface_body",
+            "interface_member_declaration",
+            "method_signature",
+            "property_signature",
+            "indexer_signature",
+            "event_signature",
+            "explicit_interface_specifier",
+        ] {
+            let id = language.id_for_node_kind(node_kind, true);
+            if id != 0 {
+                println!("  ✓ {node_kind:30} -> ID: {id}");
+            } else {
+                println!("  ✗ {node_kind:30} NOT FOUND");
+            }
+        }
+
+        println!("\n=== STRUCT-RELATED NODES ===");
+        for node_kind in &[
+            "struct",
+            "struct_declaration",
+            "readonly_struct_declaration",
+            "ref_struct_declaration",
+            "record_struct_declaration",
+            "struct_body",
+            "struct_member",
+        ] {
+            let id = language.id_for_node_kind(node_kind, true);
+            if id != 0 {
+                println!("  ✓ {node_kind:30} -> ID: {id}");
+            } else {
+                println!("  ✗ {node_kind:30} NOT FOUND");
+            }
+        }
+
+        println!("\n=== ENUM-RELATED NODES ===");
+        for node_kind in &[
+            "enum",
+            "enum_declaration",
+            "enum_body",
+            "enum_member_declaration",
+            "enum_member_declarator",
+            "enum_base",
+        ] {
+            let id = language.id_for_node_kind(node_kind, true);
+            if id != 0 {
+                println!("  ✓ {node_kind:30} -> ID: {id}");
+            } else {
+                println!("  ✗ {node_kind:30} NOT FOUND");
+            }
+        }
+
+        println!("\n=== RECORD-RELATED NODES ===");
+        for node_kind in &[
+            "record",
+            "record_declaration",
+            "record_class_declaration",
+            "record_struct_declaration",
+            "positional_parameter_list",
+            "primary_constructor_base_type",
+            "with_expression",
+        ] {
+            let id = language.id_for_node_kind(node_kind, true);
+            if id != 0 {
+                println!("  ✓ {node_kind:30} -> ID: {id}");
+            } else {
+                println!("  ✗ {node_kind:30} NOT FOUND");
+            }
+        }
+
+        println!("\n=== METHOD/FUNCTION NODES ===");
+        for node_kind in &[
+            "method_declaration",
+            "local_function_statement",
+            "lambda_expression",
+            "anonymous_method_expression",
+            "delegate_declaration",
+            "parameter_list",
+            "parameter",
+            "parameter_array",
+            "modifier",
+            "override",
+            "virtual",
+            "abstract",
+            "static",
+            "async",
+            "partial",
+            "sealed",
+            "readonly",
+            "extern",
+            "unsafe",
+        ] {
+            let id = language.id_for_node_kind(node_kind, true);
+            if id != 0 {
+                println!("  ✓ {node_kind:30} -> ID: {id}");
+            } else {
+                println!("  ✗ {node_kind:30} NOT FOUND");
+            }
+        }
+
+        println!("\n=== PROPERTY-RELATED NODES ===");
+        for node_kind in &[
+            "property_declaration",
+            "property_body",
+            "accessor_list",
+            "accessor_declaration",
+            "get_accessor_declaration",
+            "set_accessor_declaration",
+            "init_accessor_declaration",
+            "auto_property_initializer",
+            "expression_body",
+            "arrow_expression_clause",
+        ] {
+            let id = language.id_for_node_kind(node_kind, true);
+            if id != 0 {
+                println!("  ✓ {node_kind:30} -> ID: {id}");
+            } else {
+                println!("  ✗ {node_kind:30} NOT FOUND");
+            }
+        }
+
+        println!("\n=== TYPE-RELATED NODES ===");
+        for node_kind in &[
+            "type",
+            "type_parameter_list",
+            "type_parameter",
+            "type_parameter_constraints_clause",
+            "type_argument_list",
+            "predefined_type",
+            "nullable_type",
+            "array_type",
+            "pointer_type",
+            "ref_type",
+            "generic_name",
+            "qualified_name",
+            "alias_qualified_name",
+            "tuple_type",
+            "function_pointer_type",
+        ] {
+            let id = language.id_for_node_kind(node_kind, true);
+            if id != 0 {
+                println!("  ✓ {node_kind:30} -> ID: {id}");
+            } else {
+                println!("  ✗ {node_kind:30} NOT FOUND");
+            }
+        }
+
+        println!("\n=== NAMESPACE-RELATED NODES ===");
+        for node_kind in &[
+            "namespace_declaration",
+            "file_scoped_namespace_declaration",
+            "qualified_name",
+            "using_directive",
+            "using_static_directive",
+            "using_alias_directive",
+            "global_using_directive",
+            "extern_alias_directive",
+        ] {
+            let id = language.id_for_node_kind(node_kind, true);
+            if id != 0 {
+                println!("  ✓ {node_kind:30} -> ID: {id}");
+            } else {
+                println!("  ✗ {node_kind:30} NOT FOUND");
+            }
+        }
+
+        println!("\n=== VARIABLE/FIELD NODES ===");
+        for node_kind in &[
+            "field_declaration",
+            "variable_declaration",
+            "variable_declarator",
+            "local_declaration_statement",
+            "constant_declaration",
+            "event_field_declaration",
+            "event_declaration",
+            "fixed_statement",
+            "using_statement",
+        ] {
+            let id = language.id_for_node_kind(node_kind, true);
+            if id != 0 {
+                println!("  ✓ {node_kind:30} -> ID: {id}");
+            } else {
+                println!("  ✗ {node_kind:30} NOT FOUND");
+            }
+        }
+
+        println!("\n=== ATTRIBUTE NODES ===");
+        for node_kind in &[
+            "attribute_list",
+            "attribute",
+            "attribute_argument_list",
+            "attribute_argument",
+            "attribute_target_specifier",
+            "global_attribute_list",
+        ] {
+            let id = language.id_for_node_kind(node_kind, true);
+            if id != 0 {
+                println!("  ✓ {node_kind:30} -> ID: {id}");
+            } else {
+                println!("  ✗ {node_kind:30} NOT FOUND");
+            }
+        }
+
+        println!("\n=== GENERIC-RELATED NODES ===");
+        for node_kind in &[
+            "type_parameter_list",
+            "type_parameter",
+            "type_parameter_constraint",
+            "type_parameter_constraints_clause",
+            "where_clause",
+            "type_argument_list",
+            "generic_name",
+            "constructed_type",
+            "unbound_type_name",
+        ] {
+            let id = language.id_for_node_kind(node_kind, true);
+            if id != 0 {
+                println!("  ✓ {node_kind:30} -> ID: {id}");
+            } else {
+                println!("  ✗ {node_kind:30} NOT FOUND");
+            }
+        }
+
+        println!("\n=== CALL-RELATED NODES ===");
+        for node_kind in &[
+            "invocation_expression",
+            "member_access_expression",
+            "element_access_expression",
+            "conditional_access_expression",
+            "object_creation_expression",
+            "array_creation_expression",
+            "implicit_array_creation_expression",
+            "stackalloc_array_creation_expression",
+            "argument_list",
+            "argument",
+            "ref_expression",
+            "out_expression",
+            "in_expression",
+        ] {
+            let id = language.id_for_node_kind(node_kind, true);
+            if id != 0 {
+                println!("  ✓ {node_kind:30} -> ID: {id}");
+            } else {
+                println!("  ✗ {node_kind:30} NOT FOUND");
+            }
+        }
+
+        println!("\n=== EXPRESSION NODES ===");
+        for node_kind in &[
+            "assignment_expression",
+            "binary_expression",
+            "unary_expression",
+            "postfix_unary_expression",
+            "prefix_unary_expression",
+            "conditional_expression",
+            "cast_expression",
+            "as_expression",
+            "is_expression",
+            "typeof_expression",
+            "sizeof_expression",
+            "default_expression",
+            "literal_expression",
+            "interpolated_string_expression",
+            "checked_expression",
+            "unchecked_expression",
+            "throw_expression",
+            "parenthesized_expression",
+        ] {
+            let id = language.id_for_node_kind(node_kind, true);
+            if id != 0 {
+                println!("  ✓ {node_kind:30} -> ID: {id}");
+            } else {
+                println!("  ✗ {node_kind:30} NOT FOUND");
+            }
+        }
+
+        println!("\n=== STATEMENT NODES ===");
+        for node_kind in &[
+            "expression_statement",
+            "block",
+            "if_statement",
+            "switch_statement",
+            "switch_expression",
+            "for_statement",
+            "foreach_statement",
+            "while_statement",
+            "do_statement",
+            "try_statement",
+            "catch_clause",
+            "finally_clause",
+            "throw_statement",
+            "return_statement",
+            "yield_statement",
+            "break_statement",
+            "continue_statement",
+            "goto_statement",
+            "lock_statement",
+            "using_statement",
+            "checked_statement",
+            "unchecked_statement",
+            "unsafe_statement",
+            "fixed_statement",
+        ] {
+            let id = language.id_for_node_kind(node_kind, true);
+            if id != 0 {
+                println!("  ✓ {node_kind:30} -> ID: {id}");
+            } else {
+                println!("  ✗ {node_kind:30} NOT FOUND");
+            }
+        }
+
+        println!("\n=== PATTERN MATCHING NODES ===");
+        for node_kind in &[
+            "pattern",
+            "constant_pattern",
+            "declaration_pattern",
+            "var_pattern",
+            "discard_pattern",
+            "parenthesized_pattern",
+            "property_pattern",
+            "tuple_pattern",
+            "positional_pattern",
+            "relational_pattern",
+            "type_pattern",
+            "binary_pattern",
+            "unary_pattern",
+            "list_pattern",
+            "slice_pattern",
+        ] {
+            let id = language.id_for_node_kind(node_kind, true);
+            if id != 0 {
+                println!("  ✓ {node_kind:30} -> ID: {id}");
+            } else {
+                println!("  ✗ {node_kind:30} NOT FOUND");
+            }
+        }
+
+        println!("\n=== ASYNC/AWAIT NODES ===");
+        for node_kind in &[
+            "await_expression",
+            "async_modifier",
+            "task_type",
+            "value_task_type",
+        ] {
+            let id = language.id_for_node_kind(node_kind, true);
+            if id != 0 {
+                println!("  ✓ {node_kind:30} -> ID: {id}");
+            } else {
+                println!("  ✗ {node_kind:30} NOT FOUND");
+            }
+        }
+
+        println!("\n=== LINQ/QUERY NODES ===");
+        for node_kind in &[
+            "query_expression",
+            "query_body",
+            "query_clause",
+            "from_clause",
+            "let_clause",
+            "where_clause",
+            "join_clause",
+            "join_into_clause",
+            "orderby_clause",
+            "ordering",
+            "select_clause",
+            "group_clause",
+            "query_continuation",
+        ] {
+            let id = language.id_for_node_kind(node_kind, true);
+            if id != 0 {
+                println!("  ✓ {node_kind:30} -> ID: {id}");
+            } else {
+                println!("  ✗ {node_kind:30} NOT FOUND");
+            }
+        }
+
+        println!("\n=== NULLABLE/NULL NODES ===");
+        for node_kind in &[
+            "nullable_type",
+            "null_literal",
+            "null_forgiving_expression",
+            "conditional_access_expression",
+            "null_coalescing_expression",
+            "null_coalescing_assignment_expression",
+        ] {
+            let id = language.id_for_node_kind(node_kind, true);
+            if id != 0 {
+                println!("  ✓ {node_kind:30} -> ID: {id}");
+            } else {
+                println!("  ✗ {node_kind:30} NOT FOUND");
+            }
+        }
+
+        println!("\n=== DOCUMENTATION NODES ===");
+        for node_kind in &[
+            "comment",
+            "documentation_comment",
+            "xml_documentation_comment",
+            "single_line_comment",
+            "multi_line_comment",
+        ] {
+            let id = language.id_for_node_kind(node_kind, true);
+            if id != 0 {
+                println!("  ✓ {node_kind:30} -> ID: {id}");
+            } else {
+                println!("  ✗ {node_kind:30} NOT FOUND");
+            }
+        }
+
+        println!("\n=== PREPROCESSOR NODES ===");
+        for node_kind in &[
+            "preprocessor_directive",
+            "define_directive",
+            "undef_directive",
+            "if_directive",
+            "elif_directive",
+            "else_directive",
+            "endif_directive",
+            "region_directive",
+            "endregion_directive",
+            "line_directive",
+            "error_directive",
+            "warning_directive",
+            "pragma_directive",
+            "nullable_directive",
+        ] {
+            let id = language.id_for_node_kind(node_kind, true);
+            if id != 0 {
+                println!("  ✓ {node_kind:30} -> ID: {id}");
+            } else {
+                println!("  ✗ {node_kind:30} NOT FOUND");
+            }
+        }
+
+        println!("\n=== Summary ===");
+        println!("Total node kinds available: {}", language.node_kind_count());
+        println!("Use these exact node names in the C# parser to extract symbols!");
+        println!("CRITICAL: Always verify exact node names - do NOT guess!");
+        println!("This comprehensive test covers:");
+        println!("  - Classes, interfaces, structs, enums, records");
+        println!("  - Methods, properties, fields, events, indexers");
+        println!("  - Generics, nullable types, async/await");
+        println!("  - Namespaces, using directives, attributes");
+        println!("  - Pattern matching, LINQ, preprocessor directives");
+        println!("  - C# 9+ features like records and file-scoped namespaces");
+    }
+
+    #[test]
     fn explore_language_behavior_candidates() {
         println!("\n=== Potential LanguageBehavior Enhancements ===");
 

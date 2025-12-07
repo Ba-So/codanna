@@ -12,6 +12,13 @@ export RUST_BACKTRACE=1
 echo "🚀 Running Codanna CI locally (exact GitHub Actions replica)"
 echo "============================================================"
 
+# Ensure we're using the latest stable Rust (matches GitHub Actions)
+echo ""
+echo "🦀 Ensuring Rust toolchain is up-to-date..."
+rustup update stable --no-self-update > /dev/null 2>&1 || true
+current_version=$(rustc --version)
+echo "   Using: $current_version"
+
 # Job 1: Test Suite
 echo ""
 echo "📦 Job: Test Suite"

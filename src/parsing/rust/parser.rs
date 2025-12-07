@@ -32,6 +32,7 @@
 
 use crate::parsing::Import;
 use crate::parsing::method_call::MethodCall;
+use crate::parsing::parser::check_recursion_depth;
 use crate::parsing::{
     HandledNode, Language, LanguageParser, NodeTracker, NodeTrackingState, ParserContext, ScopeType,
 };
@@ -292,7 +293,7 @@ impl RustParser {
         let mut symbols = Vec::new();
 
         // Walk the tree manually to find symbols
-        self.extract_symbols_from_node(root_node, code, file_id, &mut symbols, symbol_counter);
+        self.extract_symbols_from_node(root_node, code, file_id, &mut symbols, symbol_counter, 0);
 
         symbols
     }
@@ -304,7 +305,13 @@ impl RustParser {
         file_id: FileId,
         symbols: &mut Vec<Symbol>,
         counter: &mut SymbolCounter,
+        depth: usize,
     ) {
+        // Guard against stack overflow
+        if !check_recursion_depth(depth, node) {
+            return;
+        }
+
         // Debug: print node types that contain "type" or "const"
         if (node.kind().contains("type") || node.kind().contains("const")) && self.debug {
             eprintln!("DEBUG: Found node kind: {}", node.kind());
@@ -312,7 +319,7 @@ impl RustParser {
 
         match node.kind() {
             "function_item" => {
-                self.register_handled_node("function_item", node.kind_id());
+                self.register_node_recursively(node);
                 // Extract function name for parent tracking
                 let func_name = node
                     .child_by_field_name("name")
@@ -339,7 +346,7 @@ impl RustParser {
 
                 if let Some(name_node) = node.child_by_field_name("name") {
                     if let Some(mut symbol) =
-                        self.create_symbol(counter, name_node, kind, file_id, code)
+                        self.create_symbol(counter, node, name_node, kind, file_id, code)
                     {
                         // Extract and add function signature
                         let signature = self.extract_signature(node, code);
@@ -363,7 +370,14 @@ impl RustParser {
                 // Process children for nested functions/types
                 for child in node.children(&mut node.walk()) {
                     if child.kind() != "identifier" && child.kind() != "parameters" {
-                        self.extract_symbols_from_node(child, code, file_id, symbols, counter);
+                        self.extract_symbols_from_node(
+                            child,
+                            code,
+                            file_id,
+                            symbols,
+                            counter,
+                            depth + 1,
+                        );
                     }
                 }
 
@@ -377,28 +391,26 @@ impl RustParser {
                 return; // Don't process children again
             }
             "struct_item" => {
-                self.register_handled_node("struct_item", node.kind_id());
+                self.register_node_recursively(node);
                 // Extract struct name for parent tracking
                 let struct_name = node
                     .child_by_field_name("name")
                     .map(|n| code[n.byte_range()].to_string());
 
                 if let Some(name_node) = node.child_by_field_name("name") {
-                    let symbol =
-                        self.create_symbol(counter, name_node, SymbolKind::Struct, file_id, code);
+                    let symbol = self.create_symbol(
+                        counter,
+                        node,
+                        name_node,
+                        SymbolKind::Struct,
+                        file_id,
+                        code,
+                    );
 
                     if let Some(mut sym) = symbol {
                         // Extract and add struct signature
                         let signature = self.extract_struct_signature(node, code);
                         sym = sym.with_signature(signature);
-
-                        // Update the range to include the entire struct body
-                        sym.range = Range::new(
-                            node.start_position().row as u32,
-                            node.start_position().column as u16,
-                            node.end_position().row as u32,
-                            node.end_position().column as u16,
-                        );
                         symbols.push(sym);
                     }
                 }
@@ -422,6 +434,7 @@ impl RustParser {
                             if let Some(name_node) = child.child_by_field_name("name") {
                                 if let Some(symbol) = self.create_symbol(
                                     counter,
+                                    child,
                                     name_node,
                                     SymbolKind::Field,
                                     file_id,
@@ -437,7 +450,14 @@ impl RustParser {
                 // Process children for potential nested items
                 for child in node.children(&mut node.walk()) {
                     if child.kind() != "identifier" && child.kind() != "field_declaration_list" {
-                        self.extract_symbols_from_node(child, code, file_id, symbols, counter);
+                        self.extract_symbols_from_node(
+                            child,
+                            code,
+                            file_id,
+                            symbols,
+                            counter,
+                            depth + 1,
+                        );
                     }
                 }
 
@@ -449,23 +469,21 @@ impl RustParser {
                 self.context.set_current_class(saved_class);
             }
             "enum_item" => {
-                self.register_handled_node("enum_item", node.kind_id());
+                self.register_node_recursively(node);
                 if let Some(name_node) = node.child_by_field_name("name") {
-                    let symbol =
-                        self.create_symbol(counter, name_node, SymbolKind::Enum, file_id, code);
+                    let symbol = self.create_symbol(
+                        counter,
+                        node,
+                        name_node,
+                        SymbolKind::Enum,
+                        file_id,
+                        code,
+                    );
 
                     if let Some(mut sym) = symbol {
                         // Extract and add enum signature
                         let signature = self.extract_enum_signature(node, code);
                         sym = sym.with_signature(signature);
-
-                        // Update the range to include the entire enum body
-                        sym.range = Range::new(
-                            node.start_position().row as u32,
-                            node.start_position().column as u16,
-                            node.end_position().row as u32,
-                            node.end_position().column as u16,
-                        );
                         symbols.push(sym);
                     }
                 }
@@ -478,6 +496,7 @@ impl RustParser {
                             if let Some(name_node) = child.child_by_field_name("name") {
                                 if let Some(symbol) = self.create_symbol(
                                     counter,
+                                    child,
                                     name_node,
                                     SymbolKind::Constant,
                                     file_id,
@@ -491,10 +510,11 @@ impl RustParser {
                 }
             }
             "type_item" => {
-                self.register_handled_node("type_item", node.kind_id());
+                self.register_node_recursively(node);
                 if let Some(name_node) = node.child_by_field_name("name") {
                     let symbol = self.create_symbol(
                         counter,
+                        node,
                         name_node,
                         SymbolKind::TypeAlias,
                         file_id,
@@ -510,10 +530,16 @@ impl RustParser {
                 }
             }
             "const_item" => {
-                self.register_handled_node("const_item", node.kind_id());
+                self.register_node_recursively(node);
                 if let Some(name_node) = node.child_by_field_name("name") {
-                    let symbol =
-                        self.create_symbol(counter, name_node, SymbolKind::Constant, file_id, code);
+                    let symbol = self.create_symbol(
+                        counter,
+                        node,
+                        name_node,
+                        SymbolKind::Constant,
+                        file_id,
+                        code,
+                    );
 
                     if let Some(mut sym) = symbol {
                         // Extract and add constant signature
@@ -524,10 +550,16 @@ impl RustParser {
                 }
             }
             "static_item" => {
-                self.register_handled_node("static_item", node.kind_id());
+                self.register_node_recursively(node);
                 if let Some(name_node) = node.child_by_field_name("name") {
-                    let symbol =
-                        self.create_symbol(counter, name_node, SymbolKind::Constant, file_id, code);
+                    let symbol = self.create_symbol(
+                        counter,
+                        node,
+                        name_node,
+                        SymbolKind::Constant,
+                        file_id,
+                        code,
+                    );
 
                     if let Some(mut sym) = symbol {
                         // Extract and add static signature (using const signature for statics)
@@ -538,24 +570,22 @@ impl RustParser {
                 }
             }
             "trait_item" => {
-                self.register_handled_node("trait_item", node.kind_id());
+                self.register_node_recursively(node);
                 if let Some(name_node) = node.child_by_field_name("name") {
                     // For traits, we need the full node range, not just the name
-                    let symbol =
-                        self.create_symbol(counter, name_node, SymbolKind::Trait, file_id, code);
+                    let symbol = self.create_symbol(
+                        counter,
+                        node,
+                        name_node,
+                        SymbolKind::Trait,
+                        file_id,
+                        code,
+                    );
 
                     if let Some(mut sym) = symbol {
                         // Extract and add trait signature
                         let signature = self.extract_trait_signature(node, code);
                         sym = sym.with_signature(signature);
-
-                        // Update the range to include the entire trait body
-                        sym.range = Range::new(
-                            node.start_position().row as u32,
-                            node.start_position().column as u16,
-                            node.end_position().row as u32,
-                            node.end_position().column as u16,
-                        );
                         symbols.push(sym);
                     }
 
@@ -572,6 +602,7 @@ impl RustParser {
                                 if let Some(method_name_node) = child.child_by_field_name("name") {
                                     if let Some(mut method_symbol) = self.create_symbol(
                                         counter,
+                                        child,
                                         method_name_node,
                                         SymbolKind::Method,
                                         file_id,
@@ -592,7 +623,7 @@ impl RustParser {
                 return;
             }
             "impl_item" => {
-                self.register_handled_node("impl_item", node.kind_id());
+                self.register_node_recursively(node);
                 // Extract the type being implemented for parent tracking
                 let impl_type_name = node
                     .child_by_field_name("type")
@@ -612,7 +643,14 @@ impl RustParser {
 
                 // Process children
                 for child in node.children(&mut node.walk()) {
-                    self.extract_symbols_from_node(child, code, file_id, symbols, counter);
+                    self.extract_symbols_from_node(
+                        child,
+                        code,
+                        file_id,
+                        symbols,
+                        counter,
+                        depth + 1,
+                    );
                 }
 
                 // CRITICAL: Exit scope first (this clears the current context)
@@ -625,10 +663,16 @@ impl RustParser {
                 return; // Don't process children again
             }
             "mod_item" => {
-                self.register_handled_node("mod_item", node.kind_id());
+                self.register_node_recursively(node);
                 if let Some(name_node) = node.child_by_field_name("name") {
-                    let symbol =
-                        self.create_symbol(counter, name_node, SymbolKind::Module, file_id, code);
+                    let symbol = self.create_symbol(
+                        counter,
+                        node,
+                        name_node,
+                        SymbolKind::Module,
+                        file_id,
+                        code,
+                    );
 
                     if let Some(sym) = symbol {
                         symbols.push(sym);
@@ -638,28 +682,49 @@ impl RustParser {
                 // Process children for nested items within the module
                 for child in node.children(&mut node.walk()) {
                     if child.kind() != "identifier" {
-                        self.extract_symbols_from_node(child, code, file_id, symbols, counter);
+                        self.extract_symbols_from_node(
+                            child,
+                            code,
+                            file_id,
+                            symbols,
+                            counter,
+                            depth + 1,
+                        );
                     }
                 }
                 return; // Skip default traversal since we handled children
             }
             "macro_definition" => {
-                self.register_handled_node("macro_definition", node.kind_id());
+                self.register_node_recursively(node);
                 if let Some(name_node) = node.child_by_field_name("name") {
-                    let symbol =
-                        self.create_symbol(counter, name_node, SymbolKind::Macro, file_id, code);
+                    let symbol = self.create_symbol(
+                        counter,
+                        node,
+                        name_node,
+                        SymbolKind::Macro,
+                        file_id,
+                        code,
+                    );
 
                     if let Some(sym) = symbol {
                         symbols.push(sym);
                     }
                 }
             }
+            // Register use declarations and their children for audit tracking
+            "use_declaration" => {
+                self.register_node_recursively(node);
+            }
+            // Register closure expressions for audit tracking
+            "closure_expression" => {
+                self.register_node_recursively(node);
+            }
             _ => {}
         }
 
         // Recurse into children (except for impl_item which returns early)
         for child in node.children(&mut node.walk()) {
-            self.extract_symbols_from_node(child, code, file_id, symbols, counter);
+            self.extract_symbols_from_node(child, code, file_id, symbols, counter, depth + 1);
         }
     }
 
@@ -1472,6 +1537,7 @@ impl RustParser {
     fn create_symbol(
         &mut self,
         counter: &mut SymbolCounter,
+        full_node: Node,
         name_node: Node,
         kind: SymbolKind,
         file_id: FileId,
@@ -1482,10 +1548,10 @@ impl RustParser {
         let symbol_id = counter.next_id();
 
         let range = Range::new(
-            name_node.start_position().row as u32,
-            name_node.start_position().column as u16,
-            name_node.end_position().row as u32,
-            name_node.end_position().column as u16,
+            full_node.start_position().row as u32,
+            full_node.start_position().column as u16,
+            full_node.end_position().row as u32,
+            full_node.end_position().column as u16,
         );
 
         // Find the parent node that might have doc comments
@@ -1655,6 +1721,16 @@ impl RustParser {
         } else {
             doc_lines.reverse(); // Restore original order
             Some(doc_lines.join("\n"))
+        }
+    }
+
+    /// Recursively register all nodes for audit tracking
+    /// This ensures child nodes (parameter, type_parameter, lifetime, etc.) are counted
+    fn register_node_recursively(&mut self, node: Node) {
+        self.register_handled_node(node.kind(), node.kind_id());
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            self.register_node_recursively(child);
         }
     }
 }

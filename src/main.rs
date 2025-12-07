@@ -9,11 +9,16 @@ use clap::{
 };
 use codanna::FileId;
 use codanna::parsing::{
-    GoParser, LanguageParser, PhpParser, PythonParser, RustParser, TypeScriptParser,
+    CSharpParser, GoParser, LanguageParser, PhpParser, PythonParser, RustParser, TypeScriptParser,
 };
 use codanna::project_resolver::{
-    providers::typescript::TypeScriptProvider, registry::SimpleProviderRegistry,
+    providers::{
+        java::JavaProvider, javascript::JavaScriptProvider, swift::SwiftProvider,
+        typescript::TypeScriptProvider,
+    },
+    registry::SimpleProviderRegistry,
 };
+use codanna::storage::IndexMetadata;
 use codanna::types::SymbolCounter;
 use codanna::{IndexPersistence, Settings, SimpleIndexer, Symbol, SymbolKind};
 use serde::Serialize;
@@ -70,10 +75,12 @@ fn create_custom_help() -> String {
     } else {
         help.push_str(&format!("{}\n", style("Quick Start:").cyan().bold()));
     }
-    help.push_str("  $ codanna init                   # Initialize in current directory\n");
-    help.push_str("  $ codanna index src              # Index your source code\n");
-    help.push_str("  $ codanna serve --http --watch   # HTTP server with OAuth\n");
-    help.push_str("  $ codanna serve --https --watch  # HTTPS server with TLS\n\n");
+    help.push_str("  $ codanna init                      # Initialize in current directory\n");
+    help.push_str("  $ codanna index src lib            # Index multiple directories\n");
+    help.push_str("  $ codanna add-dir tests            # Add tests directory to indexed paths\n");
+    help.push_str("  $ codanna list-dirs                # List all indexed directories\n");
+    help.push_str("  $ codanna serve --http --watch     # HTTP server with OAuth\n");
+    help.push_str("  $ codanna serve --https --watch    # HTTPS server with TLS\n\n");
 
     // About section
     help.push_str("Index code and query relationships, symbols, and dependencies.\n\n");
@@ -92,16 +99,20 @@ fn create_custom_help() -> String {
     } else {
         help.push_str(&format!("{}\n", style("Commands:").cyan().bold()));
     }
-    help.push_str("  init        Set up .codanna directory\n");
-    help.push_str("  index       Build searchable index from codebase\n");
-    help.push_str("  retrieve    Query symbols, relationships, and dependencies\n");
-    help.push_str("  serve       Start MCP server\n");
-    help.push_str("  config      Display active settings\n");
-    help.push_str("  mcp-test    Test MCP connection\n");
-    help.push_str("  mcp         Execute MCP tools directly\n");
-    help.push_str("  benchmark   Benchmark parser performance\n");
-    help.push_str("  parse       Output AST nodes in JSONL format\n");
-    help.push_str("  help        Print this message or the help of the given subcommand(s)\n\n");
+    help.push_str("  init          Set up .codanna directory\n");
+    help.push_str("  index         Build searchable index from codebase\n");
+    help.push_str("  add-dir       Add a directory to be indexed\n");
+    help.push_str("  remove-dir    Remove a directory from indexed paths\n");
+    help.push_str("  list-dirs     List all directories that are being indexed\n");
+    help.push_str("  retrieve      Query symbols, relationships, and dependencies\n");
+    help.push_str("  serve         Start MCP server\n");
+    help.push_str("  config        Display active settings\n");
+    help.push_str("  mcp-test      Test MCP connection\n");
+    help.push_str("  mcp           Execute MCP tools directly\n");
+    help.push_str("  benchmark     Benchmark parser performance\n");
+    help.push_str("  parse         Output AST nodes in JSONL format\n");
+    help.push_str("  plugin        Manage Claude Code plugins\n");
+    help.push_str("  help          Print this message or the help of the given subcommand(s)\n\n");
 
     help.push_str("See 'codanna help <command>' for more information on a specific command.\n\n");
 
@@ -165,8 +176,9 @@ enum Commands {
     /// Index source files or directories
     #[command(about = "Build searchable index from codebase")]
     Index {
-        /// Path to file or directory to index
-        path: PathBuf,
+        /// Paths to files or directories to index (multiple paths allowed)
+        #[arg(value_name = "PATH")]
+        paths: Vec<PathBuf>,
 
         /// Number of threads to use (overrides config)
         #[arg(short, long)]
@@ -189,11 +201,29 @@ enum Commands {
         max_files: Option<usize>,
     },
 
+    /// Add a directory to the indexed paths list
+    #[command(about = "Add a directory to be indexed")]
+    AddDir {
+        /// Path to directory to add
+        path: PathBuf,
+    },
+
+    /// Remove a directory from the indexed paths list
+    #[command(about = "Remove a directory from indexed paths")]
+    RemoveDir {
+        /// Path to directory to remove
+        path: PathBuf,
+    },
+
+    /// List all indexed directories
+    #[command(about = "List all directories that are being indexed")]
+    ListDirs,
+
     /// Query code relationships and dependencies
     #[command(
         about = "Search symbols, find callers/callees, analyze impact",
         long_about = "Query indexed symbols, relationships, and dependencies.",
-        after_help = "Examples:\n  codanna retrieve symbol main\n  codanna retrieve callers process_file\n  codanna retrieve calls init\n  codanna retrieve implementations Parser\n  codanna retrieve describe OutputManager\n  codanna retrieve search \"parse\" --limit 10\n\nJSON paths:\n  retrieve symbol     .data.items[0].symbol.name\n  retrieve search     .data.items[].symbol.name\n  retrieve callers    .data.items[].symbol.name\n  retrieve describe   .data.items[0].symbol.name"
+        after_help = "Examples:\n  codanna retrieve symbol main\n  codanna retrieve callers process_file\n  codanna retrieve callers symbol_id:1771\n  codanna retrieve calls init\n  codanna retrieve calls symbol_id:1771\n  codanna retrieve implementations Parser\n  codanna retrieve describe OutputManager\n  codanna retrieve search \"parse\" --limit 10\n\nJSON paths:\n  retrieve symbol     .data.items[0].symbol.name\n  retrieve search     .data.items[].symbol.name\n  retrieve callers    .data.items[].symbol.name\n  retrieve describe   .data.items[0].symbol.name"
     )]
     Retrieve {
         #[command(subcommand)]
@@ -294,7 +324,7 @@ enum Commands {
     /// Benchmark parser performance
     #[command(about = "Benchmark parser performance")]
     Benchmark {
-        /// Language to benchmark (rust, python, all)
+        /// Language to benchmark (rust, python, php, typescript, go, csharp, all)
         #[arg(default_value = "all")]
         language: String,
 
@@ -321,6 +351,130 @@ enum Commands {
         #[arg(short = 'a', long)]
         all_nodes: bool,
     },
+
+    /// Manage Claude Code plugins
+    #[command(
+        about = "Install, update, and manage Claude Code plugins from marketplaces",
+        long_about = "Manage Claude Code plugins by installing from Git-based marketplaces.\n\nPlugins extend Claude Code with custom commands, agents, hooks, and MCP servers.\n\nNote: Plugins are installed and managed by codanna per-project in .claude/plugins, not managed by claude code CLI directly.",
+        after_help = "Examples:\n  codanna plugin add https://github.com/user/marketplace plugin-name\n  codanna plugin remove plugin-name\n  codanna plugin update plugin-name --ref v2.0\n  codanna plugin list\n  codanna plugin verify plugin-name"
+    )]
+    Plugin {
+        #[command(subcommand)]
+        action: PluginAction,
+    },
+
+    /// Manage project profiles
+    #[command(
+        about = "Initialize and manage project profiles",
+        long_about = "Manage project profiles for provider-specific initialization.\n\nProfiles set up project structure, configuration files, and provider integration.",
+        after_help = "Examples:\n  codanna profile init claude\n  codanna profile install claude --source git@github.com:codanna/profiles.git\n  codanna profile list\n  codanna profile status"
+    )]
+    Profile {
+        #[command(subcommand)]
+        action: codanna::profiles::commands::ProfileAction,
+    },
+}
+
+/// Plugin management actions
+#[derive(Subcommand)]
+enum PluginAction {
+    /// Install a plugin from a marketplace
+    #[command(
+        about = "Install a plugin from a marketplace repository",
+        after_help = "Examples:\n  codanna plugin add https://github.com/user/marketplace plugin-name\n  codanna plugin add ./local-marketplace my-plugin --ref v1.0"
+    )]
+    Add {
+        /// Marketplace repository URL or local path
+        marketplace: String,
+
+        /// Plugin name to install
+        plugin_name: String,
+
+        /// Git reference (branch, tag, or commit SHA)
+        #[arg(long)]
+        r#ref: Option<String>,
+
+        /// Force installation even if conflicts exist
+        #[arg(short, long)]
+        force: bool,
+
+        /// Perform a dry run without making changes
+        #[arg(long)]
+        dry_run: bool,
+    },
+
+    /// Remove an installed plugin
+    #[command(
+        about = "Remove an installed plugin and clean up its files",
+        after_help = "Example:\n  codanna plugin remove plugin-name"
+    )]
+    Remove {
+        /// Plugin name to remove
+        plugin_name: String,
+
+        /// Force removal even if other plugins depend on it
+        #[arg(short, long)]
+        force: bool,
+
+        /// Perform a dry run without making changes
+        #[arg(long)]
+        dry_run: bool,
+    },
+
+    /// Update an installed plugin
+    #[command(
+        about = "Update a plugin to a newer version",
+        after_help = "Examples:\n  codanna plugin update plugin-name\n  codanna plugin update plugin-name --ref v2.0"
+    )]
+    Update {
+        /// Plugin name to update
+        plugin_name: String,
+
+        /// Git reference to update to (branch, tag, or commit SHA)
+        #[arg(long)]
+        r#ref: Option<String>,
+
+        /// Force update even if local modifications exist
+        #[arg(short, long)]
+        force: bool,
+
+        /// Perform a dry run without making changes
+        #[arg(long)]
+        dry_run: bool,
+    },
+
+    /// List installed plugins
+    #[command(
+        about = "List all installed plugins with their versions",
+        after_help = "Example:\n  codanna plugin list"
+    )]
+    List {
+        /// Show detailed information
+        #[arg(short, long)]
+        verbose: bool,
+
+        /// Output in JSON format
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Verify plugin integrity
+    #[command(
+        about = "Verify that a plugin's files match their expected checksums",
+        after_help = "Examples:\n  codanna plugin verify plugin-name\n  codanna plugin verify --all"
+    )]
+    Verify {
+        /// Plugin name to verify (omit to verify all)
+        plugin_name: Option<String>,
+
+        /// Verify all installed plugins
+        #[arg(long)]
+        all: bool,
+
+        /// Show detailed verification results
+        #[arg(short, long)]
+        verbose: bool,
+    },
 }
 
 /// Query types for retrieving indexed information.
@@ -330,7 +484,7 @@ enum Commands {
 enum RetrieveQuery {
     /// Find a symbol by name
     #[command(
-        after_help = "Examples:\n  codanna retrieve symbol main\n  codanna retrieve symbol name:main --json\n  codanna retrieve symbol MyStruct --json | jq '.file'"
+        after_help = "Examples:\n  codanna retrieve symbol main\n  codanna retrieve symbol symbol_id:1771\n  codanna retrieve symbol name:main --json\n  codanna retrieve symbol MyStruct --json | jq '.file'"
     )]
     Symbol {
         /// Positional arguments (symbol name and/or key:value pairs)
@@ -343,7 +497,7 @@ enum RetrieveQuery {
 
     /// Show what functions a given function calls
     #[command(
-        after_help = "Examples:\n  codanna retrieve calls process_file\n  codanna retrieve calls function:process_file --json"
+        after_help = "Examples:\n  codanna retrieve calls process_file\n  codanna retrieve calls symbol_id:1771\n  codanna retrieve calls function:process_file --json"
     )]
     Calls {
         /// Positional arguments (function name and/or key:value pairs)
@@ -356,7 +510,7 @@ enum RetrieveQuery {
 
     /// Show what functions call a given function
     #[command(
-        after_help = "Examples:\n  codanna retrieve callers main\n  codanna retrieve callers function:main --json\n  codanna retrieve callers init --json | jq -r '.[].name'"
+        after_help = "Examples:\n  codanna retrieve callers main\n  codanna retrieve callers symbol_id:1771\n  codanna retrieve callers function:main --json"
     )]
     Callers {
         /// Positional arguments (function name and/or key:value pairs)
@@ -473,9 +627,14 @@ fn create_provider_registry() -> SimpleProviderRegistry {
     // Add TypeScript provider for tsconfig.json resolution
     registry.add(Arc::new(TypeScriptProvider::new()));
 
-    // Future: Add more providers here
-    // registry.add(Arc::new(PythonProvider::new()));
-    // registry.add(Arc::new(RustProvider::new()));
+    // Add JavaScript provider for jsconfig.json resolution
+    registry.add(Arc::new(JavaScriptProvider::new()));
+
+    // Add Java provider for pom.xml/build.gradle resolution
+    registry.add(Arc::new(JavaProvider::new()));
+
+    // Add Swift provider for Package.swift resolution
+    registry.add(Arc::new(SwiftProvider::new()));
 
     registry
 }
@@ -500,7 +659,9 @@ fn initialize_providers(
             continue; // Skip if no config files specified
         }
 
-        println!("Initializing {lang_id} project resolver...");
+        if settings.debug {
+            eprintln!("Initializing {lang_id} project resolver...");
+        }
 
         // Validate config paths
         let mut invalid_paths = Vec::new();
@@ -521,7 +682,7 @@ fn initialize_providers(
 
         // Build cache
         if settings.debug {
-            println!(
+            eprintln!(
                 "  Building resolution cache from {} config file(s)...",
                 config_paths.len()
             );
@@ -533,7 +694,7 @@ fn initialize_providers(
                 eprintln!("  Continuing without alias resolution for {lang_id}");
             }
         } else if settings.debug {
-            println!("  {lang_id} resolution cache built successfully");
+            eprintln!("  {lang_id} resolution cache built successfully");
         }
     }
 
@@ -558,6 +719,163 @@ fn initialize_providers(
     } else {
         Ok(())
     }
+}
+
+/// Add paths to settings.toml indexed_paths (idempotent)
+///
+/// Reusable helper for both `add-dir` and `index` commands.
+/// Loads settings, adds paths (with deduplication), saves back to file.
+///
+/// For `add-dir`: Returns error if path already exists (strict)
+/// For `index`: Silently skips existing paths (idempotent)
+#[derive(Debug)]
+enum SkipReason {
+    CoveredBy(PathBuf),
+    AlreadyPresent,
+    FileNotPersisted,
+}
+
+#[derive(Debug)]
+struct SkippedPath {
+    path: PathBuf,
+    reason: SkipReason,
+}
+
+#[derive(Default)]
+struct SeedReport {
+    newly_seeded: Vec<PathBuf>,
+    missing_paths: Vec<PathBuf>,
+}
+
+fn seed_indexer_with_config_paths(
+    indexer: &mut SimpleIndexer,
+    config_paths: &[PathBuf],
+    debug: bool,
+) -> SeedReport {
+    let mut report = SeedReport::default();
+
+    if config_paths.is_empty() {
+        return report;
+    }
+
+    // Collect existing tracked paths once to avoid repeated borrow issues
+    let mut existing: std::collections::HashSet<PathBuf> =
+        indexer.get_indexed_paths().iter().cloned().collect();
+
+    for path in config_paths {
+        if !path.exists() {
+            report.missing_paths.push(path.clone());
+            continue;
+        }
+
+        if !path.is_dir() {
+            if debug {
+                eprintln!(
+                    "DEBUG: Skipping configured path (not a directory): {}",
+                    path.display()
+                );
+            }
+            continue;
+        }
+
+        if existing.contains(path) {
+            continue;
+        }
+
+        let len_before = existing.len();
+        match indexer.add_indexed_path(path) {
+            Ok(_) => {
+                // Refresh our view of tracked paths to honor internal dedup logic
+                existing = indexer.get_indexed_paths().iter().cloned().collect();
+                if existing.len() > len_before {
+                    report.newly_seeded.push(path.clone());
+                }
+                if debug {
+                    eprintln!(
+                        "DEBUG: Seeded configured directory into tracked paths: {}",
+                        path.display()
+                    );
+                }
+            }
+            Err(e) => {
+                eprintln!(
+                    "Warning: Failed to track configured directory '{}': {e}",
+                    path.display()
+                );
+            }
+        }
+    }
+
+    report
+}
+
+fn add_paths_to_settings(
+    paths: &[PathBuf],
+    config_path: &Path,
+    strict: bool,
+) -> Result<(Settings, Vec<PathBuf>, Vec<SkippedPath>), String> {
+    // Load settings from file
+    let mut settings = Settings::load_from(config_path)
+        .map_err(|e| format!("Error loading configuration: {e}"))?;
+
+    let mut added_paths = Vec::new();
+    let mut skipped_paths = Vec::new();
+
+    // Add each path (Settings::add_indexed_path handles deduplication)
+    for path in paths {
+        if path.is_file() {
+            if strict {
+                return Err(format!(
+                    "Path must be a directory (got file): {}",
+                    path.display()
+                ));
+            }
+            skipped_paths.push(SkippedPath {
+                path: path.clone(),
+                reason: SkipReason::FileNotPersisted,
+            });
+            continue;
+        }
+
+        match settings.add_indexed_path(path.clone()) {
+            Ok(_) => {
+                added_paths.push(path.clone());
+            }
+            Err(e) if e.contains("already indexed") => {
+                // Path already exists
+                if strict {
+                    // add-dir is strict - return error
+                    return Err(e);
+                }
+                // index is idempotent - report and skip
+                let reason = path.canonicalize().ok().and_then(|canonical| {
+                    settings
+                        .indexing
+                        .indexed_paths
+                        .iter()
+                        .find(|existing| canonical.starts_with(existing.as_path()))
+                        .map(|existing| SkipReason::CoveredBy(existing.clone()))
+                });
+                skipped_paths.push(SkippedPath {
+                    path: path.clone(),
+                    reason: reason.unwrap_or(SkipReason::AlreadyPresent),
+                });
+            }
+            Err(e) => {
+                // Other errors (invalid path, etc.) always propagate
+                return Err(format!("Error adding path {}: {e}", path.display()));
+            }
+        }
+    }
+
+    // Save only if we added new paths
+    if !added_paths.is_empty() {
+        settings
+            .save(config_path)
+            .map_err(|e| format!("Error saving configuration: {e}"))?;
+    }
+
+    Ok((settings, added_paths, skipped_paths))
 }
 
 /// Entry point with tokio async runtime.
@@ -607,6 +925,57 @@ async fn main() {
             Settings::default()
         })
     };
+
+    // Handle thin client commands early (before index loading)
+    // These commands don't need the index and should not conflict with server processes
+    if let Commands::McpTest {
+        server_binary,
+        tool,
+        args,
+        delay,
+    } = &cli.command
+    {
+        use codanna::mcp::client::CodeIntelligenceClient;
+
+        let server_path = server_binary.clone().unwrap_or_else(|| {
+            std::env::current_exe().expect("Failed to get current executable path")
+        });
+
+        if let Err(e) = CodeIntelligenceClient::test_server(
+            server_path,
+            cli.config.clone(),
+            tool.clone(),
+            args.clone(),
+            *delay,
+        )
+        .await
+        {
+            eprintln!("MCP test failed: {e}");
+            std::process::exit(1);
+        }
+        return; // Exit early - don't load index
+    }
+
+    // Initialize project resolution providers BEFORE any command
+    // This ensures caches are built before indexing starts
+    let provider_registry = create_provider_registry();
+    if let Err(e) = initialize_providers(&provider_registry, &config) {
+        // Only fatal for commands that need providers (like index)
+        if matches!(cli.command, Commands::Index { .. }) {
+            eprintln!("\n{e}");
+            let suggestions = e.recovery_suggestions();
+            if !suggestions.is_empty() {
+                eprintln!("\nSuggestions:");
+                for suggestion in suggestions {
+                    eprintln!("  • {suggestion}");
+                }
+            }
+            std::process::exit(1);
+        } else {
+            // For other commands, just warn
+            eprintln!("Warning: Provider initialization failed: {e}");
+        }
+    }
 
     match &cli.command {
         Commands::Init { force } => {
@@ -696,6 +1065,7 @@ async fn main() {
             | Commands::Init { .. }
             | Commands::Config
             | Commands::Benchmark { .. }
+            | Commands::Plugin { .. }
     );
 
     // Determine if we need full trait resolver initialization
@@ -714,8 +1084,8 @@ async fn main() {
     let mut indexer = if skip_index_load {
         SimpleIndexer::with_settings(settings.clone()) // Empty indexer, won't be used
     } else {
-        let force_recreate_index =
-            matches!(cli.command, Commands::Index { force: true, ref path, .. } if path.is_dir());
+        // Force flag always means fresh index, regardless of path source (CLI or settings.toml)
+        let force_recreate_index = matches!(cli.command, Commands::Index { force: true, .. });
         if persistence.exists() && !force_recreate_index {
             if config.debug {
                 eprintln!(
@@ -763,12 +1133,21 @@ async fn main() {
             if config.debug {
                 eprintln!("DEBUG: Creating new index");
             }
-            // Create a new indexer with the given settings
-            let mut new_indexer = SimpleIndexer::with_settings_lazy(settings.clone());
             // Clear Tantivy index if force re-indexing directory
             if force_recreate_index {
-                if let Err(e) = new_indexer.clear_tantivy_index() {
-                    eprintln!("Warning: Failed to clear Tantivy index: {e}");
+                // Clear the persisted Tantivy files on disk BEFORE creating indexer
+                if let Err(e) = persistence.clear() {
+                    eprintln!("Warning: Failed to clear persisted Tantivy index: {e}");
+                }
+            }
+
+            // Create a new indexer with the given settings (after clearing)
+            let mut new_indexer = SimpleIndexer::with_settings_lazy(settings.clone());
+
+            if force_recreate_index {
+                // Clear symbol cache to fix Windows file locking issues
+                if let Err(e) = new_indexer.clear_symbol_cache(true) {
+                    eprintln!("Warning: Failed to clear symbol cache: {e}");
                 }
             }
             new_indexer
@@ -776,6 +1155,16 @@ async fn main() {
     };
 
     // Enable semantic search if configured
+    let seed_report = if !skip_index_load {
+        Some(seed_indexer_with_config_paths(
+            &mut indexer,
+            &config.indexing.indexed_paths,
+            config.debug,
+        ))
+    } else {
+        None
+    };
+
     if config.semantic_search.enabled && !indexer.has_semantic_search() {
         if let Err(e) = indexer.enable_semantic_search() {
             eprintln!("Warning: Failed to enable semantic search: {e}");
@@ -784,6 +1173,136 @@ async fn main() {
                 "Semantic search enabled (model: {}, threshold: {})",
                 config.semantic_search.model, config.semantic_search.threshold
             );
+        }
+    }
+
+    // Sync indexed paths with config - auto-index new directories
+    // This handles changes made while the index was not in use (e.g., add-dir command)
+    // Skip sync if force flag is present (force means fresh start, not incremental)
+    let is_force_index = matches!(cli.command, Commands::Index { force: true, .. });
+
+    // Extract progress flag from Index command for sync operations
+    let show_progress = matches!(cli.command, Commands::Index { progress: true, .. });
+    if let Some(report) = &seed_report {
+        if is_force_index {
+            if !report.newly_seeded.is_empty() {
+                let roots: Vec<String> = report
+                    .newly_seeded
+                    .iter()
+                    .map(|p| p.display().to_string())
+                    .collect();
+                println!(
+                    "Rebuilding index for configured roots: {}",
+                    roots.join(", ")
+                );
+            } else if !config.indexing.indexed_paths.is_empty() {
+                let roots: Vec<String> = config
+                    .indexing
+                    .indexed_paths
+                    .iter()
+                    .map(|p| p.display().to_string())
+                    .collect();
+                println!(
+                    "Rebuilding index for configured roots: {}",
+                    roots.join(", ")
+                );
+            } else {
+                println!("Rebuilding index with provided paths only (no configured roots).");
+            }
+        }
+
+        if !report.missing_paths.is_empty() {
+            if report.missing_paths.len() == 1 {
+                eprintln!(
+                    "Warning: Skipping configured path (not found): {}",
+                    report.missing_paths[0].display()
+                );
+            } else {
+                let listed: Vec<String> = report
+                    .missing_paths
+                    .iter()
+                    .map(|p| p.display().to_string())
+                    .collect();
+                eprintln!(
+                    "Warning: Skipping {} configured paths (not found): {}",
+                    report.missing_paths.len(),
+                    listed.join(", ")
+                );
+            }
+        }
+    }
+    // Track whether sync made changes (for later check); None means sync did not run
+    let mut sync_made_changes: Option<bool> = None;
+
+    if !skip_index_load && persistence.exists() && !is_force_index {
+        // Load stored indexed_paths from metadata
+        match IndexMetadata::load(&config.index_path) {
+            Ok(metadata) => {
+                let stored_paths = metadata.indexed_paths.clone();
+
+                // Sync with current config (settings.toml is source of truth)
+                match indexer.sync_with_config(
+                    stored_paths,
+                    &config.indexing.indexed_paths,
+                    show_progress,
+                ) {
+                    Ok((added, removed, files, symbols)) => {
+                        if added > 0 || removed > 0 {
+                            sync_made_changes = Some(true);
+                            if added > 0 {
+                                eprintln!(
+                                    "  ✓ Added {added} new directories ({files} files, {symbols} symbols)"
+                                );
+                            }
+                            if removed > 0 {
+                                eprintln!("  ✓ Removed {removed} directories from index");
+                            }
+
+                            // Save updated index
+                            if let Err(e) = persistence.save(&indexer) {
+                                eprintln!("Warning: Failed to save updated index: {e}");
+                            }
+                        } else {
+                            sync_made_changes = Some(false);
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("\nFailed to sync indexed paths: {e}");
+                        let suggestions = e.recovery_suggestions();
+                        if !suggestions.is_empty() {
+                            eprintln!("\nRecovery steps:");
+                            for suggestion in suggestions {
+                                eprintln!("  • {suggestion}");
+                            }
+                        }
+                        use codanna::io::ExitCode;
+                        let exit_code = ExitCode::from_error(&e);
+                        std::process::exit(exit_code as i32);
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("\nWarning: Could not load index metadata; skipping sync: {e}");
+                if config.debug {
+                    eprintln!(
+                        "  (Expected path: {})",
+                        config.index_path.join("metadata.json").display()
+                    );
+                }
+
+                eprintln!("\nRecovery steps:");
+                let suggestions = e.recovery_suggestions();
+                if suggestions.is_empty() {
+                    eprintln!("  • Run 'codanna index' to rebuild metadata");
+                } else {
+                    for suggestion in suggestions {
+                        eprintln!("  • {suggestion}");
+                    }
+                }
+                eprintln!("  • Or use 'codanna index --force' for a full rebuild");
+
+                sync_made_changes = None;
+            }
         }
     }
 
@@ -922,6 +1441,11 @@ async fn main() {
                         eprintln!("Index watcher started with notification support");
                     }
 
+                    // Create notification broadcaster for file/config watchers
+                    use codanna::mcp::notifications::NotificationBroadcaster;
+                    let broadcaster =
+                        Arc::new(NotificationBroadcaster::new(100).with_debug(config.mcp.debug));
+
                     // If file watching is enabled in config, start the file system watcher
                     if config.file_watch.enabled {
                         use codanna::indexing::FileSystemWatcher;
@@ -943,6 +1467,7 @@ async fn main() {
                         });
 
                         if let Ok(watcher) = watcher {
+                            let watcher = watcher.with_broadcaster(broadcaster.clone());
                             // Spawn file watcher in background
                             tokio::spawn(async move {
                                 if let Err(e) = watcher.watch().await {
@@ -952,6 +1477,45 @@ async fn main() {
                             eprintln!(
                                 "File system watcher started - monitoring indexed files for changes"
                             );
+                        }
+                    }
+
+                    // Start config file watcher (watches settings.toml for indexed_paths changes)
+                    if watch || config.file_watch.enabled {
+                        use codanna::indexing::ConfigFileWatcher;
+                        use std::path::PathBuf;
+
+                        let config_watcher_indexer = server.get_indexer_arc();
+                        let config_watcher_broadcaster = broadcaster.clone();
+                        let settings_path = config
+                            .workspace_root
+                            .clone()
+                            .unwrap_or_else(|| {
+                                std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+                            })
+                            .join(".codanna/settings.toml");
+
+                        match ConfigFileWatcher::new(
+                            settings_path.clone(),
+                            config_watcher_indexer,
+                            config.mcp.debug,
+                        ) {
+                            Ok(config_watcher) => {
+                                let config_watcher =
+                                    config_watcher.with_broadcaster(config_watcher_broadcaster);
+                                tokio::spawn(async move {
+                                    if let Err(e) = config_watcher.watch().await {
+                                        eprintln!("Config watcher error: {e}");
+                                    }
+                                });
+                                eprintln!(
+                                    "Config watcher started - monitoring {}",
+                                    settings_path.display()
+                                );
+                            }
+                            Err(e) => {
+                                eprintln!("Failed to start config watcher: {e}");
+                            }
                         }
                     }
 
@@ -980,204 +1544,334 @@ async fn main() {
         }
 
         Commands::Index {
-            path,
+            paths,
             force,
             progress,
             dry_run,
             max_files,
             ..
         } => {
-            // Determine if path is a file or directory
-            if path.is_file() {
-                // Initialize project resolution providers even for single file
-                // (needed for proper alias resolution)
-                let provider_registry = create_provider_registry();
-                if let Err(e) = initialize_providers(&provider_registry, &config) {
-                    eprintln!("\n{e}");
-
-                    // Display recovery suggestions
-                    let suggestions = e.recovery_suggestions();
-                    if !suggestions.is_empty() {
-                        eprintln!("\nRecovery steps:");
-                        for suggestion in suggestions {
-                            eprintln!("  • {suggestion}");
-                        }
-                    }
-
-                    // Exit with ConfigError code
-                    use codanna::io::ExitCode;
-                    let exit_code = ExitCode::from_error(&e);
-                    std::process::exit(exit_code as i32);
-                }
-
-                // Single file indexing
-                match indexer.index_file_with_force(&path, force) {
-                    Ok(result) => {
-                        let language_name = path
-                            .extension()
-                            .and_then(|ext| ext.to_str())
-                            .and_then(|ext| {
-                                let registry = codanna::parsing::get_registry();
-                                registry.lock().ok().and_then(|r| {
-                                    r.get_by_extension(ext).map(|def| def.name().to_string())
-                                })
-                            })
-                            .unwrap_or_else(|| "unknown".to_string());
-
-                        if result.is_cached() {
-                            println!(
-                                "Successfully loaded from cache: {} [{}]",
-                                path.display(),
-                                language_name
-                            );
-                        } else {
-                            println!(
-                                "Successfully indexed: {} [{}]",
-                                path.display(),
-                                language_name
-                            );
-                        }
-                        println!("File ID: {}", result.file_id().value());
-
-                        // Get symbols for just this file
-                        let file_symbols = indexer.get_symbols_by_file(result.file_id());
-                        println!("Found {} symbols in this file", file_symbols.len());
-                        println!("Total symbols in index: {}", indexer.symbol_count());
-
-                        // Show summary of what was found in this file
-                        let functions = file_symbols
-                            .iter()
-                            .filter(|s| s.kind == SymbolKind::Function)
-                            .count();
-                        let methods = file_symbols
-                            .iter()
-                            .filter(|s| s.kind == SymbolKind::Method)
-                            .count();
-                        let structs = file_symbols
-                            .iter()
-                            .filter(|s| s.kind == SymbolKind::Struct)
-                            .count();
-                        let traits = file_symbols
-                            .iter()
-                            .filter(|s| s.kind == SymbolKind::Trait)
-                            .count();
-
-                        println!("  Functions: {functions}");
-                        println!("  Methods: {methods}");
-                        println!("  Structs: {structs}");
-                        println!("  Traits: {traits}");
-
-                        // Save the index
-                        if config.debug {
-                            eprintln!(
-                                "DEBUG: Saving index with {} symbols",
-                                indexer.symbol_count()
-                            );
-                        }
-                        match persistence.save(&indexer) {
-                            Ok(_) => {
-                                println!("\nIndex saved to: {}", config.index_path.display());
-                                if config.debug {
-                                    eprintln!("DEBUG: Index saved successfully");
-                                }
-                            }
-                            Err(e) => eprintln!("\nWarning: Could not save index: {e}"),
-                        }
-                    }
-                    Err(e) => {
-                        eprintln!("Error indexing file: {e}");
-
-                        // Display recovery suggestions
-                        let suggestions = e.recovery_suggestions();
-                        if !suggestions.is_empty() {
-                            eprintln!("\nSuggestions:");
-                            for suggestion in suggestions {
-                                eprintln!("  • {suggestion}");
-                            }
-                        }
-
-                        std::process::exit(1);
-                    }
-                }
-            } else if path.is_dir() {
-                // Initialize project resolution providers before indexing
-                let provider_registry = create_provider_registry();
-                if let Err(e) = initialize_providers(&provider_registry, &config) {
-                    eprintln!("\n{e}");
-
-                    // Display recovery suggestions
-                    let suggestions = e.recovery_suggestions();
-                    if !suggestions.is_empty() {
-                        eprintln!("\nRecovery steps:");
-                        for suggestion in suggestions {
-                            eprintln!("  • {suggestion}");
-                        }
-                    }
-
-                    // Exit with ConfigError code
-                    use codanna::io::ExitCode;
-                    let exit_code = ExitCode::from_error(&e);
-                    std::process::exit(exit_code as i32);
-                }
-
-                // Directory indexing
-                if let Some(max) = max_files {
-                    println!(
-                        "Indexing directory: {} (limited to {} files)",
-                        path.display(),
-                        max
-                    );
+            // Determine paths to index
+            let paths_to_index = if !paths.is_empty() {
+                // CLI paths provided - add them to settings.toml first
+                let config_path = if let Some(custom_path) = &cli.config {
+                    custom_path.clone()
                 } else {
-                    println!("Indexing directory: {}", path.display());
-                }
+                    Settings::find_workspace_config().unwrap_or_else(|| {
+                        eprintln!("Error: No configuration file found. Run 'codanna init' first.");
+                        std::process::exit(1);
+                    })
+                };
 
-                match indexer
-                    .index_directory_with_options(&path, progress, dry_run, force, max_files)
-                {
-                    Ok(stats) => {
-                        stats.display();
-
-                        if !dry_run && stats.files_indexed > 0 {
-                            // Build symbol cache before saving
-                            if let Err(e) = indexer.build_symbol_cache() {
-                                eprintln!("Warning: Failed to build symbol cache: {e}");
-                            }
-
-                            // Save the index
-                            eprintln!(
-                                "\nSaving index with {} total symbols, {} total relationships...",
-                                indexer.symbol_count(),
-                                indexer.relationship_count()
-                            );
-                            match persistence.save(&indexer) {
-                                Ok(_) => {
-                                    println!("Index saved to: {}", config.index_path.display());
-                                }
-                                Err(e) => {
-                                    eprintln!("Error: Could not save index: {e}");
-                                    std::process::exit(1);
-                                }
+                match add_paths_to_settings(&paths, &config_path, false) {
+                    Ok((updated_settings, added_paths, skipped_paths)) => {
+                        if !added_paths.is_empty() {
+                            eprintln!("Added {} path(s) to settings.toml", added_paths.len());
+                        }
+                        for skipped in &skipped_paths {
+                            match &skipped.reason {
+                                SkipReason::CoveredBy(parent) => println!(
+                                    "Skipping {} (already covered by {})",
+                                    skipped.path.display(),
+                                    parent.display()
+                                ),
+                                SkipReason::AlreadyPresent => println!(
+                                    "Skipping {} (already present in indexed paths)",
+                                    skipped.path.display()
+                                ),
+                                SkipReason::FileNotPersisted => println!(
+                                    "Skipping {} (indexed file is tracked ad-hoc and not stored in settings)",
+                                    skipped.path.display()
+                                ),
                             }
                         }
+                        // Reload config to get updated indexed_paths
+                        config = updated_settings;
+                        paths.clone()
                     }
                     Err(e) => {
-                        eprintln!("Error indexing directory: {e}");
-
-                        // Display recovery suggestions
-                        let suggestions = e.recovery_suggestions();
-                        if !suggestions.is_empty() {
-                            eprintln!("\nSuggestions:");
-                            for suggestion in suggestions {
-                                eprintln!("  • {suggestion}");
-                            }
-                        }
-
+                        eprintln!("Error updating settings: {e}");
                         std::process::exit(1);
                     }
                 }
             } else {
-                eprintln!("Error: Path does not exist: {}", path.display());
+                // No CLI paths - use settings.toml indexed_paths
+                let config_paths = config.get_indexed_paths();
+
+                if config_paths.is_empty() {
+                    eprintln!("Error: No paths to index");
+                    eprintln!();
+                    eprintln!("Options:");
+                    eprintln!("  1. Provide paths: codanna index <path> [<path>...]");
+                    eprintln!("  2. Configure paths: codanna add-dir <path>");
+                    std::process::exit(1);
+                }
+
+                if !force {
+                    match sync_made_changes {
+                        Some(false) => {
+                            println!("Index already up to date (no changes detected).");
+                            if let Err(e) = persistence.save(&indexer) {
+                                eprintln!("Error saving index: {e}");
+                                std::process::exit(1);
+                            }
+                        }
+                        Some(true) => {
+                            // Sync already performed work and saved the index above.
+                        }
+                        None => {
+                            println!(
+                                "Skipping incremental update (metadata unavailable); index already up to date."
+                            );
+                        }
+                    }
+                    return;
+                }
+
+                // Force with config paths - will clear and re-index below
+                config_paths
+            };
+
+            // Providers already initialized at startup (see line 924)
+            // Cache is ready before indexing starts
+
+            // Process each path
+            for path in &paths_to_index {
+                if path.is_file() {
+                    // Single file indexing
+                    match indexer.index_file_with_force(path, force) {
+                        Ok(result) => {
+                            let language_name = path
+                                .extension()
+                                .and_then(|ext| ext.to_str())
+                                .and_then(|ext| {
+                                    let registry = codanna::parsing::get_registry();
+                                    registry.lock().ok().and_then(|r| {
+                                        r.get_by_extension(ext).map(|def| def.name().to_string())
+                                    })
+                                })
+                                .unwrap_or_else(|| "unknown".to_string());
+
+                            if result.is_cached() {
+                                println!(
+                                    "Successfully loaded from cache: {} [{}]",
+                                    path.display(),
+                                    language_name
+                                );
+                            } else {
+                                println!(
+                                    "Successfully indexed: {} [{}]",
+                                    path.display(),
+                                    language_name
+                                );
+                            }
+                            println!("File ID: {}", result.file_id().value());
+
+                            // Get symbols for just this file
+                            let file_symbols = indexer.get_symbols_by_file(result.file_id());
+                            println!("Found {} symbols in this file", file_symbols.len());
+                            println!("Total symbols in index: {}", indexer.symbol_count());
+
+                            // Show summary of what was found in this file
+                            let functions = file_symbols
+                                .iter()
+                                .filter(|s| s.kind == SymbolKind::Function)
+                                .count();
+                            let methods = file_symbols
+                                .iter()
+                                .filter(|s| s.kind == SymbolKind::Method)
+                                .count();
+                            let structs = file_symbols
+                                .iter()
+                                .filter(|s| s.kind == SymbolKind::Struct)
+                                .count();
+                            let traits = file_symbols
+                                .iter()
+                                .filter(|s| s.kind == SymbolKind::Trait)
+                                .count();
+
+                            println!("  Functions: {functions}");
+                            println!("  Methods: {methods}");
+                            println!("  Structs: {structs}");
+                            println!("  Traits: {traits}");
+                        }
+                        Err(e) => {
+                            eprintln!("Error indexing file {}: {e}", path.display());
+
+                            // Display recovery suggestions
+                            let suggestions = e.recovery_suggestions();
+                            if !suggestions.is_empty() {
+                                eprintln!("\nSuggestions:");
+                                for suggestion in suggestions {
+                                    eprintln!("  • {suggestion}");
+                                }
+                            }
+
+                            std::process::exit(1);
+                        }
+                    }
+                } else if path.is_dir() {
+                    // Directory indexing
+                    if let Some(max) = max_files {
+                        println!(
+                            "Indexing directory: {} (limited to {} files)",
+                            path.display(),
+                            max
+                        );
+                    } else {
+                        println!("Indexing directory: {}", path.display());
+                    }
+
+                    // Track this directory as indexed
+                    if let Err(e) = indexer.add_indexed_path(path) {
+                        eprintln!("Warning: Failed to track indexed directory: {e}");
+                    }
+
+                    match indexer
+                        .index_directory_with_options(path, progress, dry_run, force, max_files)
+                    {
+                        Ok(stats) => {
+                            stats.display();
+                        }
+                        Err(e) => {
+                            eprintln!("Error indexing directory {}: {e}", path.display());
+
+                            // Display recovery suggestions
+                            let suggestions = e.recovery_suggestions();
+                            if !suggestions.is_empty() {
+                                eprintln!("\nSuggestions:");
+                                for suggestion in suggestions {
+                                    eprintln!("  • {suggestion}");
+                                }
+                            }
+
+                            std::process::exit(1);
+                        }
+                    }
+                } else {
+                    eprintln!("Error: Path does not exist: {}", path.display());
+                    std::process::exit(1);
+                }
+            }
+
+            // After processing all paths, save the index if not in dry-run mode
+            if !dry_run {
+                // Build symbol cache before saving
+                if let Err(e) = indexer.build_symbol_cache() {
+                    eprintln!("Warning: Failed to build symbol cache: {e}");
+                }
+
+                // Save the index
+                eprintln!(
+                    "\nSaving index with {} total symbols, {} total relationships...",
+                    indexer.symbol_count(),
+                    indexer.relationship_count()
+                );
+                match persistence.save(&indexer) {
+                    Ok(_) => {
+                        println!("Index saved to: {}", config.index_path.display());
+                    }
+                    Err(e) => {
+                        eprintln!("Error: Could not save index: {e}");
+                        std::process::exit(1);
+                    }
+                }
+            }
+        }
+
+        Commands::AddDir { path } => {
+            // Find config file
+            let config_path = if let Some(custom_path) = &cli.config {
+                custom_path.clone()
+            } else {
+                Settings::find_workspace_config().unwrap_or_else(|| {
+                    eprintln!("Error: No configuration file found. Run 'codanna init' first.");
+                    std::process::exit(1);
+                })
+            };
+
+            // Use helper to add path and save (strict mode for add-dir)
+            match add_paths_to_settings(std::slice::from_ref(&path), &config_path, true) {
+                Ok((settings, added_paths, skipped_paths)) => {
+                    // In strict mode, we know exactly one path was added (or error)
+                    assert_eq!(
+                        added_paths.len(),
+                        1,
+                        "Expected exactly one path to be added"
+                    );
+                    debug_assert!(
+                        skipped_paths.is_empty(),
+                        "Strict mode should never produce skipped paths"
+                    );
+                    println!("Added directory to indexed paths: {}", path.display());
+                    println!("Configuration saved to: {}", config_path.display());
+                    println!("\nCurrent indexed paths:");
+                    for indexed_path in &settings.indexing.indexed_paths {
+                        println!("  - {}", indexed_path.display());
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Error: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+
+        Commands::RemoveDir { path } => {
+            // Load the config file
+            let config_path = if let Some(custom_path) = &cli.config {
+                custom_path.clone()
+            } else {
+                Settings::find_workspace_config().unwrap_or_else(|| {
+                    eprintln!("Error: No configuration file found. Run 'codanna init' first.");
+                    std::process::exit(1);
+                })
+            };
+
+            // Load settings from file
+            let mut settings = Settings::load_from(&config_path).unwrap_or_else(|e| {
+                eprintln!("Error loading configuration: {e}");
                 std::process::exit(1);
+            });
+
+            // Remove the directory
+            match settings.remove_indexed_path(&path) {
+                Ok(_) => {
+                    println!("Removed directory from indexed paths: {}", path.display());
+
+                    // Save the updated configuration
+                    if let Err(e) = settings.save(&config_path) {
+                        eprintln!("Error saving configuration: {e}");
+                        std::process::exit(1);
+                    }
+
+                    println!("Configuration saved to: {}", config_path.display());
+
+                    if settings.indexing.indexed_paths.is_empty() {
+                        println!("\nNo indexed paths configured.");
+                    } else {
+                        println!("\nRemaining indexed paths:");
+                        for indexed_path in &settings.indexing.indexed_paths {
+                            println!("  - {}", indexed_path.display());
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Error: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+
+        Commands::ListDirs => {
+            println!("Indexed directories:");
+            if config.indexing.indexed_paths.is_empty() {
+                println!("  (none configured)");
+                println!("\nTo add directories: codanna add-dir <path>");
+            } else {
+                for path in &config.indexing.indexed_paths {
+                    println!("  - {}", path.display());
+                }
             }
         }
 
@@ -1192,13 +1886,15 @@ async fn main() {
                     // Parse positional arguments for symbol name and key:value pairs
                     let (positional_name, params) = parse_positional_args(&args);
 
-                    // Determine symbol name (priority: positional > key:value)
+                    // Determine symbol name or symbol_id (priority: positional > key:value)
                     let final_name = positional_name
                         .or_else(|| params.get("name").cloned())
+                        .or_else(|| params.get("symbol_id").map(|id| format!("symbol_id:{id}")))
                         .unwrap_or_else(|| {
-                            eprintln!("Error: symbol requires a name");
+                            eprintln!("Error: symbol requires a name or symbol_id");
                             eprintln!("Usage: codanna retrieve symbol main");
                             eprintln!("   or: codanna retrieve symbol name:main");
+                            eprintln!("   or: codanna retrieve symbol symbol_id:1771");
                             std::process::exit(1);
                         });
 
@@ -1214,13 +1910,15 @@ async fn main() {
                     // Parse positional arguments for function name and key:value pairs
                     let (positional_function, params) = parse_positional_args(&args);
 
-                    // Determine function name (priority: positional > key:value)
+                    // Determine function name or symbol_id (priority: positional > key:value)
                     let final_function = positional_function
                         .or_else(|| params.get("function").cloned())
+                        .or_else(|| params.get("symbol_id").map(|id| format!("symbol_id:{id}")))
                         .unwrap_or_else(|| {
-                            eprintln!("Error: callers requires a function name");
+                            eprintln!("Error: callers requires a function name or symbol_id");
                             eprintln!("Usage: codanna retrieve callers main");
                             eprintln!("   or: codanna retrieve callers function:main");
+                            eprintln!("   or: codanna retrieve callers symbol_id:1771");
                             std::process::exit(1);
                         });
 
@@ -1236,13 +1934,15 @@ async fn main() {
                     // Parse positional arguments for function name and key:value pairs
                     let (positional_function, params) = parse_positional_args(&args);
 
-                    // Determine function name (priority: positional > key:value)
+                    // Determine function name or symbol_id (priority: positional > key:value)
                     let final_function = positional_function
                         .or_else(|| params.get("function").cloned())
+                        .or_else(|| params.get("symbol_id").map(|id| format!("symbol_id:{id}")))
                         .unwrap_or_else(|| {
-                            eprintln!("Error: calls requires a function name");
+                            eprintln!("Error: calls requires a function name or symbol_id");
                             eprintln!("Usage: codanna retrieve calls process_file");
                             eprintln!("   or: codanna retrieve calls function:process_file");
+                            eprintln!("   or: codanna retrieve calls symbol_id:1771");
                             std::process::exit(1);
                         });
 
@@ -1359,13 +2059,15 @@ async fn main() {
                     // Parse positional arguments for symbol name and key:value pairs
                     let (positional_symbol, params) = parse_positional_args(&args);
 
-                    // Determine symbol name (priority: positional > key:value)
+                    // Determine symbol name or symbol_id (priority: positional > key:value)
                     let final_symbol = positional_symbol
                         .or_else(|| params.get("symbol").cloned())
+                        .or_else(|| params.get("symbol_id").map(|id| format!("symbol_id:{id}")))
                         .unwrap_or_else(|| {
-                            eprintln!("Error: describe requires a symbol name");
+                            eprintln!("Error: describe requires a symbol name or symbol_id");
                             eprintln!("Usage: codanna retrieve describe SimpleIndexer");
                             eprintln!("   or: codanna retrieve describe symbol:SimpleIndexer");
+                            eprintln!("   or: codanna retrieve describe symbol_id:1771");
                             std::process::exit(1);
                         });
 
@@ -1572,6 +2274,11 @@ async fn main() {
 
             // Collect data for get_calls if JSON output is requested
             let get_calls_data = if json && tool == "get_calls" {
+                let symbol_id = arguments
+                    .as_ref()
+                    .and_then(|m| m.get("symbol_id"))
+                    .and_then(|v| v.as_u64())
+                    .map(|id| id as u32);
                 let function_name = arguments
                     .as_ref()
                     .and_then(|m| m.get("function_name"))
@@ -1581,31 +2288,65 @@ async fn main() {
                     .and_then(|m| m.get("lang"))
                     .and_then(|v| v.as_str());
 
-                if let Some(func_name) = function_name {
-                    // Find the function first
-                    let symbols = indexer.find_symbols_by_name(func_name, language);
-                    if let Some(symbol) = symbols.into_iter().find(|s| {
-                        matches!(
-                            s.kind,
-                            crate::SymbolKind::Function | crate::SymbolKind::Method
-                        )
-                    }) {
-                        use codanna::symbol::context::ContextIncludes;
-                        // Get context with calls
-                        let context = indexer.get_symbol_context(symbol.id, ContextIncludes::CALLS);
+                if let Some(id) = symbol_id {
+                    use codanna::symbol::context::ContextIncludes;
 
+                    // Direct lookup by symbol ID
+                    if let Some(symbol) = indexer.get_symbol(codanna::SymbolId(id)) {
+                        let mut all_calls = Vec::new();
+
+                        let context = indexer.get_symbol_context(symbol.id, ContextIncludes::CALLS);
                         if let Some(ctx) = context {
-                            // Extract just the calls from the context
                             if let Some(calls) = ctx.relationships.calls {
-                                Some(calls)
-                            } else {
-                                Some(Vec::new())
+                                for (called, metadata) in calls {
+                                    all_calls.push((called, metadata));
+                                }
                             }
-                        } else {
-                            Some(Vec::new())
                         }
+
+                        Some(all_calls)
                     } else {
+                        None // Symbol not found
+                    }
+                } else if let Some(func_name) = function_name {
+                    use codanna::symbol::context::ContextIncludes;
+                    use std::collections::HashSet;
+
+                    // Find ALL symbols with this name
+                    let symbols = indexer.find_symbols_by_name(func_name, language);
+                    let function_symbols: Vec<_> = symbols
+                        .into_iter()
+                        .filter(|s| {
+                            matches!(
+                                s.kind,
+                                crate::SymbolKind::Function | crate::SymbolKind::Method
+                            )
+                        })
+                        .collect();
+
+                    if function_symbols.is_empty() {
                         None // Function not found
+                    } else {
+                        // Aggregate calls from ALL symbols with this name (same as MCP handler)
+                        let mut all_calls = Vec::new();
+                        let mut seen_ids = HashSet::new();
+
+                        for symbol in function_symbols {
+                            let context =
+                                indexer.get_symbol_context(symbol.id, ContextIncludes::CALLS);
+                            if let Some(ctx) = context {
+                                if let Some(calls) = ctx.relationships.calls {
+                                    for (called, metadata) in calls {
+                                        // Deduplicate by symbol ID
+                                        if seen_ids.insert(called.id) {
+                                            all_calls.push((called, metadata));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        Some(all_calls)
                     }
                 } else {
                     None
@@ -1616,6 +2357,11 @@ async fn main() {
 
             // Collect data for find_callers if JSON output is requested
             let find_callers_data = if json && tool == "find_callers" {
+                let symbol_id = arguments
+                    .as_ref()
+                    .and_then(|m| m.get("symbol_id"))
+                    .and_then(|v| v.as_u64())
+                    .map(|id| id as u32);
                 let function_name = arguments
                     .as_ref()
                     .and_then(|m| m.get("function_name"))
@@ -1625,16 +2371,33 @@ async fn main() {
                     .and_then(|m| m.get("lang"))
                     .and_then(|v| v.as_str());
 
-                if let Some(func_name) = function_name {
+                if let Some(id) = symbol_id {
+                    // Direct lookup by symbol ID
+                    if let Some(symbol) = indexer.get_symbol(codanna::SymbolId(id)) {
+                        let callers = indexer.get_calling_functions_with_metadata(symbol.id);
+                        let all_callers: Vec<_> = callers.into_iter().collect();
+                        Some(all_callers)
+                    } else {
+                        None // Symbol not found
+                    }
+                } else if let Some(func_name) = function_name {
+                    use std::collections::HashSet;
+
                     // Find all functions with this name
                     let symbols = indexer.find_symbols_by_name(func_name, language);
                     if !symbols.is_empty() {
                         let mut all_callers = Vec::new();
+                        let mut seen_ids = HashSet::new();
 
-                        // Check all symbols with this name (could be multiple overloads)
+                        // Check all symbols with this name and deduplicate (same as MCP handler)
                         for symbol in &symbols {
                             let callers = indexer.get_calling_functions_with_metadata(symbol.id);
-                            all_callers.extend(callers);
+                            for (caller, metadata) in callers {
+                                // Deduplicate by symbol ID
+                                if seen_ids.insert(caller.id) {
+                                    all_callers.push((caller, metadata));
+                                }
+                            }
                         }
 
                         Some(all_callers)
@@ -1650,6 +2413,11 @@ async fn main() {
 
             // Collect data for analyze_impact if JSON output is requested
             let analyze_impact_data = if json && tool == "analyze_impact" {
+                let symbol_id = arguments
+                    .as_ref()
+                    .and_then(|m| m.get("symbol_id"))
+                    .and_then(|v| v.as_u64())
+                    .map(|id| id as u32);
                 let symbol_name = arguments
                     .as_ref()
                     .and_then(|m| m.get("symbol_name"))
@@ -1659,23 +2427,21 @@ async fn main() {
                     .and_then(|m| m.get("lang"))
                     .and_then(|v| v.as_str());
 
-                if let Some(sym_name) = symbol_name {
-                    // Find the symbol first
-                    let symbols = indexer.find_symbols_by_name(sym_name, language);
-                    if let Some(symbol) = symbols.first() {
+                if let Some(id) = symbol_id {
+                    // Direct lookup by symbol ID
+                    if let Some(symbol) = indexer.get_symbol(codanna::SymbolId(id)) {
                         let max_depth = arguments
                             .as_ref()
                             .and_then(|m| m.get("max_depth"))
                             .and_then(|v| v.as_u64())
                             .unwrap_or(3) as usize;
 
-                        // Get impact radius - returns Vec<SymbolId>
                         let impacted_ids = indexer.get_impact_radius(symbol.id, Some(max_depth));
 
                         // Convert SymbolIds to full Symbols
                         let mut impacted_symbols = Vec::new();
-                        for id in impacted_ids {
-                            if let Some(sym) = indexer.get_symbol(id) {
+                        for impact_id in impacted_ids {
+                            if let Some(sym) = indexer.get_symbol(impact_id) {
                                 impacted_symbols.push(sym);
                             }
                         }
@@ -1683,6 +2449,39 @@ async fn main() {
                         Some(impacted_symbols)
                     } else {
                         None // Symbol not found
+                    }
+                } else if let Some(sym_name) = symbol_name {
+                    use std::collections::HashSet;
+
+                    // Find ALL symbols with this name (same as MCP handler)
+                    let symbols = indexer.find_symbols_by_name(sym_name, language);
+
+                    if symbols.is_empty() {
+                        None // Symbol not found
+                    } else {
+                        let max_depth = arguments
+                            .as_ref()
+                            .and_then(|m| m.get("max_depth"))
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(3) as usize;
+
+                        // Aggregate impact from ALL symbols with this name (same as MCP handler)
+                        let mut all_impacted_ids = HashSet::new();
+                        for symbol in &symbols {
+                            let impacted_ids =
+                                indexer.get_impact_radius(symbol.id, Some(max_depth));
+                            all_impacted_ids.extend(impacted_ids);
+                        }
+
+                        // Convert SymbolIds to full Symbols
+                        let mut impacted_symbols = Vec::new();
+                        for id in all_impacted_ids {
+                            if let Some(sym) = indexer.get_symbol(id) {
+                                impacted_symbols.push(sym);
+                            }
+                        }
+
+                        Some(impacted_symbols)
                     }
                 } else {
                     None
@@ -1975,13 +2774,26 @@ async fn main() {
                         .as_ref()
                         .and_then(|m| m.get("function_name"))
                         .and_then(|v| v.as_str())
-                        .unwrap_or_else(|| {
-                            eprintln!("Error: get_calls requires 'function_name' parameter");
-                            std::process::exit(1);
-                        });
+                        .map(|s| s.to_string());
+
+                    let symbol_id = arguments
+                        .as_ref()
+                        .and_then(|m| m.get("symbol_id"))
+                        .and_then(|v| v.as_u64())
+                        .map(|id| id as u32);
+
+                    // Require either function_name or symbol_id
+                    if function_name.is_none() && symbol_id.is_none() {
+                        eprintln!(
+                            "Error: get_calls requires either 'function_name' or 'symbol_id' parameter"
+                        );
+                        std::process::exit(1);
+                    }
+
                     server
                         .get_calls(Parameters(GetCallsRequest {
-                            function_name: function_name.to_string(),
+                            function_name,
+                            symbol_id,
                         }))
                         .await
                 }
@@ -1990,13 +2802,26 @@ async fn main() {
                         .as_ref()
                         .and_then(|m| m.get("function_name"))
                         .and_then(|v| v.as_str())
-                        .unwrap_or_else(|| {
-                            eprintln!("Error: find_callers requires 'function_name' parameter");
-                            std::process::exit(1);
-                        });
+                        .map(|s| s.to_string());
+
+                    let symbol_id = arguments
+                        .as_ref()
+                        .and_then(|m| m.get("symbol_id"))
+                        .and_then(|v| v.as_u64())
+                        .map(|id| id as u32);
+
+                    // Require either function_name or symbol_id
+                    if function_name.is_none() && symbol_id.is_none() {
+                        eprintln!(
+                            "Error: find_callers requires either 'function_name' or 'symbol_id' parameter"
+                        );
+                        std::process::exit(1);
+                    }
+
                     server
                         .find_callers(Parameters(FindCallersRequest {
-                            function_name: function_name.to_string(),
+                            function_name,
+                            symbol_id,
                         }))
                         .await
                 }
@@ -2005,10 +2830,22 @@ async fn main() {
                         .as_ref()
                         .and_then(|m| m.get("symbol_name"))
                         .and_then(|v| v.as_str())
-                        .unwrap_or_else(|| {
-                            eprintln!("Error: analyze_impact requires 'symbol_name' parameter");
-                            std::process::exit(1);
-                        });
+                        .map(|s| s.to_string());
+
+                    let symbol_id = arguments
+                        .as_ref()
+                        .and_then(|m| m.get("symbol_id"))
+                        .and_then(|v| v.as_u64())
+                        .map(|id| id as u32);
+
+                    // Require either symbol_name or symbol_id
+                    if symbol_name.is_none() && symbol_id.is_none() {
+                        eprintln!(
+                            "Error: analyze_impact requires either 'symbol_name' or 'symbol_id' parameter"
+                        );
+                        std::process::exit(1);
+                    }
+
                     let max_depth = arguments
                         .as_ref()
                         .and_then(|m| m.get("max_depth"))
@@ -2016,7 +2853,8 @@ async fn main() {
                         .unwrap_or(3) as u32;
                     server
                         .analyze_impact(Parameters(AnalyzeImpactRequest {
-                            symbol_name: symbol_name.to_string(),
+                            symbol_name,
+                            symbol_id,
                             max_depth,
                         }))
                         .await
@@ -2241,13 +3079,21 @@ async fn main() {
                             println!("{}", serde_json::to_string_pretty(&response).unwrap());
                         } else {
                             // Function not found
-                            let name = arguments
-                                .as_ref()
-                                .and_then(|m| m.get("function_name"))
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("unknown");
                             use codanna::io::format::JsonResponse;
-                            let response = JsonResponse::not_found("Function", name);
+                            let response = if let Some(id) = arguments
+                                .as_ref()
+                                .and_then(|m| m.get("symbol_id"))
+                                .and_then(|v| v.as_u64())
+                            {
+                                JsonResponse::not_found("Symbol", &format!("symbol_id:{id}"))
+                            } else {
+                                let name = arguments
+                                    .as_ref()
+                                    .and_then(|m| m.get("function_name"))
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("unknown");
+                                JsonResponse::not_found("Function", name)
+                            };
                             println!("{}", serde_json::to_string_pretty(&response).unwrap());
                             std::process::exit(3);
                         }
@@ -2275,13 +3121,21 @@ async fn main() {
                             println!("{}", serde_json::to_string_pretty(&response).unwrap());
                         } else {
                             // Function not found
-                            let name = arguments
-                                .as_ref()
-                                .and_then(|m| m.get("function_name"))
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("unknown");
                             use codanna::io::format::JsonResponse;
-                            let response = JsonResponse::not_found("Function", name);
+                            let response = if let Some(id) = arguments
+                                .as_ref()
+                                .and_then(|m| m.get("symbol_id"))
+                                .and_then(|v| v.as_u64())
+                            {
+                                JsonResponse::not_found("Symbol", &format!("symbol_id:{id}"))
+                            } else {
+                                let name = arguments
+                                    .as_ref()
+                                    .and_then(|m| m.get("function_name"))
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("unknown");
+                                JsonResponse::not_found("Function", name)
+                            };
                             println!("{}", serde_json::to_string_pretty(&response).unwrap());
                             std::process::exit(3);
                         }
@@ -2291,11 +3145,20 @@ async fn main() {
                             use codanna::io::format::JsonResponse;
                             if impacted.is_empty() {
                                 // No symbols would be impacted
-                                let name = arguments
+                                let identifier = if let Some(id) = arguments
                                     .as_ref()
-                                    .and_then(|m| m.get("symbol_name"))
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("unknown");
+                                    .and_then(|m| m.get("symbol_id"))
+                                    .and_then(|v| v.as_u64())
+                                {
+                                    format!("symbol_id:{id}")
+                                } else {
+                                    arguments
+                                        .as_ref()
+                                        .and_then(|m| m.get("symbol_name"))
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("unknown")
+                                        .to_string()
+                                };
                                 use codanna::io::guidance_engine::generate_guidance_from_config;
 
                                 // Create a proper struct for the empty case
@@ -2308,7 +3171,7 @@ async fn main() {
                                 }
 
                                 let impact_result = EmptyImpactResult {
-                                    symbol: name.to_string(),
+                                    symbol: identifier.clone(),
                                     impacted_count: 0,
                                     impacted_symbols: vec![],
                                     message:
@@ -2322,7 +3185,7 @@ async fn main() {
                                 if let Some(guidance) = generate_guidance_from_config(
                                     &guidance_config,
                                     "analyze_impact",
-                                    Some(name),
+                                    Some(&identifier),
                                     0,
                                 ) {
                                     response = response.with_system_message(&guidance);
@@ -2352,13 +3215,21 @@ async fn main() {
                             }
                         } else {
                             // Symbol not found
-                            let name = arguments
-                                .as_ref()
-                                .and_then(|m| m.get("symbol_name"))
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("unknown");
                             use codanna::io::format::JsonResponse;
-                            let response = JsonResponse::not_found("Symbol", name);
+                            let response = if let Some(id) = arguments
+                                .as_ref()
+                                .and_then(|m| m.get("symbol_id"))
+                                .and_then(|v| v.as_u64())
+                            {
+                                JsonResponse::not_found("Symbol", &format!("symbol_id:{id}"))
+                            } else {
+                                let name = arguments
+                                    .as_ref()
+                                    .and_then(|m| m.get("symbol_name"))
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("unknown");
+                                JsonResponse::not_found("Symbol", name)
+                            };
                             println!("{}", serde_json::to_string_pretty(&response).unwrap());
                             std::process::exit(3);
                         }
@@ -2647,6 +3518,145 @@ async fn main() {
             // Already handled with early return above
             unreachable!("Parse command should have been handled earlier");
         }
+
+        Commands::Plugin { action } => {
+            // Execute plugin management command
+            use codanna::plugins;
+            let result = match action {
+                PluginAction::Add {
+                    marketplace,
+                    plugin_name,
+                    r#ref,
+                    force,
+                    dry_run,
+                } => plugins::add_plugin(
+                    &config,
+                    &marketplace,
+                    &plugin_name,
+                    r#ref.as_deref(),
+                    force,
+                    dry_run,
+                ),
+                PluginAction::Remove {
+                    plugin_name,
+                    force,
+                    dry_run,
+                } => plugins::remove_plugin(&config, &plugin_name, force, dry_run),
+                PluginAction::Update {
+                    plugin_name,
+                    r#ref,
+                    force,
+                    dry_run,
+                } => {
+                    plugins::update_plugin(&config, &plugin_name, r#ref.as_deref(), force, dry_run)
+                }
+                PluginAction::List { verbose, json } => {
+                    plugins::list_plugins(&config, verbose, json)
+                }
+                PluginAction::Verify {
+                    plugin_name,
+                    all,
+                    verbose,
+                } => {
+                    if all {
+                        plugins::verify_all_plugins(&config, verbose)
+                    } else {
+                        match plugin_name {
+                            Some(name) => plugins::verify_plugin(&config, &name, verbose),
+                            None => {
+                                eprintln!(
+                                    "Error: plugin_name is required when --all is not specified"
+                                );
+                                std::process::exit(1);
+                            }
+                        }
+                    }
+                }
+            };
+
+            if let Err(e) = result {
+                let code: codanna::io::exit_code::ExitCode = e.exit_code();
+                eprintln!("Plugin operation failed: {e}");
+                std::process::exit(i32::from(code));
+            }
+        }
+
+        Commands::Profile { action } => {
+            // Execute profile management command
+            use codanna::profiles;
+            use codanna::profiles::commands::{ProfileAction, ProviderAction};
+
+            let result = match action {
+                ProfileAction::Init {
+                    profile_name,
+                    source,
+                    force,
+                } => profiles::init_profile(&profile_name, source.as_deref(), force),
+                ProfileAction::Install {
+                    profile_name,
+                    source,
+                    r#ref,
+                    force,
+                } => {
+                    // Check if --source or --ref flags are provided
+                    if source.is_some() || r#ref.is_some() {
+                        // Legacy direct installation from git source (not yet implemented)
+                        eprintln!("Direct git source installation not yet implemented");
+                        eprintln!("Use provider-based installation instead:");
+                        eprintln!("  1. codanna profile provider add <source>");
+                        eprintln!("  2. codanna profile install {profile_name}");
+                        Err(codanna::profiles::error::ProfileError::InvalidManifest {
+                            reason: "Git source installation not yet implemented. Use provider registry.".to_string(),
+                        })
+                    } else {
+                        // Use registry-based installation (supports profile@provider syntax)
+                        codanna::profiles::install_profile_from_registry(&profile_name, force)
+                    }
+                }
+                ProfileAction::List { verbose, json } => profiles::list_profiles(verbose, json),
+                ProfileAction::Status { verbose } => profiles::show_status(verbose),
+                ProfileAction::Sync { force } => profiles::sync_team_config(force),
+                ProfileAction::Update {
+                    profile_name,
+                    force,
+                } => profiles::update_profile(&profile_name, force),
+                ProfileAction::Provider { action } => match action {
+                    ProviderAction::Add { source, id } => {
+                        profiles::add_provider(&source, id.as_deref())
+                    }
+                    ProviderAction::Remove { provider_id } => {
+                        profiles::remove_provider(&provider_id)
+                    }
+                    ProviderAction::List { verbose } => profiles::list_providers(verbose),
+                },
+                ProfileAction::Remove {
+                    profile_name,
+                    verbose,
+                } => profiles::remove_profile(&profile_name, verbose),
+                ProfileAction::Verify {
+                    profile_name,
+                    all,
+                    verbose,
+                } => {
+                    if all {
+                        profiles::verify_all_profiles(verbose)
+                    } else if let Some(name) = profile_name {
+                        profiles::verify_profile(&name, verbose)
+                    } else {
+                        eprintln!("Error: Must provide profile name or use --all");
+                        Err(profiles::error::ProfileError::InvalidManifest {
+                            reason: "Must provide profile name or use --all".to_string(),
+                        })
+                    }
+                }
+            };
+
+            if let Err(e) = result {
+                let code: codanna::io::exit_code::ExitCode = e.exit_code();
+                eprintln!("Profile operation failed: {e}");
+                std::process::exit(i32::from(code));
+            }
+        }
     }
 }
 
@@ -2675,6 +3685,146 @@ fn run_parse_command(
     }
 }
 
+#[cfg(test)]
+mod add_paths_tests {
+    use super::*;
+    use std::fs;
+    use std::sync::Arc;
+    use tempfile::TempDir;
+
+    #[test]
+    fn test_add_paths_to_settings_records_skipped_paths() {
+        let temp_dir = TempDir::new().unwrap();
+        let config_path = temp_dir.path().join("settings.toml");
+        let parent = temp_dir.path().join("parent");
+        let child = parent.join("child");
+        fs::create_dir_all(&child).unwrap();
+
+        let settings = Settings::default();
+        settings
+            .save(&config_path)
+            .expect("failed to write initial config");
+
+        // Add parent to config
+        let (settings, added, skipped) =
+            add_paths_to_settings(std::slice::from_ref(&parent), &config_path, false)
+                .expect("parent addition should succeed");
+        assert_eq!(added.len(), 1);
+        assert!(skipped.is_empty());
+        settings
+            .save(&config_path)
+            .expect("failed to persist updated config");
+
+        // Attempt to add child - should be skipped and report parent coverage
+        let (_, added_again, skipped_paths) =
+            add_paths_to_settings(std::slice::from_ref(&child), &config_path, false)
+                .expect("child addition should be skipped gracefully");
+        assert!(added_again.is_empty(), "child path should not be added");
+        assert_eq!(skipped_paths.len(), 1);
+        let skipped = &skipped_paths[0];
+        assert_eq!(skipped.path, child);
+        let parent_canonical = parent.canonicalize().unwrap();
+        match &skipped.reason {
+            SkipReason::CoveredBy(parent) => assert_eq!(
+                parent, &parent_canonical,
+                "Expected skipped path to report coverage by parent"
+            ),
+            other => panic!("Unexpected skip reason: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_seed_indexer_with_config_paths_tracks_configured_roots() {
+        let temp_dir = TempDir::new().unwrap();
+        let parent = temp_dir.path().join("parent");
+        let child = parent.join("child");
+        fs::create_dir_all(&child).unwrap();
+
+        let settings = Settings {
+            index_path: temp_dir.path().join("index"),
+            ..Settings::default()
+        };
+        let mut indexer = SimpleIndexer::with_settings(Arc::new(settings));
+        assert!(indexer.get_indexed_paths().is_empty());
+
+        let canonical_parent = parent.canonicalize().unwrap();
+        let report = seed_indexer_with_config_paths(
+            &mut indexer,
+            std::slice::from_ref(&canonical_parent),
+            false,
+        );
+        assert_eq!(report.newly_seeded.len(), 1);
+        assert_eq!(report.newly_seeded[0], canonical_parent);
+        assert!(report.missing_paths.is_empty());
+
+        let tracked: Vec<_> = indexer.get_indexed_paths().iter().cloned().collect();
+        assert_eq!(tracked.len(), 1);
+        assert_eq!(tracked[0], canonical_parent);
+
+        // Adding a child after the parent should be a no-op
+        let canonical_child = child.canonicalize().unwrap();
+        let child_report = seed_indexer_with_config_paths(
+            &mut indexer,
+            std::slice::from_ref(&canonical_child),
+            false,
+        );
+        assert!(
+            child_report.newly_seeded.is_empty(),
+            "child seeding should not add new directories"
+        );
+        let tracked_after_child: Vec<_> = indexer.get_indexed_paths().iter().cloned().collect();
+        assert_eq!(tracked_after_child.len(), 1, "child should not be tracked");
+        assert_eq!(tracked_after_child[0], canonical_parent);
+    }
+
+    #[test]
+    fn test_seed_indexer_with_config_paths_reports_missing() {
+        let temp_dir = TempDir::new().unwrap();
+        let missing = temp_dir.path().join("missing_dir");
+
+        let settings = Arc::new(Settings {
+            index_path: temp_dir.path().join("index"),
+            ..Settings::default()
+        });
+        let mut indexer = SimpleIndexer::with_settings(settings);
+
+        let report =
+            seed_indexer_with_config_paths(&mut indexer, std::slice::from_ref(&missing), false);
+        assert!(
+            report.newly_seeded.is_empty(),
+            "missing directory should not be seeded"
+        );
+        assert_eq!(report.missing_paths.len(), 1);
+        assert_eq!(report.missing_paths[0], missing);
+    }
+
+    #[test]
+    fn test_add_paths_to_settings_skips_files_without_persisting() {
+        let temp_dir = TempDir::new().unwrap();
+        let config_path = temp_dir.path().join("settings.toml");
+        let file_path = temp_dir.path().join("single.rs");
+        fs::write(&file_path, "fn main() {}\n").unwrap();
+
+        Settings::default()
+            .save(&config_path)
+            .expect("failed to write initial config");
+
+        let (settings, added, skipped) =
+            add_paths_to_settings(std::slice::from_ref(&file_path), &config_path, false)
+                .expect("file addition should succeed");
+        assert!(added.is_empty(), "file should not be persisted in config");
+        assert_eq!(skipped.len(), 1);
+        assert_eq!(skipped[0].path, file_path);
+        assert!(matches!(skipped[0].reason, SkipReason::FileNotPersisted));
+
+        let reloaded = Settings::load_from(&config_path).expect("config reload failed");
+        assert!(
+            reloaded.indexing.indexed_paths.is_empty(),
+            "file path should not be stored in indexed_paths"
+        );
+        drop(settings); // ensure no unused warnings
+    }
+}
 /// Run parser performance benchmarks
 fn run_benchmark_command(language: &str, custom_file: Option<PathBuf>) {
     use codanna::display::theme::Theme;
@@ -2696,6 +3846,7 @@ fn run_benchmark_command(language: &str, custom_file: Option<PathBuf>) {
         "php" => benchmark_php_parser(custom_file),
         "typescript" | "ts" => benchmark_typescript_parser(custom_file),
         "go" => benchmark_go_parser(custom_file),
+        "csharp" | "c#" | "cs" => benchmark_csharp_parser(custom_file),
         "all" => {
             benchmark_rust_parser(None);
             println!();
@@ -2706,10 +3857,12 @@ fn run_benchmark_command(language: &str, custom_file: Option<PathBuf>) {
             benchmark_typescript_parser(None);
             println!();
             benchmark_go_parser(None);
+            println!();
+            benchmark_csharp_parser(None);
         }
         _ => {
             eprintln!("Unknown language: {language}");
-            eprintln!("Available languages: rust, python, php, typescript, go, all");
+            eprintln!("Available languages: rust, python, php, typescript, go, csharp, all");
             std::process::exit(1);
         }
     }
@@ -2813,6 +3966,22 @@ fn benchmark_go_parser(custom_file: Option<PathBuf>) {
 
     let mut parser = GoParser::new().expect("Failed to create Go parser");
     benchmark_parser("Go", &mut parser, &code, file_path);
+}
+
+fn benchmark_csharp_parser(custom_file: Option<PathBuf>) {
+    let (code, file_path) = if let Some(path) = custom_file {
+        let content = std::fs::read_to_string(&path).unwrap_or_else(|e| {
+            eprintln!("Failed to read {}: {e}", path.display());
+            std::process::exit(1);
+        });
+        (content, Some(path))
+    } else {
+        // Generate benchmark code
+        (generate_csharp_benchmark_code(), None)
+    };
+
+    let mut parser = CSharpParser::new().expect("Failed to create C# parser");
+    benchmark_parser("C#", &mut parser, &code, file_path);
 }
 
 fn benchmark_parser(
@@ -3216,6 +4385,111 @@ func main() {
     ok := Function_0(1, "x")
     if ok {
         fmt.Println("ok")
+    }
+}
+"#,
+    );
+
+    code
+}
+
+fn generate_csharp_benchmark_code() -> String {
+    let mut code = String::from(
+        "// C# benchmark file\n\nusing System;\nusing System.Collections.Generic;\nusing System.Linq;\n\nnamespace BenchmarkNamespace\n{\n",
+    );
+
+    // Generate 500 static classes with methods
+    for i in 0..500 {
+        code.push_str(&format!(
+            r#"    /// <summary>
+    /// Static class {i} documentation
+    /// </summary>
+    public static class StaticClass{i}
+    {{
+        public static int Method{i}(int param)
+        {{
+            return param * 2;
+        }}
+
+        public static string Process{i}(string input)
+        {{
+            return input.ToUpper();
+        }}
+    }}
+
+"#
+        ));
+    }
+
+    // Generate 50 classes with properties/fields/constructors
+    for i in 0..50 {
+        code.push_str(&format!(
+            r#"    /// <summary>
+    /// Class {i} documentation
+    /// </summary>
+    public class Class{i}
+    {{
+        private int _value;
+
+        public int Value {{ get; set; }}
+        public string Name {{ get; set; }}
+
+        public Class{i}(int value, string name)
+        {{
+            _value = value;
+            Value = value;
+            Name = name;
+        }}
+
+        public int Calculate()
+        {{
+            return _value * 2;
+        }}
+
+        public void Process(string input)
+        {{
+            Console.WriteLine(input);
+        }}
+    }}
+
+"#
+        ));
+    }
+
+    // Generate 25 interfaces
+    for i in 0..25 {
+        code.push_str(&format!(
+            r#"    /// <summary>
+    /// Interface {i} documentation
+    /// </summary>
+    public interface IInterface{i}
+    {{
+        void Process(string input);
+        int Calculate();
+    }}
+
+"#
+        ));
+    }
+
+    // Program class with Main method
+    code.push_str(
+        r#"    /// <summary>
+    /// Entry point class
+    /// </summary>
+    class Program
+    {
+        static void Main(string[] args)
+        {
+            var obj = new Class0(42, "test");
+            var result = obj.Calculate();
+            obj.Process("hello");
+
+            var staticResult = StaticClass0.Method0(10);
+            var processed = StaticClass0.Process0("world");
+
+            Console.WriteLine($"Result: {result}, Static: {staticResult}, Processed: {processed}");
+        }
     }
 }
 "#,

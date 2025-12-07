@@ -23,7 +23,8 @@
 //! - Full namespace resolution implementation
 //! - Type/value space population from parser
 
-use crate::parsing::resolution::ProjectResolutionEnhancer;
+use crate::debug_print;
+use crate::parsing::resolution::{ImportBinding, ProjectResolutionEnhancer};
 use crate::parsing::{InheritanceResolver, ResolutionScope, ScopeLevel, ScopeType};
 use crate::project_resolver::persist::ResolutionRules;
 use crate::{FileId, SymbolId};
@@ -71,6 +72,9 @@ pub struct TypeScriptResolutionContext {
     qualified_names: HashMap<String, SymbolId>,
     /// Namespace alias to target module path (normalized, dots)
     namespace_aliases: HashMap<String, String>,
+
+    /// Binding info for imports keyed by visible name
+    import_bindings: HashMap<String, ImportBinding>,
 }
 
 impl TypeScriptResolutionContext {
@@ -87,6 +91,7 @@ impl TypeScriptResolutionContext {
             imports: Vec::new(),
             qualified_names: HashMap::new(),
             namespace_aliases: HashMap::new(),
+            import_bindings: HashMap::new(),
         }
     }
 
@@ -140,7 +145,7 @@ impl TypeScriptResolutionContext {
                 // Block-scoped declarations (let, const, arrow functions)
                 self.local_scope.insert(name, symbol_id);
             }
-            Some(ScopeContext::ClassMember) => {
+            Some(ScopeContext::ClassMember { .. }) => {
                 // Class members go to local scope within the class
                 self.local_scope.insert(name, symbol_id);
             }
@@ -204,18 +209,23 @@ impl ResolutionScope for TypeScriptResolutionContext {
         // 4. Module symbols
         // 5. Global/ambient
 
+        debug_print!(self, "[resolve] Looking up name='{}'", name);
+
         // 1. Check local block scope
         if let Some(&id) = self.local_scope.get(name) {
+            debug_print!(self, "[resolve] Found in local_scope: {:?}", id);
             return Some(id);
         }
 
         // 2. Check hoisted scope
         if let Some(&id) = self.hoisted_scope.get(name) {
+            debug_print!(self, "[resolve] Found in hoisted_scope: {:?}", id);
             return Some(id);
         }
 
         // 3. Check imported symbols
         if let Some(&id) = self.imported_symbols.get(name) {
+            debug_print!(self, "[resolve] Found in imported_symbols: {:?}", id);
             return Some(id);
         }
 
@@ -281,6 +291,7 @@ impl ResolutionScope for TypeScriptResolutionContext {
             }
         }
 
+        debug_print!(self, "[resolve] NOT FOUND: '{}'", name);
         None
     }
 
@@ -393,8 +404,13 @@ impl ResolutionScope for TypeScriptResolutionContext {
 
         match rel_kind {
             Calls => {
-                // TypeScript-specific: Functions/Methods can call
-                let caller_can_call = matches!(from_kind, Function | Method | Macro | Module);
+                // TypeScript-specific: Functions/Methods/Constants/Variables can call
+                // Constants and Variables can contain functions (e.g., object methods, arrow functions)
+                // This enables patterns like: const actions = { submitForm: () => {...} }
+                let caller_can_call = matches!(
+                    from_kind,
+                    Function | Method | Macro | Module | Constant | Variable
+                );
                 // TypeScript-specific: Constants and Variables can be callable
                 // This enables React component patterns: const Button = () => {}
                 let callee_can_be_called = matches!(
@@ -405,7 +421,10 @@ impl ResolutionScope for TypeScriptResolutionContext {
             }
             CalledBy => {
                 // Reverse of Calls
-                let caller_can_call = matches!(to_kind, Function | Method | Macro | Module);
+                let caller_can_call = matches!(
+                    to_kind,
+                    Function | Method | Macro | Module | Constant | Variable
+                );
                 let callee_can_be_called = matches!(
                     from_kind,
                     Function | Method | Macro | Class | Constant | Variable
@@ -493,6 +512,22 @@ impl ResolutionScope for TypeScriptResolutionContext {
                 true
             }
         }
+    }
+
+    fn populate_imports(&mut self, imports: &[crate::parsing::Import]) {
+        // Convert Import records into our internal (path, alias) tuple format
+        for import in imports {
+            self.add_import(import.path.clone(), import.alias.clone());
+        }
+    }
+
+    fn register_import_binding(&mut self, binding: ImportBinding) {
+        self.import_bindings
+            .insert(binding.exposed_name.clone(), binding);
+    }
+
+    fn import_binding(&self, name: &str) -> Option<ImportBinding> {
+        self.import_bindings.get(name).cloned()
     }
 }
 

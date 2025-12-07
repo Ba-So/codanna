@@ -7,6 +7,7 @@
 //! - Imported package symbols
 //! - Interface implementation tracking (implicit in Go)
 
+use crate::parsing::resolution::ImportBinding;
 use crate::parsing::{InheritanceResolver, ResolutionScope, ScopeLevel, ScopeType};
 use crate::storage::DocumentIndex;
 use crate::{FileId, SymbolId};
@@ -346,6 +347,9 @@ pub struct GoResolutionContext {
 
     /// Type registry for type resolution
     type_registry: TypeRegistry,
+
+    /// Binding info for imports keyed by visible name
+    import_bindings: HashMap<String, ImportBinding>,
 }
 
 impl GoResolutionContext {
@@ -361,6 +365,7 @@ impl GoResolutionContext {
             scope_stack: Vec::new(),
             imports: Vec::new(),
             type_registry: TypeRegistry::new(),
+            import_bindings: HashMap::new(),
         }
     }
 
@@ -395,7 +400,7 @@ impl GoResolutionContext {
                 // Local variables and function parameters
                 self.local_scope.insert(name, symbol_id);
             }
-            Some(ScopeContext::ClassMember) => {
+            Some(ScopeContext::ClassMember { .. }) => {
                 // Struct/interface members - treat as local within the type
                 self.local_scope.insert(name, symbol_id);
             }
@@ -1044,6 +1049,22 @@ impl ResolutionScope for GoResolutionContext {
 
         symbols
     }
+
+    fn populate_imports(&mut self, imports: &[crate::parsing::Import]) {
+        // Convert Import records into our internal (path, alias) tuple format
+        for import in imports {
+            self.add_import(import.path.clone(), import.alias.clone());
+        }
+    }
+
+    fn register_import_binding(&mut self, binding: ImportBinding) {
+        self.import_bindings
+            .insert(binding.exposed_name.clone(), binding);
+    }
+
+    fn import_binding(&self, name: &str) -> Option<ImportBinding> {
+        self.import_bindings.get(name).cloned()
+    }
 }
 
 /// Go interface implementation resolution system
@@ -1574,7 +1595,8 @@ mod tests {
         // Create a minimal DocumentIndex for testing
         let temp_dir = std::env::temp_dir().join("codanna_test_go_resolution");
         std::fs::create_dir_all(&temp_dir).unwrap();
-        let document_index = DocumentIndex::new(&temp_dir).unwrap();
+        let settings = crate::config::Settings::default();
+        let document_index = DocumentIndex::new(&temp_dir, &settings).unwrap();
 
         // Test standard library path handling
         let stdlib_result = context.handle_go_module_paths("fmt", &document_index);
@@ -1606,7 +1628,8 @@ mod tests {
         // Create a minimal DocumentIndex for testing
         let temp_dir = std::env::temp_dir().join("codanna_test_go_resolution_2");
         std::fs::create_dir_all(&temp_dir).unwrap();
-        let document_index = DocumentIndex::new(&temp_dir).unwrap();
+        let settings = crate::config::Settings::default();
+        let document_index = DocumentIndex::new(&temp_dir, &settings).unwrap();
 
         // The actual resolution would require symbols in the index
         // For now, test that the method handles the imports correctly
@@ -2077,7 +2100,8 @@ replace github.com/another/module => github.com/fork/module v1.2.3
         use tempfile::TempDir;
 
         let temp_dir = TempDir::new().unwrap();
-        let document_index = DocumentIndex::new(temp_dir.path()).unwrap();
+        let settings = crate::config::Settings::default();
+        let document_index = DocumentIndex::new(temp_dir.path(), &settings).unwrap();
         let context = GoResolutionContext::new(FileId::new(1).unwrap());
 
         // Test with empty index - should return None
@@ -2094,7 +2118,8 @@ replace github.com/another/module => github.com/fork/module v1.2.3
         use tempfile::TempDir;
 
         let temp_dir = TempDir::new().unwrap();
-        let document_index = DocumentIndex::new(temp_dir.path()).unwrap();
+        let settings = crate::config::Settings::default();
+        let document_index = DocumentIndex::new(temp_dir.path(), &settings).unwrap();
         let context = GoResolutionContext::new(FileId::new(1).unwrap());
 
         // Test with empty index - should return None

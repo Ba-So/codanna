@@ -1,6 +1,7 @@
 //! C language parser implementation
 
 use crate::parsing::method_call::MethodCall;
+use crate::parsing::parser::check_recursion_depth;
 use crate::parsing::{
     HandledNode, Import, Language, LanguageParser, NodeTracker, NodeTrackingState, ParserContext,
     ScopeType,
@@ -83,6 +84,7 @@ impl CParser {
     fn create_symbol(
         &mut self,
         counter: &mut SymbolCounter,
+        full_node: Node,
         name_node: Node,
         kind: SymbolKind,
         file_id: FileId,
@@ -92,10 +94,10 @@ impl CParser {
         let symbol_id = counter.next_id();
 
         let range = Range::new(
-            name_node.start_position().row as u32,
-            name_node.start_position().column as u16,
-            name_node.end_position().row as u32,
-            name_node.end_position().column as u16,
+            full_node.start_position().row as u32,
+            full_node.start_position().column as u16,
+            full_node.end_position().row as u32,
+            full_node.end_position().column as u16,
         );
 
         let mut symbol = Symbol::new(symbol_id, name.to_string(), kind, file_id, range);
@@ -210,7 +212,13 @@ impl CParser {
         file_id: FileId,
         symbols: &mut Vec<Symbol>,
         counter: &mut SymbolCounter,
+        depth: usize,
     ) {
+        // Guard against stack overflow
+        if !check_recursion_depth(depth, node) {
+            return;
+        }
+
         match node.kind() {
             "translation_unit" => {
                 self.register_handled_node("translation_unit", node.kind_id());
@@ -220,7 +228,14 @@ impl CParser {
 
                 // Process all top-level declarations
                 for child in node.children(&mut node.walk()) {
-                    self.extract_symbols_from_node(child, code, file_id, symbols, counter);
+                    self.extract_symbols_from_node(
+                        child,
+                        code,
+                        file_id,
+                        symbols,
+                        counter,
+                        depth + 1,
+                    );
                 }
 
                 self.context.exit_scope();
@@ -233,6 +248,7 @@ impl CParser {
                     if let Some(name_node) = Self::find_function_name_node(declarator) {
                         if let Some(symbol) = self.create_symbol(
                             counter,
+                            node,
                             name_node,
                             SymbolKind::Function,
                             file_id,
@@ -251,7 +267,14 @@ impl CParser {
                 for child in node.children(&mut node.walk()) {
                     // Skip declarator (already processed) and parameter lists
                     if child.kind() != "function_declarator" && child.kind() != "parameter_list" {
-                        self.extract_symbols_from_node(child, code, file_id, symbols, counter);
+                        self.extract_symbols_from_node(
+                            child,
+                            code,
+                            file_id,
+                            symbols,
+                            counter,
+                            depth + 1,
+                        );
                     }
                 }
 
@@ -261,9 +284,14 @@ impl CParser {
             "struct_specifier" => {
                 self.register_handled_node("struct_specifier", node.kind_id());
                 if let Some(name_node) = node.child_by_field_name("name") {
-                    if let Some(symbol) =
-                        self.create_symbol(counter, name_node, SymbolKind::Struct, file_id, code)
-                    {
+                    if let Some(symbol) = self.create_symbol(
+                        counter,
+                        node,
+                        name_node,
+                        SymbolKind::Struct,
+                        file_id,
+                        code,
+                    ) {
                         symbols.push(symbol);
                     }
                 }
@@ -272,7 +300,14 @@ impl CParser {
                 if let Some(body) = node.child_by_field_name("body") {
                     self.context.enter_scope(ScopeType::Class);
                     for child in body.children(&mut body.walk()) {
-                        self.extract_symbols_from_node(child, code, file_id, symbols, counter);
+                        self.extract_symbols_from_node(
+                            child,
+                            code,
+                            file_id,
+                            symbols,
+                            counter,
+                            depth + 1,
+                        );
                     }
                     self.context.exit_scope();
                 }
@@ -280,9 +315,14 @@ impl CParser {
             "union_specifier" => {
                 self.register_handled_node("union_specifier", node.kind_id());
                 if let Some(name_node) = node.child_by_field_name("name") {
-                    if let Some(symbol) =
-                        self.create_symbol(counter, name_node, SymbolKind::Struct, file_id, code)
-                    {
+                    if let Some(symbol) = self.create_symbol(
+                        counter,
+                        node,
+                        name_node,
+                        SymbolKind::Struct,
+                        file_id,
+                        code,
+                    ) {
                         symbols.push(symbol);
                     }
                 }
@@ -291,7 +331,14 @@ impl CParser {
                 if let Some(body) = node.child_by_field_name("body") {
                     self.context.enter_scope(ScopeType::Class);
                     for child in body.children(&mut body.walk()) {
-                        self.extract_symbols_from_node(child, code, file_id, symbols, counter);
+                        self.extract_symbols_from_node(
+                            child,
+                            code,
+                            file_id,
+                            symbols,
+                            counter,
+                            depth + 1,
+                        );
                     }
                     self.context.exit_scope();
                 }
@@ -299,9 +346,14 @@ impl CParser {
             "enum_specifier" => {
                 self.register_handled_node("enum_specifier", node.kind_id());
                 if let Some(name_node) = node.child_by_field_name("name") {
-                    if let Some(symbol) =
-                        self.create_symbol(counter, name_node, SymbolKind::Enum, file_id, code)
-                    {
+                    if let Some(symbol) = self.create_symbol(
+                        counter,
+                        node,
+                        name_node,
+                        SymbolKind::Enum,
+                        file_id,
+                        code,
+                    ) {
                         symbols.push(symbol);
                     }
                 }
@@ -314,6 +366,7 @@ impl CParser {
                             if let Some(name_node) = child.child_by_field_name("name") {
                                 if let Some(symbol) = self.create_symbol(
                                     counter,
+                                    child,
                                     name_node,
                                     SymbolKind::Constant,
                                     file_id,
@@ -334,6 +387,7 @@ impl CParser {
                         if let Some(name_node) = Self::find_declarator_name(child) {
                             if let Some(symbol) = self.create_symbol(
                                 counter,
+                                child,
                                 name_node,
                                 SymbolKind::Variable,
                                 file_id,
@@ -349,9 +403,14 @@ impl CParser {
                 self.register_handled_node("init_declarator", node.kind_id());
                 // Handle variable initialization (int x = 5, Rectangle *rect = malloc(...), etc.)
                 if let Some(name_node) = Self::find_declarator_name(node) {
-                    if let Some(symbol) =
-                        self.create_symbol(counter, name_node, SymbolKind::Variable, file_id, code)
-                    {
+                    if let Some(symbol) = self.create_symbol(
+                        counter,
+                        node,
+                        name_node,
+                        SymbolKind::Variable,
+                        file_id,
+                        code,
+                    ) {
                         symbols.push(symbol);
                     }
                 }
@@ -365,7 +424,14 @@ impl CParser {
                 for child in node.children(&mut node.walk()) {
                     // Skip braces, process the contents
                     if child.kind() != "{" && child.kind() != "}" {
-                        self.extract_symbols_from_node(child, code, file_id, symbols, counter);
+                        self.extract_symbols_from_node(
+                            child,
+                            code,
+                            file_id,
+                            symbols,
+                            counter,
+                            depth + 1,
+                        );
                     }
                 }
 
@@ -376,9 +442,14 @@ impl CParser {
                 self.register_handled_node("parameter_declaration", node.kind_id());
                 // Handle function parameters
                 if let Some(name_node) = Self::find_declarator_name(node) {
-                    if let Some(symbol) =
-                        self.create_symbol(counter, name_node, SymbolKind::Parameter, file_id, code)
-                    {
+                    if let Some(symbol) = self.create_symbol(
+                        counter,
+                        node,
+                        name_node,
+                        SymbolKind::Parameter,
+                        file_id,
+                        code,
+                    ) {
                         symbols.push(symbol);
                     }
                 }
@@ -392,6 +463,7 @@ impl CParser {
                             if name_node.kind() == "field_identifier" {
                                 if let Some(symbol) = self.create_symbol(
                                     counter,
+                                    child,
                                     name_node,
                                     SymbolKind::Field,
                                     file_id,
@@ -410,9 +482,14 @@ impl CParser {
                 // This helps with cross-file symbol resolution and dependency analysis
                 if let Some(path_node) = node.child_by_field_name("path") {
                     // Create an import symbol for the included file
-                    if let Some(symbol) =
-                        self.create_symbol(counter, path_node, SymbolKind::Macro, file_id, code)
-                    {
+                    if let Some(symbol) = self.create_symbol(
+                        counter,
+                        node,
+                        path_node,
+                        SymbolKind::Macro,
+                        file_id,
+                        code,
+                    ) {
                         symbols.push(symbol);
                     }
                 }
@@ -423,9 +500,14 @@ impl CParser {
                 // This helps with macro expansion and cross-file symbol analysis
                 if let Some(name_node) = node.child_by_field_name("name") {
                     // Create a macro symbol for the definition
-                    if let Some(symbol) =
-                        self.create_symbol(counter, name_node, SymbolKind::Macro, file_id, code)
-                    {
+                    if let Some(symbol) = self.create_symbol(
+                        counter,
+                        node,
+                        name_node,
+                        SymbolKind::Macro,
+                        file_id,
+                        code,
+                    ) {
                         symbols.push(symbol);
                     }
                 }
@@ -438,7 +520,14 @@ impl CParser {
 
                 // Process all children (condition, then clause, else clause)
                 for child in node.children(&mut node.walk()) {
-                    self.extract_symbols_from_node(child, code, file_id, symbols, counter);
+                    self.extract_symbols_from_node(
+                        child,
+                        code,
+                        file_id,
+                        symbols,
+                        counter,
+                        depth + 1,
+                    );
                 }
 
                 self.context.exit_scope();
@@ -452,7 +541,14 @@ impl CParser {
 
                 // Process all children (condition, body)
                 for child in node.children(&mut node.walk()) {
-                    self.extract_symbols_from_node(child, code, file_id, symbols, counter);
+                    self.extract_symbols_from_node(
+                        child,
+                        code,
+                        file_id,
+                        symbols,
+                        counter,
+                        depth + 1,
+                    );
                 }
 
                 self.context.exit_scope();
@@ -466,7 +562,14 @@ impl CParser {
 
                 // Process all children (initialization, condition, update, body)
                 for child in node.children(&mut node.walk()) {
-                    self.extract_symbols_from_node(child, code, file_id, symbols, counter);
+                    self.extract_symbols_from_node(
+                        child,
+                        code,
+                        file_id,
+                        symbols,
+                        counter,
+                        depth + 1,
+                    );
                 }
 
                 self.context.exit_scope();
@@ -480,7 +583,14 @@ impl CParser {
 
                 // Process all children (body, condition)
                 for child in node.children(&mut node.walk()) {
-                    self.extract_symbols_from_node(child, code, file_id, symbols, counter);
+                    self.extract_symbols_from_node(
+                        child,
+                        code,
+                        file_id,
+                        symbols,
+                        counter,
+                        depth + 1,
+                    );
                 }
 
                 self.context.exit_scope();
@@ -494,7 +604,14 @@ impl CParser {
 
                 // Process all children (expression, case statements)
                 for child in node.children(&mut node.walk()) {
-                    self.extract_symbols_from_node(child, code, file_id, symbols, counter);
+                    self.extract_symbols_from_node(
+                        child,
+                        code,
+                        file_id,
+                        symbols,
+                        counter,
+                        depth + 1,
+                    );
                 }
 
                 self.context.exit_scope();
@@ -506,7 +623,14 @@ impl CParser {
                 // These don't create new scopes but are important for control flow analysis
                 // Process all children (label, statements)
                 for child in node.children(&mut node.walk()) {
-                    self.extract_symbols_from_node(child, code, file_id, symbols, counter);
+                    self.extract_symbols_from_node(
+                        child,
+                        code,
+                        file_id,
+                        symbols,
+                        counter,
+                        depth + 1,
+                    );
                 }
                 return; // Skip default traversal since we handled children
             }
@@ -516,7 +640,14 @@ impl CParser {
                 // These typically don't create symbols but are part of comprehensive AST coverage
                 // Process all children
                 for child in node.children(&mut node.walk()) {
-                    self.extract_symbols_from_node(child, code, file_id, symbols, counter);
+                    self.extract_symbols_from_node(
+                        child,
+                        code,
+                        file_id,
+                        symbols,
+                        counter,
+                        depth + 1,
+                    );
                 }
                 return; // Skip default traversal since we handled children
             }
@@ -531,7 +662,14 @@ impl CParser {
                 // Compound literals like (struct Point){.x=1, .y=2}
                 // These may contain initializer_pair children that we want to track
                 for child in node.children(&mut node.walk()) {
-                    self.extract_symbols_from_node(child, code, file_id, symbols, counter);
+                    self.extract_symbols_from_node(
+                        child,
+                        code,
+                        file_id,
+                        symbols,
+                        counter,
+                        depth + 1,
+                    );
                 }
                 return; // Skip default traversal since we handled children
             }
@@ -540,7 +678,14 @@ impl CParser {
                 // Designated initializers like .field = value or [index] = value
                 // These don't create symbols but are important for initialization patterns
                 for child in node.children(&mut node.walk()) {
-                    self.extract_symbols_from_node(child, code, file_id, symbols, counter);
+                    self.extract_symbols_from_node(
+                        child,
+                        code,
+                        file_id,
+                        symbols,
+                        counter,
+                        depth + 1,
+                    );
                 }
                 return; // Skip default traversal since we handled children
             }
@@ -551,7 +696,14 @@ impl CParser {
                 self.context.enter_scope(ScopeType::Block);
 
                 for child in node.children(&mut node.walk()) {
-                    self.extract_symbols_from_node(child, code, file_id, symbols, counter);
+                    self.extract_symbols_from_node(
+                        child,
+                        code,
+                        file_id,
+                        symbols,
+                        counter,
+                        depth + 1,
+                    );
                 }
 
                 self.context.exit_scope();
@@ -562,7 +714,14 @@ impl CParser {
                 // Conditional preprocessing directives - important for build-time logic
                 // These control compilation and symbol visibility
                 for child in node.children(&mut node.walk()) {
-                    self.extract_symbols_from_node(child, code, file_id, symbols, counter);
+                    self.extract_symbols_from_node(
+                        child,
+                        code,
+                        file_id,
+                        symbols,
+                        counter,
+                        depth + 1,
+                    );
                 }
                 return; // Skip default traversal since we handled children
             }
@@ -573,9 +732,14 @@ impl CParser {
                 if let Some(name_node) = node.child(0) {
                     if name_node.kind() == "identifier" {
                         // Track macro calls as macro symbols for analysis
-                        if let Some(symbol) =
-                            self.create_symbol(counter, name_node, SymbolKind::Macro, file_id, code)
-                        {
+                        if let Some(symbol) = self.create_symbol(
+                            counter,
+                            node,
+                            name_node,
+                            SymbolKind::Macro,
+                            file_id,
+                            code,
+                        ) {
                             symbols.push(symbol);
                         }
                     }
@@ -583,7 +747,14 @@ impl CParser {
 
                 // Process remaining children for arguments
                 for child in node.children(&mut node.walk()) {
-                    self.extract_symbols_from_node(child, code, file_id, symbols, counter);
+                    self.extract_symbols_from_node(
+                        child,
+                        code,
+                        file_id,
+                        symbols,
+                        counter,
+                        depth + 1,
+                    );
                 }
                 return; // Skip default traversal since we handled children
             }
@@ -592,7 +763,14 @@ impl CParser {
                 // __attribute__ declarations for compiler directives
                 // Important for understanding code structure and optimization hints
                 for child in node.children(&mut node.walk()) {
-                    self.extract_symbols_from_node(child, code, file_id, symbols, counter);
+                    self.extract_symbols_from_node(
+                        child,
+                        code,
+                        file_id,
+                        symbols,
+                        counter,
+                        depth + 1,
+                    );
                 }
                 return; // Skip default traversal since we handled children
             }
@@ -601,7 +779,7 @@ impl CParser {
 
         // Process children
         for child in node.children(&mut node.walk()) {
-            self.extract_symbols_from_node(child, code, file_id, symbols, counter);
+            self.extract_symbols_from_node(child, code, file_id, symbols, counter, depth + 1);
         }
     }
 
@@ -767,7 +945,8 @@ impl LanguageParser for CParser {
         let root_node = tree.root_node();
         let mut symbols = Vec::new();
 
-        self.extract_symbols_from_node(root_node, code, file_id, &mut symbols, symbol_counter);
+        // Start recursion at depth 0
+        self.extract_symbols_from_node(root_node, code, file_id, &mut symbols, symbol_counter, 0);
 
         symbols
     }

@@ -318,12 +318,46 @@ impl SymbolHashCache {
             current_offset += (bucket.len() * CacheEntry::SIZE) as u64;
         }
 
-        // Write to file
-        let mut file = OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .open(path)?;
+        // Write to file (with Windows file locking retry logic)
+        let mut file = {
+            let mut attempts = 0;
+            const MAX_ATTEMPTS: u32 = 3;
+
+            loop {
+                match OpenOptions::new()
+                    .create(true)
+                    .write(true)
+                    .truncate(true)
+                    .open(path)
+                {
+                    Ok(file) => break file,
+                    Err(e) if attempts < MAX_ATTEMPTS => {
+                        // Check for Windows file locking error (os error 1224)
+                        if cfg!(windows) && e.to_string().contains("os error 1224") {
+                            attempts += 1;
+                            eprintln!(
+                                "Attempt {attempts}/{MAX_ATTEMPTS}: Windows file lock detected, retrying..."
+                            );
+
+                            // Try to delete the file if it exists to break the lock
+                            if path.exists() {
+                                if let Err(del_err) = std::fs::remove_file(path) {
+                                    eprintln!("Warning: Could not delete cache file: {del_err}");
+                                } else {
+                                    eprintln!("Deleted existing cache file to break file lock");
+                                }
+                            }
+
+                            // Brief delay before retry
+                            std::thread::sleep(std::time::Duration::from_millis(100));
+                            continue;
+                        }
+                        return Err(e);
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+        };
 
         // Write header
         file.write_all(MAGIC_BYTES)?;

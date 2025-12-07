@@ -58,8 +58,8 @@
 //! 4. (Future) Register in the language registry for auto-discovery
 
 use crate::parsing::resolution::{
-    GenericInheritanceResolver, GenericResolutionContext, InheritanceResolver, ResolutionScope,
-    ScopeLevel,
+    GenericInheritanceResolver, GenericResolutionContext, ImportBinding, ImportOrigin,
+    InheritanceResolver, ResolutionScope, ScopeLevel,
 };
 use crate::relationship::RelationKind;
 use crate::storage::DocumentIndex;
@@ -353,25 +353,79 @@ pub trait LanguageBehavior: Send + Sync {
         // Create language-specific resolution context
         let mut context = self.create_resolution_context(file_id);
 
-        // 1. Add imported symbols using behavior's tracked imports
-        let imports = self.get_imports_for_file(file_id);
-        for import in imports {
-            if let Some(symbol_id) = self.resolve_import(&import, document_index) {
-                // Use alias if provided, otherwise use the last segment of the path
-                let name = if let Some(alias) = &import.alias {
-                    alias.clone()
-                } else {
-                    // Let the language determine the separator
-                    import
-                        .path
-                        .split(self.module_separator())
-                        .last()
-                        .unwrap_or(&import.path)
-                        .to_string()
-                };
+        // 1. Add imported symbols - MERGE from both sources:
+        //    - Tantivy (persisted imports, available after restart)
+        //    - BehaviorState (in-memory imports from current indexing session)
+        let mut imports =
+            document_index
+                .get_imports_for_file(file_id)
+                .map_err(|e| IndexError::TantivyError {
+                    operation: "get_imports_for_file".to_string(),
+                    cause: e.to_string(),
+                })?;
 
-                // Add as imported symbol (higher priority than module symbols)
-                context.add_symbol(name, symbol_id, ScopeLevel::Module);
+        // Merge with in-memory imports (deduplication happens naturally)
+        let memory_imports = self.get_imports_for_file(file_id);
+        for import in memory_imports {
+            // Only add if not already present from Tantivy
+            if !imports
+                .iter()
+                .any(|i| i.path == import.path && i.alias == import.alias)
+            {
+                imports.push(import);
+            }
+        }
+
+        // CRITICAL: Populate raw imports into context for is_external_import() checks
+        context.populate_imports(&imports);
+        let importing_module = self.get_module_path_for_file(file_id);
+        for import in imports {
+            let resolved_symbol = self.resolve_import(&import, document_index);
+            let origin = self.classify_import_origin(
+                &import,
+                resolved_symbol,
+                importing_module.as_deref(),
+                document_index,
+            );
+
+            // Derive the visible names this import introduces
+            let mut binding_names: Vec<String> = Vec::new();
+            if let Some(alias) = &import.alias {
+                binding_names.push(alias.clone());
+            }
+
+            let separator = self.module_separator();
+            let last_segment = import
+                .path
+                .rsplit(separator)
+                .next()
+                .unwrap_or(&import.path)
+                .to_string();
+            if !binding_names.contains(&last_segment) {
+                binding_names.push(last_segment.clone());
+            }
+
+            if !binding_names.contains(&import.path) {
+                binding_names.push(import.path.clone());
+            }
+
+            let import_clone = import.clone();
+            for name in &binding_names {
+                context.register_import_binding(ImportBinding {
+                    import: import_clone.clone(),
+                    exposed_name: name.clone(),
+                    origin,
+                    resolved_symbol,
+                });
+            }
+
+            if let (ImportOrigin::Internal, Some(symbol_id)) = (origin, resolved_symbol) {
+                // Primary name is alias if provided, otherwise last segment
+                let primary_name = binding_names
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(|| import_clone.alias.clone().unwrap_or(last_segment));
+                context.add_symbol(primary_name, symbol_id, ScopeLevel::Module);
             }
         }
 
@@ -392,6 +446,30 @@ pub trait LanguageBehavior: Send + Sync {
                 // This allows resolving "crate::module::function" in addition to "function"
                 if let Some(module_path) = &symbol.module_path {
                     context.add_symbol(module_path.to_string(), symbol.id, ScopeLevel::Module);
+                }
+            }
+        }
+
+        // 2.5. Add same-package/same-module symbols (for Java, Kotlin, Go, etc.)
+        // Languages with package-level visibility can reference symbols in the same package
+        // without explicit imports. Only add if the file has a module path set.
+        if let Some(current_module) = &importing_module {
+            let same_package_symbols = document_index
+                .find_symbols_by_module(current_module)
+                .map_err(|e| IndexError::TantivyError {
+                    operation: "find_symbols_by_module".to_string(),
+                    cause: e.to_string(),
+                })?;
+
+            for symbol in same_package_symbols {
+                // Skip symbols from current file (already added in section 2)
+                if symbol.file_id == file_id {
+                    continue;
+                }
+
+                // Add to package scope (resolution context decides how to handle it)
+                if self.is_resolvable_symbol(&symbol) {
+                    context.add_symbol(symbol.name.to_string(), symbol.id, ScopeLevel::Package);
                 }
             }
         }
@@ -424,6 +502,7 @@ pub trait LanguageBehavior: Send + Sync {
             }
         }
 
+        self.initialize_resolution_context(context.as_mut(), file_id);
         Ok(context)
     }
 
@@ -440,15 +519,38 @@ pub trait LanguageBehavior: Send + Sync {
 
         // 1. FIRST: Add imported symbols (HIGHEST PRIORITY)
         // Optimized: Use cache to resolve imports when possible
-        let imports = self.get_imports_for_file(file_id);
+        // MERGE from both sources (Tantivy + BehaviorState)
+        let mut imports =
+            document_index
+                .get_imports_for_file(file_id)
+                .map_err(|e| IndexError::TantivyError {
+                    operation: "get_imports_for_file".to_string(),
+                    cause: e.to_string(),
+                })?;
+
+        // Merge with in-memory imports (deduplication)
+        let memory_imports = self.get_imports_for_file(file_id);
+        for import in memory_imports {
+            if !imports
+                .iter()
+                .any(|i| i.path == import.path && i.alias == import.alias)
+            {
+                imports.push(import);
+            }
+        }
+
+        // CRITICAL: Populate raw imports into context for is_external_import() checks
+        context.populate_imports(&imports);
+        let importing_module = self.get_module_path_for_file(file_id);
         for import in imports {
-            // Try cache first for simple imports
-            // First try the full path, then try just the symbol name
+            // Try cache first for simple imports, fall back to full resolution
+            let separator = self.module_separator();
             let symbol_name = import
                 .path
-                .split(self.module_separator())
+                .split(separator)
                 .last()
-                .unwrap_or(&import.path);
+                .unwrap_or(&import.path)
+                .to_string();
             debug_global!(
                 "DEBUG: Looking up '{}' (from import path '{}')",
                 symbol_name,
@@ -456,14 +558,14 @@ pub trait LanguageBehavior: Send + Sync {
             );
 
             // Try multiple cache candidates to disambiguate by module path before DB fallback
-            let candidates = cache.lookup_candidates(symbol_name, 16);
+            let candidates = cache.lookup_candidates(&symbol_name, 16);
             debug_global!(
                 "DEBUG: Cache candidates for '{}' (import '{}'): {}",
                 symbol_name,
                 import.path,
                 candidates.len()
             );
-            let symbol_id = if candidates.is_empty() {
+            let resolved_symbol = if candidates.is_empty() {
                 // Not in cache, use full resolution
                 debug_global!(
                     "DEBUG: CACHE MISS for '{}' (import path: '{}') - using database",
@@ -478,7 +580,6 @@ pub trait LanguageBehavior: Send + Sync {
                     debug_global!("DEBUG: CACHE HIT for '{symbol_name}' -> SymbolId({id:?})");
                     if let Ok(Some(symbol)) = document_index.find_symbol_by_id(id) {
                         if let Some(module_path) = &symbol.module_path {
-                            let importing_module = self.get_module_path_for_file(import.file_id);
                             if self.import_matches_symbol(
                                 &import.path,
                                 module_path.as_ref(),
@@ -513,18 +614,42 @@ pub trait LanguageBehavior: Send + Sync {
                 }
             };
 
-            if let Some(symbol_id) = symbol_id {
-                let name = if let Some(alias) = &import.alias {
-                    alias.clone()
-                } else {
-                    import
-                        .path
-                        .split(self.module_separator())
-                        .last()
-                        .unwrap_or(&import.path)
-                        .to_string()
-                };
-                context.add_symbol(name, symbol_id, ScopeLevel::Module);
+            let origin = self.classify_import_origin(
+                &import,
+                resolved_symbol,
+                importing_module.as_deref(),
+                document_index,
+            );
+
+            let mut binding_names: Vec<String> = Vec::new();
+            if let Some(alias) = &import.alias {
+                binding_names.push(alias.clone());
+            }
+
+            if !binding_names.contains(&symbol_name) {
+                binding_names.push(symbol_name.clone());
+            }
+
+            if !binding_names.contains(&import.path) {
+                binding_names.push(import.path.clone());
+            }
+
+            let import_clone = import.clone();
+            for name in &binding_names {
+                context.register_import_binding(ImportBinding {
+                    import: import_clone.clone(),
+                    exposed_name: name.clone(),
+                    origin,
+                    resolved_symbol,
+                });
+            }
+
+            if let (ImportOrigin::Internal, Some(symbol_id)) = (origin, resolved_symbol) {
+                let primary_name = binding_names
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(|| import_clone.alias.clone().unwrap_or(symbol_name.clone()));
+                context.add_symbol(primary_name, symbol_id, ScopeLevel::Module);
             }
         }
 
@@ -546,6 +671,30 @@ pub trait LanguageBehavior: Send + Sync {
                 // This allows resolving "crate::module::function" in addition to "function"
                 if let Some(module_path) = &symbol.module_path {
                     context.add_symbol(module_path.to_string(), symbol.id, ScopeLevel::Module);
+                }
+            }
+        }
+
+        // 2.5. Add same-package/same-module symbols (for Java, Kotlin, Go, etc.)
+        // Languages with package-level visibility can reference symbols in the same package
+        // without explicit imports. Only add if the file has a module path set.
+        if let Some(current_module) = &importing_module {
+            let same_package_symbols = document_index
+                .find_symbols_by_module(current_module)
+                .map_err(|e| IndexError::TantivyError {
+                    operation: "find_symbols_by_module".to_string(),
+                    cause: e.to_string(),
+                })?;
+
+            for symbol in same_package_symbols {
+                // Skip symbols from current file (already added in section 2)
+                if symbol.file_id == file_id {
+                    continue;
+                }
+
+                // Add to package scope (resolution context decides how to handle it)
+                if self.is_resolvable_symbol(&symbol) {
+                    context.add_symbol(symbol.name.to_string(), symbol.id, ScopeLevel::Package);
                 }
             }
         }
@@ -640,6 +789,7 @@ pub trait LanguageBehavior: Send + Sync {
             );
         }
 
+        self.initialize_resolution_context(context.as_mut(), file_id);
         Ok(context)
     }
 
@@ -658,7 +808,7 @@ pub trait LanguageBehavior: Send + Sync {
             match scope_context {
                 ScopeContext::Module | ScopeContext::Global | ScopeContext::Package => true,
                 ScopeContext::Local { .. } | ScopeContext::Parameter => false,
-                ScopeContext::ClassMember => {
+                ScopeContext::ClassMember { .. } => {
                     // Class members might be resolvable depending on visibility
                     matches!(symbol.visibility, Visibility::Public)
                 }
@@ -757,6 +907,37 @@ pub trait LanguageBehavior: Send + Sync {
     /// should override to return the module path.
     fn get_module_path_for_file(&self, _file_id: FileId) -> Option<String> {
         None
+    }
+
+    /// Register expression-to-type mappings extracted during parsing
+    ///
+    /// Languages that need additional resolution metadata (e.g., Kotlin generic
+    /// flow) can override this to persist data until resolution runs.
+    fn register_expression_types(&self, _file_id: FileId, _entries: &[(String, String)]) {}
+
+    /// Hook invoked after the base resolution context has been populated
+    ///
+    /// Allows languages to inject additional data (expression types, generic
+    /// metadata, etc.) into their resolution contexts.
+    fn initialize_resolution_context(&self, _context: &mut dyn ResolutionScope, _file_id: FileId) {}
+
+    /// Classify the origin of an import (internal vs external)
+    ///
+    /// Default implementation treats any successfully resolved import as internal
+    /// and all unresolved imports as external.
+    fn classify_import_origin(
+        &self,
+        import: &crate::parsing::Import,
+        resolved_symbol: Option<SymbolId>,
+        _importing_module: Option<&str>,
+        _document_index: &DocumentIndex,
+    ) -> ImportOrigin {
+        let _ = import;
+        if resolved_symbol.is_some() {
+            ImportOrigin::Internal
+        } else {
+            ImportOrigin::External
+        }
     }
 
     /// Check if a relationship between two symbol kinds is valid

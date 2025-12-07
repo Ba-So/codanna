@@ -5,6 +5,543 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.3] - 2025-11-30
+
+### Added
+
+- Swift language support with tree-sitter-swift parser
+- SwiftParser with class, struct, enum, protocol, function, property extraction
+- SwiftBehavior with Swift module path formatting
+- SwiftResolutionContext with Swift scope order
+- SwiftProvider for project structure handling
+- Swift ERROR recovery for `@unchecked Sendable` syntax
+- Nested type extraction in ERROR-recovered Swift classes
+- TypeScript ERROR recovery for `export type *` pattern
+- Kotlin context receiver function detection from `infix_expression` pattern
+- Test suite for Swift error recovery, relationships, visibility, nested types
+- Test suite for TypeScript error recovery
+- Test suite for Kotlin context receivers, value classes
+- Test suite for PHP readonly classes
+- Swift grammar documentation and audit reports
+- Example Swift files for testing
+- tree-sitter-swift dependency
+
+### Fixed
+
+- Swift nested types now extracted when parent class has ERROR nodes
+- TypeScript `export type * as Name` now resolves as Module symbol
+- Kotlin `context(...)` receiver functions now extracted as Function symbols
+- Swift recursive helper functions converted to static methods for clippy compliance
+
+### Changed
+
+- Swift parser handles both regular and ERROR-recovered class declarations
+- Kotlin audit.rs includes `infix_expression` in key_nodes tracking
+- Updated grammar-versions.lock with Swift grammar info
+
+## [0.8.2] - 2025-11-28
+
+### Added
+
+- JavaScript language support
+- JavaScriptProvider for jsconfig.json parsing and path alias resolution
+- JavaScriptParser with class, function, method, arrow function, export extraction, etc
+- JavaScriptBehavior with ES module path formatting and .js extension handling
+- JavaScriptResolutionContext with JavaScript scope order (local → module → imported → global)
+- Example JavaScript projects: React app, Next.js app, vanilla JavaScript
+- JavaScript inheritance resolution with extends/extended_by relationships
+- Test suite for JavaScript nested functions
+- Project resolution documentation in docs/advanced/project-resolution.md
+
+### Fixed
+
+- JavaScript module path normalization now strips .js/.jsx/.mjs/.cjs extensions
+- JavaScript class inheritance resolution (extends relationships now resolve correctly)
+
+### Changed
+
+- Refactored JavaScript behavior to use shared normalize_js_import helper
+- Updated all language documentation to include JavaScript
+- JavaScript audit reports regenerated with current timestamps
+
+### Documentation
+
+- Added docs/advanced/project-resolution.md explaining tsconfig.json/jsconfig.json resolution
+- Added JavaScript to supported languages list across all documentation
+
+## [0.8.1] - 2025-11-25
+
+### Fixed
+
+- Added AllMpnetBaseV2 support for fastembed 5.3.0 compatibility
+
+### Changed
+
+- Updated fastembed from 5.2.1 to 5.3.0
+- Updated tower-http from 0.6.6 to 0.6.7
+
+## [0.8.0] - 2025-11-19
+
+### Added
+
+- Resolution pipeline: Multi-symbol disambiguation with relationship-aware resolution
+- Java language support with complete six-file architecture
+- JavaProvider for Maven pom.xml parsing and dependency resolution
+- Storage: find_symbols_by_module() for package-scoped resolution
+- Symbol relationships: extends, extended_by, uses, used_by
+- Symbol context: ClassMember now tracks class_name
+- JavaParser with class, interface, method, field, enum extraction
+- JavaBehavior with package-based module path formatting
+- JavaResolutionContext with Java scope order (local → class → imported → package)
+- JavaInheritanceResolver for interface and class hierarchy tracking
+- Reranking comparison integration test
+- Java audit test in abi15_grammar_audit.rs
+- Java-specific inheritance test in tantivy.rs
+
+### Changed
+
+- Symbol map: HashMap<String, SymbolId> → HashMap<String, Vec<(SymbolId, SymbolKind)>>
+- ClassMember: unit variant → struct with class_name field
+- Relationship flags: expanded from 4 to 6 bits (added EXTENDS | USES)
+- Version: 0.7.0 → 0.8.0
+- Updated 15 dependencies (anyhow, bitflags, clap, crossbeam-channel, etc)
+- Commented out release profile optimizations for faster dev builds
+
+### Fixed
+
+- MCP protocol: Added peer info registration in initialize handler
+- mcp-test command: Moved to early execution before index loading
+- stdout corruption: Changed diagnostic output to stderr
+- Security: Replaced unmaintained json5 with serde_json5 (RUSTSEC-2025-0120)
+
+### Enhanced
+
+- Kotlin parser: More granular relationship tracking
+- C# resolution: Better namespace handling
+- Project resolver: Improved glob matching for multi-extension support
+- All parser audit reports regenerated with current timestamps
+
+### Documentation
+
+- Updated README.md with Java in multi-language feature list
+- Updated language support tables across docs/ and contributing/ (7 files updated)
+- Added Java to implementation status table with Maven integration details
+- Synchronized language lists across architecture, getting-started, and reference docs
+
+## [0.7.0] - 2025-11-08
+
+### Added
+
+- Kotlin generic type flow with parameter inference and substitution
+- Kotlin extension function resolution with receiver type tracking
+- Cow-based type substitution for zero-copy simple types and owned complex types
+- Trait method find_variable_types_with_substitution for opt-in owned type inference
+- Regex word-boundary type parameter replacement to prevent partial matches
+- Expression type registration in behavior layer for cross-component access
+- Kotlin resolution context with expression type injection
+- Test suite for generic inference (simple, nested, multi-param, complex substitution)
+- Test suite for extension function resolution with receiver tracking
+- Example demonstrating generic + extension resolution
+- Debug test for tracking function and method call collection
+
+### Fixed
+
+- Function call deduplication now includes line and column to track each call site separately
+
+### Changed
+
+- Indexer prefers complex type substitution when available, falls back to zero-copy
+- Function call deduplication key changed from (caller, callee, kind) to (caller, callee, kind, line, column)
+
+## [0.6.9] - 2025-11-05
+
+### Added
+
+- TypeScript JSX component usage tracking with find_uses extraction
+- Symbol name to ID mapping during extraction phase for TypeScript
+- Test suite for JSX component relationship tracking (test_jsx_uses.rs)
+- Indexed paths cache in Settings for O(1) ancestor checks
+- Path deduplication in Settings to skip children when parent exists and replace children when adding parent
+- Path deduplication in SimpleIndexer to remove descendant paths when adding ancestor
+
+### Fixed
+
+- Sync operation now respects `--progress` flag when indexing new directories
+- Sync no longer shows "Index already up to date" after successfully indexing new directories
+- Sync failures now route through error handling system with proper exit codes and recovery suggestions
+- Metadata load failures during sync now show recovery steps instead of silent fallback
+- Debug output (DEBUG: prefix) now only appears when debug mode is enabled
+
+### Changed
+
+- Sync state tracking changed from boolean to `Option<bool>` to distinguish metadata unavailable (None), no changes (Some(false)), and changes applied (Some(true))
+- Single-file paths in `codanna index` are now skipped with clear message instead of attempting to add to settings
+- File removal during sync now shows progress bar for multiple files
+- Settings::add_indexed_path now deduplicates paths and manages parent-child relationships
+- add_relationships_by_name now accepts optional from_id parameter to skip lookups when symbol ID is known
+- resolve_relationships skips lookups when from_id exists in TypeScript parser
+- Index command now reuses cached results and prints skip messages for already-indexed paths
+
+### Documentation
+
+- Added profiles feature documentation with examples
+- Updated README with profiles configuration details
+- Updated cli-reference.md with idempotent indexing behavior and skip messages
+
+## [0.6.8] - 2025-11-03
+
+### Added
+
+- Kotlin language support with symbol extraction for classes, objects, functions, properties, and interfaces
+- Context save/restore pattern in Kotlin parser for handle_class_declaration, handle_object_declaration, and handle_function_declaration
+- Test suite for Kotlin nested scope handling (test_nested_scopes.rs with 3 tests)
+- Pinned tree-sitter-kotlin dependency to commit 57fb4560 for reproducible builds
+- Kotlin to supported languages list in README.md
+- Kotlin implementation status in language-support.md
+
+### Fixed
+
+- Nested scope context loss in Kotlin parser where methods after nested classes would lose parent class context
+- Clippy len_zero warning in test_interfaces_and_enums.rs
+- Clippy uninlined_format_args warning in test_kotlin_semantic_search.rs
+
+## [0.6.7] - 2025-11-01
+
+### Fixed
+
+- MCP commands now support `symbol_id:N` syntax with JSON output
+- Added symbol_id parameter handling to find_callers JSON data collection
+- Added symbol_id parameter handling to get_calls JSON data collection
+- Added symbol_id parameter handling to analyze_impact JSON data collection
+- Updated error messages to show correct parameter (symbol_id vs name) when symbol not found
+- Fixed empty impact result to handle symbol_id in identifier string
+
+Closes #63
+
+## [0.6.6] - 2025-10-31
+
+### Added
+
+**Documentation**
+- Created language-architecture.md with design principles and resolution patterns
+- Created language-patterns.md with implementation patterns from TypeScript/Rust
+- Created development README.md as documentation index
+- Updated language-support.md with accurate resolution implementation status
+
+**Grammar Version Tracking**
+- Added grammar-versions.lock to track tree-sitter grammar commits and ABI versions
+- Added update-grammar-lock.sh to generate/update lockfile automatically
+- Added check-grammar-updates.sh to detect remote grammar updates
+- Lockfile tracks commit hash, timestamp, ABI version, and repo URL for each grammar
+
+**GDScript Enhancement**
+- Added relationship tracking for GDScript (#62)
+
+**MCP Enhancement**
+- Added guidance messages to all MCP tool responses (find_symbol, get_calls, find_callers, analyze_impact, search_symbols, semantic_search_docs, semantic_search_with_context)
+
+### Changed
+
+- Renamed grammar-node-types.json to node-types.json across all languages
+- Updated setup.sh to copy node-types.json and update lockfile
+- Updated abi15_grammar_audit.rs to use new node-types.json filename
+- Moved `generate_mcp_guidance()` function to top of module for clarity
+
+### Fixed
+
+- Resolved clippy warning in method_call test data (changed vec![] to array)
+- Prevented CI model downloads by marking gdscript semantic search test as ignored
+
+### Removed
+
+- Removed unused `from_persistence()` method from MCP server
+- Removed `IndexPersistence` import from MCP module
+- Removed outdated parsers_api.md (superseded by new docs)
+
+## [0.6.5] - 2025-10-29
+
+### Added
+
+**GDScript Language Support**
+- Added GDScript parser with tree-sitter integration for Godot game engine projects
+- Implemented StatefulBehavior architecture for cross-file symbol tracking
+- Added relative path resolution for GDScript imports (`./file.gd`, `../dir/file.gd`)
+- Implemented `res://` protocol handling for GDScript module paths
+- Added class hierarchy, export variables, and signal extraction
+- Created example files and audit reports for GDScript grammar
+- Added test suite with 850+ lines covering parser, behavior, imports, and resolution
+
+**Retrieve Command Enhancement**
+- Added `symbol_id` parameter support to `retrieve symbol` command
+- Enabled direct symbol lookup by ID without name ambiguity
+
+### Fixed
+
+**Index Command Workflow**
+- Fixed force flag to trigger complete re-index regardless of path source
+- Added automatic path persistence when CLI paths provided to `index` command
+- Prevented redundant auto-sync when force flag is present
+- Added indexed_paths cleanup in `remove_paths()` to maintain tracking state
+- Extracted `add_paths_to_settings()` helper for shared logic between `index` and `add-dir`
+
+**Test Infrastructure**
+- Fixed Windows file URL handling in marketplace resolution tests
+- Resolved path normalization issues for cross-platform compatibility
+
+**Configuration**
+- Updated settings file references to remove non-existent commands
+- Enabled GDScript in default language configuration
+
+### Technical Details
+
+- Total additions: 6,870 lines across 58 files
+- GDScript implementation: 2,000+ lines of parser and behavior code
+- Test coverage: 850+ lines of language-specific tests
+- Co-authored-by: nguyenchiencong (GDScript foundation)
+
+## [0.6.4] - 2025-10-29
+
+### Profile System
+
+Share workspace configurations (gitignore, hooks, documentation) across projects with version control.
+
+**Commands:**
+- `codanna profile sync` - Register providers and install team profiles
+- `codanna profile install <profile>` - Install individual profile from provider
+- `codanna profile remove <profile>` - Uninstall with directory cleanup
+- `codanna profile status/list/verify` - Inspection and validation
+- `codanna profile provider add/list/remove` - Provider registry management
+
+**Features:**
+- Three-tier configuration: global registry, team config, local lockfile
+- Atomic transactional installation with pre-flight validation and rollback
+- Provider registry supports GitHub, Git URL, and local directory sources
+- File ownership tracking with conflict resolution via sidecars
+- SHA-256 integrity verification
+- Team sync from .codanna/profiles.json with extraKnownProviders
+
+### Multi-Directory Indexing
+
+Index multiple directories with automatic sync mechanism.
+
+**Commands:**
+- `codanna add-dir <path>` - Add directory to indexed paths
+- `codanna remove-dir <path>` - Remove directory from indexed paths
+- `codanna list-dirs` - Display configured indexed directories
+- `codanna index [paths...]` - Accept multiple paths, use config when none provided
+
+**Features:**
+- Automatic sync on every command compares settings.toml with index metadata
+- settings.toml is source of truth, index metadata is derived state
+- New directories in config automatically indexed
+- Removed directories automatically cleaned (symbols, embeddings, metadata)
+- ConfigFileWatcher monitors settings.toml for changes in HTTP/HTTPS modes
+- FileWatcher tracks both config file and source file changes
+
+**Fixed:**
+- Batch management in remove_file now self-contained (calls start_batch before operations)
+
+### Documentation
+
+- CLI reference
+- Configuration documentation simplified
+
+## [0.6.3] - 2025-10-24
+
+### Changed
+- Simplified CLAUDE.md with focused code intelligence workflow
+- Removed multi-hop agent instructions in favor of direct workflow
+- Streamlined query optimization and exploration patterns
+
+### Fixed
+- Symbol location display now includes line ranges in semantic search results
+- Symbol context formatting shows symbol_id in location output
+
+## [0.6.2] - 2025-10-23
+
+### Added
+- Binary release workflow with dual variants
+  - Tag-triggered automated releases
+  - 8 pre-built binaries (4 platforms × 2 variants)
+  - Full variant includes MCP server support (--all-features)
+  - Slim variant is CLI only
+  - SHA256/SHA512 checksums for verification
+  - Dist manifest with download URLs for universal installer
+  - Preparation for https://setup.codanna.sh installer
+- C# benchmark command for performance testing
+- C# documentation examples (file-scoped namespaces, comprehensive.cs)
+
+### Fixed
+- C# import extraction fallback for using directives
+- Stats display showing accurate symbol counts and timing
+- Windows test compatibility (platform-agnostic path assertions)
+
+## [0.6.1] - 2025-10-21
+
+### Added
+- Symbol ID parameter support for unambiguous queries
+  - `symbol_id` parameter for retrieve commands (calls, callers, describe)
+  - `symbol_id` parameter for MCP tools (get_calls, find_callers, analyze_impact)
+  - CLI help text with symbol_id examples
+  - Token-efficient workflow: search returns `[symbol_id:123]`, use `symbol_id:123` for precise follow-up
+  - Eliminates disambiguation prompts, reduces token usage
+- Import binding system for external dependency detection
+  - Tracks import statements and their bindings
+  - Foundation for external dependency resolution
+- Documentation updates
+  - Symbol_id workflows in User Guide, CLI Reference, and Search Guide
+  - Advanced section with unambiguous query patterns
+  - Plugin documentation with Node.js wrapper examples
+  - Slash command updates with `<relationship_symbol_name|symbol_id:ID>` pattern
+
+### Changed
+- Plugin scripts updated to display and accept symbol_id
+  - Formatters show `[symbol_id:123]` in headers and relationships
+  - Context provider accepts symbol_id for all relationship queries
+  - Applied to Claude Code plugin, codanna-cc, and codanna-base
+- Dependency updates
+  - clap 4.5.41 → 4.5.50
+  - memmap2 0.9.7 → 0.9.9
+  - indicatif 0.18.0 → 0.18.1
+  - rmcp 0.7.0 → 0.8.2
+
+## [0.6.0] - 2025-10-18
+
+### Added
+- **Plugin Management System**: Install, remove, and manage plugins
+  - Transactional installs with automatic rollback on failure
+  - Smart update detection skips I/O when no changes needed
+  - Marketplace resolution for external plugin sources
+- **Documentation Hub**: Centralized navigation at `docs/README.md`
+  - Organized sections: Getting Started, User Guide, Integrations, Architecture, Advanced, Contributing, Plugins, Reference
+  - Navigation footers across all documentation pages
+
+### Changed
+- Symbol display now includes file paths with line numbers for precise navigation
+- Enhanced relationship formatting for better readability
+- Improved plugins documentation with marketplace and MCP setup details
+
+### Fixed
+- TypeScript call tracking from object property functions
+- Documentation cross-references updated for new structure
+
+## [0.5.26] - 2025-10-09
+
+### Added
+- Configurable Tantivy heap size via `tantivy_heap_mb` setting (default 50MB)
+- Configurable retry attempts via `max_retry_attempts` setting (default 3)
+- Universal defaults work across all platforms without cfg checks
+
+### Changed
+- Tantivy heap size now user-configurable instead of hardcoded
+- Retry logic moved to helper function with configurable attempts
+- DocumentIndex constructor accepts Settings parameter
+
+### Fixed
+- Error detection uses ErrorKind instead of locale-dependent strings
+- Transient permission errors handled with exponential backoff (100ms, 200ms, 400ms)
+- Tests updated to use Settings parameter
+
+## [0.5.25] - 2025-10-08
+
+### Fixed
+- C++ parser: Member function call detection for method invocations
+  - Extract method names from field_expression nodes (obj->method, obj.method)
+  - Extract method names from qualified_identifier in function context (Class::method)
+  - Function context tracking now handles qualified method implementations
+  - Register call_expression, field_expression, qualified_identifier in audit system
+- MCP analyze_impact: Handle all symbols with same name instead of first match only
+  - Changed from find_symbol (single) to find_symbols_by_name (all matches)
+  - Aggregate impact across all symbols with same name
+  - Show locations and direct caller counts for each symbol variant
+
+## [0.5.24] - 2025-10-07
+
+### Fixed
+- C++ parser: Extract class methods from declarations and implementations
+  - Method declarations inside classes now extracted as SymbolKind::Method
+  - Out-of-class implementations (Class::method) identified as methods
+  - Qualified_identifier pattern (Class::method) detection in function_definition
+  - Class_specifier enters class scope and processes children recursively
+  - Field_declaration extracts methods from function_declarator nodes
+  - Tested with Qt QWindow: 144 methods extracted (was 0 before)
+
+## [0.5.23] - 2025-10-07
+
+### Changed
+- Bump rmcp from 0.7.0 to 0.8.0
+
+## [0.5.22] - 2025-10-07
+
+### Added
+- C++ parser: Doxygen doc comment extraction (/** */ and ///)
+- C++ parser: Recursive call tracking with function context
+- C++ parser: Scope context tracking via ParserContext
+
+### Fixed
+- MCP get_index_info now displays all symbol kinds dynamically
+- C++ Audit system uses proper tree-sitter node names to generate the report
+
+## [0.5.21] - 2025-10-03
+
+### Added
+- Recursion depth guards across all language parsers
+  - `check_recursion_depth()` prevents stack overflow on deeply nested AST structures
+  - All parsers (TypeScript, Python, Rust, Go, PHP, C++, C#) now track depth in `extract_symbols_from_node()`
+  - Safely handles pathological code with excessive nesting (tested on Qt keyboard at depth 3521)
+
+### Changed
+- **PERFORMANCE**: Optimized resolution pipeline for large codebases
+  - Indexed method calls as HashMap for O(1) lookup instead of linear search
+  - Added symbol lookup cache to eliminate duplicate Tantivy queries
+  - Qt qtbase (8,508 files, 413K symbols): 7m38s total, relationship resolution processes 4.68M relationships with 4,778 resolved, 4.39M skipped
+  - Skipped relationships: external symbols not in index (Qt framework dependencies, system libraries)
+- Parser method signatures updated to accept depth parameter
+- Audit reports and grammar analysis regenerated for all languages
+
+## [0.5.20] - 2025-10-02
+
+### Added
+- C# language support with full parser implementation (PR#39)
+  - Symbol extraction for classes, interfaces, structs, enums, methods, properties, fields
+  - Relationship tracking for inheritance, interface implementation, and method calls
+  - XML documentation comment extraction
+  - File extensions: `.cs`, `.csx`, `.cshtml`
+- Fuzzy search on non-tokenized name field for whole-word typo tolerance
+  - Handles missing character typos in full symbol names (e.g., "ArchivService" finds "ArchiveService")
+  - Dual fuzzy strategy: ngram tokens for partial matches + whole words for full name typos
+
+### Changed
+- **BREAKING**: Tantivy schema `name` field changed from TEXT to STRING
+  - Enables exact matching without tokenization for fuzzy search
+  - Requires full reindex: `codanna index --force`
+- **PERFORMANCE**: Batch commits every 100 files instead of per-file commits
+  - 10-50x faster indexing (varies by platform and file count)
+  - macOS: ~10x improvement on typical projects
+  - Windows: 25-50x improvement (1-2 files/s → 46 files/s on 4,453 file project)
+  - Reduces disk I/O, segment creation, and cache rebuilds
+- Automatic reverse relationship creation for bidirectional graph navigation
+  - Implements ↔ ImplementedBy, Extends ↔ ExtendedBy, Calls ↔ CalledBy, Uses ↔ UsedBy
+
+### Fixed
+- File ID counter race condition during batch operations
+  - Pending counter prevents stale committed values from causing duplicate IDs
+- Windows file locking issues with proper retry logic and error logging
+  - Symbol cache and persistence layer handle OS error 1224 and permission denied
+
+## [0.5.19] - 2025-10-01
+
+### Added
+- Full symbol boundary tracking for precise editor navigation
+  - `create_symbol()` accepts `full_node` parameter for complete range extraction
+  - Tantivy schema extended with `end_line` and `end_column` fields
+  - MCP tools now return precise symbol ranges (start_line, start_column, end_line, end_column)
+
+### Changed
+- C parser: Functions, structs, unions, enums, fields, and macros now use full boundaries
+- Rust parser: Functions, structs, enums, traits, and modules now use full boundaries
+- README: Added documentation for precise symbol boundary support
+
 ## [0.5.18] - 2025-09-30
 
 ### Added

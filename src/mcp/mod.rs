@@ -36,7 +36,13 @@ use serde_json;
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
 
-use crate::{IndexPersistence, Settings, SimpleIndexer, Symbol};
+use crate::{Settings, SimpleIndexer, Symbol};
+
+/// Generate guidance for MCP tool responses
+fn generate_mcp_guidance(settings: &Settings, tool: &str, result_count: usize) -> Option<String> {
+    use crate::io::guidance_engine::generate_guidance_from_config;
+    generate_guidance_from_config(&settings.guidance, tool, None, result_count)
+}
 
 /// Format a Unix timestamp as relative time (e.g., "2 hours ago")
 pub fn format_relative_time(timestamp: u64) -> String {
@@ -75,20 +81,32 @@ pub struct FindSymbolRequest {
 
 #[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct GetCallsRequest {
-    /// Name of the function to analyze
-    pub function_name: String,
+    /// Name of the function to analyze (use symbol_id for unambiguous lookup)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub function_name: Option<String>,
+    /// Symbol ID for direct lookup (recommended to avoid ambiguity)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub symbol_id: Option<u32>,
 }
 
 #[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct FindCallersRequest {
-    /// Name of the function to find callers for
-    pub function_name: String,
+    /// Name of the function to find callers for (use symbol_id for unambiguous lookup)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub function_name: Option<String>,
+    /// Symbol ID for direct lookup (recommended to avoid ambiguity)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub symbol_id: Option<u32>,
 }
 
 #[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct AnalyzeImpactRequest {
-    /// Name of the symbol to analyze impact for
-    pub symbol_name: String,
+    /// Name of the symbol to analyze impact for (use symbol_id for unambiguous lookup)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub symbol_name: Option<String>,
+    /// Symbol ID for direct lookup (recommended to avoid ambiguity)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub symbol_id: Option<u32>,
     /// Maximum depth to search (default: 3)
     #[serde(default = "default_depth")]
     pub max_depth: u32,
@@ -223,34 +241,6 @@ impl CodeIntelligenceServer {
         }
     }
 
-    pub async fn from_persistence(
-        settings: Arc<Settings>,
-    ) -> Result<Self, Box<dyn std::error::Error>> {
-        let persistence = IndexPersistence::new(settings.index_path.clone());
-
-        let indexer = if persistence.exists() {
-            eprintln!(
-                "Loading existing index from {}",
-                settings.index_path.display()
-            );
-            match persistence.load_with_settings(settings.clone(), false) {
-                Ok(loaded) => {
-                    eprintln!("Loaded index with {} symbols", loaded.symbol_count());
-                    loaded
-                }
-                Err(e) => {
-                    eprintln!("Warning: Could not load index: {e}. Creating new index.");
-                    SimpleIndexer::with_settings(settings.clone())
-                }
-            }
-        } else {
-            eprintln!("No existing index found. Please run 'index' command first.");
-            SimpleIndexer::with_settings(settings.clone())
-        };
-
-        Ok(Self::new(indexer))
-    }
-
     #[tool(description = "Find a symbol by name in the indexed codebase")]
     pub async fn find_symbol(
         &self,
@@ -262,9 +252,14 @@ impl CodeIntelligenceServer {
         let symbols = indexer.find_symbols_by_name(&name, lang.as_deref());
 
         if symbols.is_empty() {
-            return Ok(CallToolResult::success(vec![Content::text(format!(
-                "No symbols found with name: {name}"
-            ))]));
+            let mut output = format!("No symbols found with name: {name}");
+            // Add guidance for no results
+            if let Some(guidance) = generate_mcp_guidance(indexer.settings(), "find_symbol", 0) {
+                output.push_str("\n\n---\n💡 ");
+                output.push_str(&guidance);
+                output.push('\n');
+            }
+            return Ok(CallToolResult::success(vec![Content::text(output)]));
         }
 
         let mut result = format!("Found {} symbol(s) named '{}':\n\n", symbols.len(), name);
@@ -341,13 +336,10 @@ impl CodeIntelligenceServer {
                 }
             } else {
                 // Fallback to basic info
-                let file_path = indexer
-                    .get_file_path(symbol.file_id)
-                    .unwrap_or_else(|| "<unknown>".to_string());
                 result.push_str(&format!(
                     "{:?} at {}:{}\n",
                     symbol.kind,
-                    file_path,
+                    symbol.file_path,
                     symbol.range.start_line + 1
                 ));
 
@@ -367,6 +359,15 @@ impl CodeIntelligenceServer {
             }
         }
 
+        // Add system guidance
+        if let Some(guidance) =
+            generate_mcp_guidance(indexer.settings(), "find_symbol", symbols.len())
+        {
+            result.push_str("\n---\n💡 ");
+            result.push_str(&guidance);
+            result.push('\n');
+        }
+
         Ok(CallToolResult::success(vec![Content::text(result)]))
     }
 
@@ -375,93 +376,143 @@ impl CodeIntelligenceServer {
     )]
     pub async fn get_calls(
         &self,
-        Parameters(GetCallsRequest { function_name }): Parameters<GetCallsRequest>,
+        Parameters(GetCallsRequest {
+            function_name,
+            symbol_id,
+        }): Parameters<GetCallsRequest>,
     ) -> Result<CallToolResult, McpError> {
         let indexer = self.indexer.read().await;
 
-        let symbols = indexer.find_symbols_by_name(&function_name, None);
-
-        if symbols.is_empty() {
-            return Ok(CallToolResult::success(vec![Content::text(format!(
-                "Function not found: {function_name}"
-            ))]));
-        }
-
-        let mut all_called_with_metadata = Vec::new();
-        let mut checked_symbols = 0;
-
-        // Check all symbols with this name
-        for symbol in &symbols {
-            checked_symbols += 1;
-            let called = indexer.get_called_functions_with_metadata(symbol.id);
-            for (callee, metadata) in called {
-                if !all_called_with_metadata
-                    .iter()
-                    .any(|(c, _): &(Symbol, _)| c.id == callee.id)
-                {
-                    all_called_with_metadata.push((callee, metadata));
+        // Get the symbol either by ID or by name
+        let (symbol, identifier) = if let Some(id) = symbol_id {
+            // Direct lookup by symbol ID
+            match indexer.get_symbol(crate::SymbolId(id)) {
+                Some(sym) => (sym, format!("symbol_id:{id}")),
+                None => {
+                    return Ok(CallToolResult::success(vec![Content::text(format!(
+                        "Symbol not found: symbol_id:{id}"
+                    ))]));
                 }
             }
-        }
+        } else if let Some(name) = function_name {
+            // Lookup by name
+            let symbols = indexer.find_symbols_by_name(&name, None);
+
+            if symbols.is_empty() {
+                return Ok(CallToolResult::success(vec![Content::text(format!(
+                    "Function not found: {name}"
+                ))]));
+            }
+
+            if symbols.len() > 1 {
+                // Multiple symbols found - return error with list
+                let mut msg = format!(
+                    "Ambiguous: found {} symbol(s) named '{}':\n",
+                    symbols.len(),
+                    name
+                );
+                for (i, sym) in symbols.iter().take(10).enumerate() {
+                    msg.push_str(&format!(
+                        "  {}. symbol_id:{} - {:?} at {}:{}\n",
+                        i + 1,
+                        sym.id.value(),
+                        sym.kind,
+                        sym.file_path,
+                        sym.range.start_line + 1
+                    ));
+                }
+                if symbols.len() > 10 {
+                    msg.push_str(&format!("  ... and {} more\n", symbols.len() - 10));
+                }
+                msg.push_str("\nUse: get_calls symbol_id:<id> for specific symbol");
+                return Ok(CallToolResult::success(vec![Content::text(msg)]));
+            }
+
+            // Single match - use it
+            (symbols.into_iter().next().unwrap(), name)
+        } else {
+            return Ok(CallToolResult::success(vec![Content::text(
+                "Error: Either function_name or symbol_id must be provided".to_string(),
+            )]));
+        };
+
+        // Get calls for this specific symbol
+        let all_called_with_metadata = indexer.get_called_functions_with_metadata(symbol.id);
 
         if all_called_with_metadata.is_empty() {
-            return Ok(CallToolResult::success(vec![Content::text(format!(
-                "{function_name} doesn't call any functions (checked {checked_symbols} symbol(s) with this name)"
-            ))]));
+            let mut output = format!("{identifier} doesn't call any functions");
+            // Add guidance for no results
+            if let Some(guidance) = generate_mcp_guidance(indexer.settings(), "get_calls", 0) {
+                output.push_str("\n\n---\n💡 ");
+                output.push_str(&guidance);
+                output.push('\n');
+            }
+            return Ok(CallToolResult::success(vec![Content::text(output)]));
         }
 
-        let mut result = format!(
-            "{} calls {} function(s):\n",
-            function_name,
-            all_called_with_metadata.len()
-        );
+        let result_count = all_called_with_metadata.len();
+        let mut result = format!("{identifier} calls {result_count} function(s):\n");
         for (callee, metadata) in all_called_with_metadata {
-            let file_path = indexer
-                .get_file_path(callee.file_id)
-                .unwrap_or_else(|| "<unknown>".to_string());
-            // Parse metadata to extract receiver info
-            let call_display = if let Some(meta) = metadata {
-                if meta.contains("receiver:") && meta.contains("static:") {
-                    // Parse "receiver:{receiver},static:{is_static}"
-                    let parts: Vec<&str> = meta.split(',').collect();
-                    let mut receiver = "";
-                    let mut is_static = false;
+            // Parse metadata to extract receiver info and call site location
+            let (call_display, call_line) = if let Some(ref meta) = metadata {
+                let display = if let Some(context) = &meta.context {
+                    if context.contains("receiver:") && context.contains("static:") {
+                        // Parse "receiver:{receiver},static:{is_static}"
+                        let parts: Vec<&str> = context.split(',').collect();
+                        let mut receiver = "";
+                        let mut is_static = false;
 
-                    for part in parts {
-                        if let Some(r) = part.strip_prefix("receiver:") {
-                            receiver = r;
-                        } else if let Some(s) = part.strip_prefix("static:") {
-                            is_static = s == "true";
+                        for part in parts {
+                            if let Some(r) = part.strip_prefix("receiver:") {
+                                receiver = r;
+                            } else if let Some(s) = part.strip_prefix("static:") {
+                                is_static = s == "true";
+                            }
                         }
-                    }
 
-                    if !receiver.is_empty() {
-                        if is_static {
-                            format!("{}::{}", receiver, callee.name)
+                        if !receiver.is_empty() {
+                            if is_static {
+                                format!("{}::{}", receiver, callee.name)
+                            } else {
+                                format!("{}.{}", receiver, callee.name)
+                            }
                         } else {
-                            format!("{}.{}", receiver, callee.name)
+                            callee.name.to_string()
                         }
                     } else {
                         callee.name.to_string()
                     }
                 } else {
                     callee.name.to_string()
-                }
+                };
+
+                // Use call site line if available, otherwise definition line
+                let line = meta
+                    .line
+                    .map(|l| l + 1)
+                    .unwrap_or(callee.range.start_line + 1);
+                (display, line)
             } else {
-                callee.name.to_string()
+                (callee.name.to_string(), callee.range.start_line + 1)
             };
 
             result.push_str(&format!(
                 "  -> {:?} {} at {}:{}\n",
-                callee.kind,
-                call_display,
-                file_path,
-                callee.range.start_line + 1
+                callee.kind, call_display, callee.file_path, call_line
             ));
             if let Some(ref sig) = callee.signature {
                 result.push_str(&format!("     Signature: {sig}\n"));
             }
         }
+
+        // Add system guidance
+        if let Some(guidance) = generate_mcp_guidance(indexer.settings(), "get_calls", result_count)
+        {
+            result.push_str("\n---\n💡 ");
+            result.push_str(&guidance);
+            result.push('\n');
+        }
+
         Ok(CallToolResult::success(vec![Content::text(result)]))
     }
 
@@ -470,98 +521,145 @@ impl CodeIntelligenceServer {
     )]
     pub async fn find_callers(
         &self,
-        Parameters(FindCallersRequest { function_name }): Parameters<FindCallersRequest>,
+        Parameters(FindCallersRequest {
+            function_name,
+            symbol_id,
+        }): Parameters<FindCallersRequest>,
     ) -> Result<CallToolResult, McpError> {
         let indexer = self.indexer.read().await;
 
-        let symbols = indexer.find_symbols_by_name(&function_name, None);
-
-        if symbols.is_empty() {
-            return Ok(CallToolResult::success(vec![Content::text(format!(
-                "Function not found: {function_name}"
-            ))]));
-        }
-
-        let mut all_callers_with_metadata = Vec::new();
-        let mut checked_symbols = 0;
-
-        // Check all symbols with this name
-        for symbol in &symbols {
-            checked_symbols += 1;
-            let callers = indexer.get_calling_functions_with_metadata(symbol.id);
-            for (caller, metadata) in callers {
-                if !all_callers_with_metadata
-                    .iter()
-                    .any(|(c, _): &(Symbol, _)| c.id == caller.id)
-                {
-                    all_callers_with_metadata.push((caller, metadata));
+        // Get the symbol either by ID or by name
+        let (symbol, identifier) = if let Some(id) = symbol_id {
+            // Direct lookup by symbol ID - UNAMBIGUOUS
+            match indexer.get_symbol(crate::SymbolId(id)) {
+                Some(sym) => (sym, format!("symbol_id:{id}")),
+                None => {
+                    return Ok(CallToolResult::success(vec![Content::text(format!(
+                        "Symbol not found: symbol_id:{id}"
+                    ))]));
                 }
             }
-        }
+        } else if let Some(name) = function_name {
+            let symbols = indexer.find_symbols_by_name(&name, None);
+
+            if symbols.is_empty() {
+                return Ok(CallToolResult::success(vec![Content::text(format!(
+                    "Function not found: {name}"
+                ))]));
+            }
+
+            if symbols.len() > 1 {
+                // MULTIPLE MATCHES - Return error with list of symbol IDs
+                let mut msg = format!(
+                    "Ambiguous: found {} symbol(s) named '{}':\n",
+                    symbols.len(),
+                    name
+                );
+                for (i, sym) in symbols.iter().take(10).enumerate() {
+                    msg.push_str(&format!(
+                        "  {}. symbol_id:{} - {:?} at {}:{}\n",
+                        i + 1,
+                        sym.id.value(),
+                        sym.kind,
+                        sym.file_path,
+                        sym.range.start_line + 1
+                    ));
+                }
+                if symbols.len() > 10 {
+                    msg.push_str(&format!("  ... and {} more\n", symbols.len() - 10));
+                }
+                msg.push_str("\nUse: find_callers symbol_id:<id> for specific symbol");
+                return Ok(CallToolResult::success(vec![Content::text(msg)]));
+            }
+
+            // SINGLE MATCH - use it
+            (symbols.into_iter().next().unwrap(), name)
+        } else {
+            return Ok(CallToolResult::success(vec![Content::text(
+                "Error: Either function_name or symbol_id must be provided".to_string(),
+            )]));
+        };
+
+        // Get callers for THIS SPECIFIC symbol only (no aggregation)
+        let all_callers_with_metadata = indexer.get_calling_functions_with_metadata(symbol.id);
 
         if all_callers_with_metadata.is_empty() {
-            return Ok(CallToolResult::success(vec![Content::text(format!(
-                "No functions call {function_name} (checked {checked_symbols} symbol(s) with this name)"
-            ))]));
+            let mut output = format!("No functions call {identifier}");
+            // Add guidance for no results
+            if let Some(guidance) = generate_mcp_guidance(indexer.settings(), "find_callers", 0) {
+                output.push_str("\n\n---\n💡 ");
+                output.push_str(&guidance);
+                output.push('\n');
+            }
+            return Ok(CallToolResult::success(vec![Content::text(output)]));
         }
 
         // Build structured text response with rich metadata
-        let mut result = format!(
-            "{} function(s) call {}:\n",
-            all_callers_with_metadata.len(),
-            function_name
-        );
+        let result_count = all_callers_with_metadata.len();
+        let mut result = format!("{result_count} function(s) call {identifier}:\n");
 
         for (caller, metadata) in all_callers_with_metadata {
-            let file_path = indexer
-                .get_file_path(caller.file_id)
-                .unwrap_or_else(|| "<unknown>".to_string());
+            // Parse metadata to extract receiver info and call site location
+            let (call_info, call_line) = if let Some(ref meta) = metadata {
+                let info = if let Some(context) = &meta.context {
+                    if context.contains("receiver:") && context.contains("static:") {
+                        // Parse "receiver:{receiver},static:{is_static}"
+                        let parts: Vec<&str> = context.split(',').collect();
+                        let mut receiver = "";
+                        let mut is_static = false;
 
-            // Parse metadata to extract receiver info
-            let call_info = if let Some(meta) = metadata {
-                if meta.contains("receiver:") && meta.contains("static:") {
-                    // Parse "receiver:{receiver},static:{is_static}"
-                    let parts: Vec<&str> = meta.split(',').collect();
-                    let mut receiver = "";
-                    let mut is_static = false;
-
-                    for part in parts {
-                        if let Some(r) = part.strip_prefix("receiver:") {
-                            receiver = r;
-                        } else if let Some(s) = part.strip_prefix("static:") {
-                            is_static = s == "true";
+                        for part in parts {
+                            if let Some(r) = part.strip_prefix("receiver:") {
+                                receiver = r;
+                            } else if let Some(s) = part.strip_prefix("static:") {
+                                is_static = s == "true";
+                            }
                         }
-                    }
 
-                    if !receiver.is_empty() {
-                        let qualified_name = if is_static {
-                            format!("{receiver}::{function_name}")
+                        if !receiver.is_empty() {
+                            let qualified_name = if is_static {
+                                format!("{receiver}::{}", symbol.name)
+                            } else {
+                                format!("{receiver}.{}", symbol.name)
+                            };
+                            format!(" (calls {qualified_name})")
                         } else {
-                            format!("{receiver}.{function_name}")
-                        };
-                        format!(" (calls {qualified_name})")
+                            String::new()
+                        }
                     } else {
                         String::new()
                     }
                 } else {
                     String::new()
-                }
+                };
+
+                // Use call site line if available, otherwise definition line
+                let line = meta
+                    .line
+                    .map(|l| l + 1)
+                    .unwrap_or(caller.range.start_line + 1);
+                (info, line)
             } else {
-                String::new()
+                (String::new(), caller.range.start_line + 1)
             };
 
             result.push_str(&format!(
                 "  <- {:?} {} at {}:{}{}\n",
-                caller.kind,
-                caller.name,
-                file_path,
-                caller.range.start_line + 1,
-                call_info
+                caller.kind, caller.name, caller.file_path, call_line, call_info
             ));
 
             if let Some(ref sig) = caller.signature {
                 result.push_str(&format!("     Signature: {sig}\n"));
             }
+        }
+
+        // Add system guidance
+        if let Some(guidance) =
+            generate_mcp_guidance(indexer.settings(), "find_callers", result_count)
+        {
+            result.push_str("\n---\n💡 ");
+            result.push_str(&guidance);
+            result.push('\n');
         }
 
         Ok(CallToolResult::success(vec![Content::text(result)]))
@@ -574,6 +672,7 @@ impl CodeIntelligenceServer {
         &self,
         Parameters(AnalyzeImpactRequest {
             symbol_name,
+            symbol_id,
             max_depth,
         }): Parameters<AnalyzeImpactRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -581,73 +680,178 @@ impl CodeIntelligenceServer {
 
         let indexer = self.indexer.read().await;
 
-        match indexer.find_symbol(&symbol_name) {
-            Some(symbol_id) => {
-                // First get context for the symbol being analyzed
-                let symbol_ctx = indexer.get_symbol_context(symbol_id, ContextIncludes::CALLERS);
-
-                let impacted = indexer.get_impact_radius(symbol_id, Some(max_depth as usize));
-
-                if impacted.is_empty() {
+        // Get the symbol either by ID or by name
+        let (symbol, identifier) = if let Some(id) = symbol_id {
+            // Direct lookup by symbol ID - UNAMBIGUOUS
+            match indexer.get_symbol(crate::SymbolId(id)) {
+                Some(sym) => (sym, format!("symbol_id:{id}")),
+                None => {
                     return Ok(CallToolResult::success(vec![Content::text(format!(
-                        "No symbols would be impacted by changing {symbol_name}"
+                        "Symbol not found: symbol_id:{id}"
                     ))]));
                 }
-
-                let mut result = format!("Analyzing impact of changing: {symbol_name}\n");
-
-                // Add location of the symbol being analyzed
-                if let Some(ctx) = symbol_ctx {
-                    result.push_str(&format!("Location: {}\n", ctx.format_location()));
-
-                    // Show direct callers count if available
-                    if let Some(callers) = &ctx.relationships.called_by {
-                        if !callers.is_empty() {
-                            result.push_str(&format!("Direct callers: {}\n", callers.len()));
-                        }
-                    }
-                }
-
-                result.push_str(&format!(
-                    "\nTotal impact: {} symbol(s) would be affected (max depth: {})\n",
-                    impacted.len(),
-                    max_depth
-                ));
-
-                // Group by symbol kind with locations
-                let mut by_kind: std::collections::HashMap<
-                    crate::SymbolKind,
-                    Vec<(Symbol, String)>,
-                > = std::collections::HashMap::new();
-
-                for id in impacted {
-                    if let Some(sym) = indexer.get_symbol(id) {
-                        let file_path = indexer
-                            .get_file_path(sym.file_id)
-                            .unwrap_or_else(|| "<unknown>".to_string());
-                        by_kind.entry(sym.kind).or_default().push((sym, file_path));
-                    }
-                }
-
-                // Display grouped by kind with locations
-                for (kind, symbols) in by_kind {
-                    result.push_str(&format!("\n{kind:?} ({}): \n", symbols.len()));
-                    for (sym, file_path) in symbols {
-                        result.push_str(&format!(
-                            "  - {} at {}:{}\n",
-                            sym.name,
-                            file_path,
-                            sym.range.start_line + 1
-                        ));
-                    }
-                }
-
-                Ok(CallToolResult::success(vec![Content::text(result)]))
             }
-            None => Ok(CallToolResult::success(vec![Content::text(format!(
-                "Symbol not found: {symbol_name}"
-            ))])),
+        } else if let Some(name) = symbol_name {
+            let symbols = indexer.find_symbols_by_name(&name, None);
+
+            if symbols.is_empty() {
+                return Ok(CallToolResult::success(vec![Content::text(format!(
+                    "Symbol not found: {name}"
+                ))]));
+            }
+
+            if symbols.len() > 1 {
+                // MULTIPLE MATCHES - Return error with list of symbol IDs
+                let mut msg = format!(
+                    "Ambiguous: found {} symbol(s) named '{}':\n",
+                    symbols.len(),
+                    name
+                );
+                for (i, sym) in symbols.iter().take(10).enumerate() {
+                    msg.push_str(&format!(
+                        "  {}. symbol_id:{} - {:?} at {}:{}\n",
+                        i + 1,
+                        sym.id.value(),
+                        sym.kind,
+                        sym.file_path,
+                        sym.range.start_line + 1
+                    ));
+                }
+                if symbols.len() > 10 {
+                    msg.push_str(&format!("  ... and {} more\n", symbols.len() - 10));
+                }
+                msg.push_str("\nUse: analyze_impact symbol_id:<id> for specific symbol");
+                return Ok(CallToolResult::success(vec![Content::text(msg)]));
+            }
+
+            // SINGLE MATCH - use it
+            (symbols.into_iter().next().unwrap(), name)
+        } else {
+            return Ok(CallToolResult::success(vec![Content::text(
+                "Error: Either symbol_name or symbol_id must be provided".to_string(),
+            )]));
+        };
+
+        // Analyze impact for THIS SPECIFIC symbol only (no aggregation)
+        let impacted = indexer.get_impact_radius(symbol.id, Some(max_depth as usize));
+
+        if impacted.is_empty() {
+            let mut output = format!("No symbols would be impacted by changing {identifier}");
+            // Add guidance for no results
+            if let Some(guidance) = generate_mcp_guidance(indexer.settings(), "analyze_impact", 0) {
+                output.push_str("\n\n---\n💡 ");
+                output.push_str(&guidance);
+                output.push('\n');
+            }
+            return Ok(CallToolResult::success(vec![Content::text(output)]));
         }
+
+        let mut result = format!("Analyzing impact of changing: {identifier}\n");
+
+        // Show the specific symbol being analyzed
+        if let Some(ctx) = indexer.get_symbol_context(
+            symbol.id,
+            ContextIncludes::CALLERS | ContextIncludes::EXTENDS | ContextIncludes::USES,
+        ) {
+            let location = ctx.format_location();
+            let direct_callers = ctx
+                .relationships
+                .called_by
+                .as_ref()
+                .map(|c| c.len())
+                .unwrap_or(0);
+
+            // For classes, also show inheritance info
+            let inheritance_info = if matches!(
+                symbol.kind,
+                crate::SymbolKind::Class | crate::SymbolKind::Struct
+            ) {
+                let extends_count = ctx
+                    .relationships
+                    .extends
+                    .as_ref()
+                    .map(|e| e.len())
+                    .unwrap_or(0);
+                let extended_by_count = ctx
+                    .relationships
+                    .extended_by
+                    .as_ref()
+                    .map(|e| e.len())
+                    .unwrap_or(0);
+
+                if extends_count > 0 || extended_by_count > 0 {
+                    format!(", extends: {extends_count}, extended by: {extended_by_count}")
+                } else {
+                    String::new()
+                }
+            } else {
+                String::new()
+            };
+
+            // Show uses info for all symbols
+            let uses_count = ctx
+                .relationships
+                .uses
+                .as_ref()
+                .map(|u| u.len())
+                .unwrap_or(0);
+            let used_by_count = ctx
+                .relationships
+                .used_by
+                .as_ref()
+                .map(|u| u.len())
+                .unwrap_or(0);
+
+            let uses_info = if uses_count > 0 || used_by_count > 0 {
+                format!(", uses: {uses_count}, used by: {used_by_count}")
+            } else {
+                String::new()
+            };
+
+            result.push_str(&format!(
+                "Symbol: {:?} at {} (direct callers: {}{}{})\n\n",
+                symbol.kind, location, direct_callers, inheritance_info, uses_info
+            ));
+        }
+
+        let impact_count = impacted.len();
+        result.push_str(&format!(
+            "Total impact: {impact_count} symbol(s) would be affected (max depth: {max_depth})\n"
+        ));
+
+        // Group by symbol kind
+        let mut by_kind: std::collections::HashMap<crate::SymbolKind, Vec<Symbol>> =
+            std::collections::HashMap::new();
+
+        for id in impacted {
+            if let Some(sym) = indexer.get_symbol(id) {
+                by_kind.entry(sym.kind).or_default().push(sym);
+            }
+        }
+
+        // Display grouped by kind with locations
+        for (kind, symbols) in by_kind {
+            result.push_str(&format!("\n{kind:?} ({}): \n", symbols.len()));
+            for sym in symbols {
+                result.push_str(&format!(
+                    "  - {} at {}:{}\n",
+                    sym.name,
+                    sym.file_path,
+                    sym.range.start_line + 1
+                ));
+            }
+        }
+
+        // Add system guidance
+        if let Some(guidance) =
+            generate_mcp_guidance(indexer.settings(), "analyze_impact", impact_count)
+        {
+            result.push_str("\n---\n💡 ");
+            result.push_str(&guidance);
+            result.push('\n');
+        }
+
+        Ok(CallToolResult::success(vec![Content::text(result)]))
     }
 
     #[tool(description = "Get information about the indexed codebase")]
@@ -666,10 +870,16 @@ impl CodeIntelligenceServer {
             *kind_counts.entry(symbol.kind).or_insert(0) += 1;
         }
 
-        let functions = kind_counts.get(&crate::SymbolKind::Function).unwrap_or(&0);
-        let methods = kind_counts.get(&crate::SymbolKind::Method).unwrap_or(&0);
-        let structs = kind_counts.get(&crate::SymbolKind::Struct).unwrap_or(&0);
-        let traits = kind_counts.get(&crate::SymbolKind::Trait).unwrap_or(&0);
+        // Build symbol kinds display dynamically
+        let mut kinds_display = String::new();
+
+        // Sort by kind name for consistent output
+        let mut sorted_kinds: Vec<_> = kind_counts.iter().collect();
+        sorted_kinds.sort_by_key(|(kind, _)| format!("{kind:?}"));
+
+        for (kind, count) in sorted_kinds {
+            kinds_display.push_str(&format!("\n  - {kind:?}s: {count}"));
+        }
 
         // Get semantic search info
         let semantic_info = if let Some(metadata) = indexer.get_semantic_metadata() {
@@ -686,7 +896,7 @@ impl CodeIntelligenceServer {
         };
 
         let result = format!(
-            "Index contains {symbol_count} symbols across {file_count} files.\n\nBreakdown:\n  - Symbols: {symbol_count}\n  - Relationships: {relationship_count}\n\nSymbol Kinds:\n  - Functions: {functions}\n  - Methods: {methods}\n  - Structs: {structs}\n  - Traits: {traits}{semantic_info}"
+            "Index contains {symbol_count} symbols across {file_count} files.\n\nBreakdown:\n  - Symbols: {symbol_count}\n  - Relationships: {relationship_count}\n\nSymbol Kinds:{kinds_display}{semantic_info}"
         );
 
         Ok(CallToolResult::success(vec![Content::text(result)]))
@@ -751,9 +961,17 @@ impl CodeIntelligenceServer {
         match results {
             Ok(results) => {
                 if results.is_empty() {
-                    return Ok(CallToolResult::success(vec![Content::text(format!(
-                        "No semantically similar documentation found for: {query}"
-                    ))]));
+                    let mut output =
+                        format!("No semantically similar documentation found for: {query}");
+                    // Add guidance for no results
+                    if let Some(guidance) =
+                        generate_mcp_guidance(indexer.settings(), "semantic_search_docs", 0)
+                    {
+                        output.push_str("\n\n---\n💡 ");
+                        output.push_str(&guidance);
+                        output.push('\n');
+                    }
+                    return Ok(CallToolResult::success(vec![Content::text(output)]));
                 }
 
                 let mut result = format!(
@@ -763,10 +981,6 @@ impl CodeIntelligenceServer {
                 );
 
                 for (i, (symbol, score)) in results.iter().enumerate() {
-                    let file_path = indexer
-                        .get_file_path(symbol.file_id)
-                        .unwrap_or_else(|| "<unknown>".to_string());
-
                     result.push_str(&format!(
                         "{}. {} ({:?}) - Similarity: {:.3}\n",
                         i + 1,
@@ -776,7 +990,7 @@ impl CodeIntelligenceServer {
                     ));
                     result.push_str(&format!(
                         "   File: {}:{}\n",
-                        file_path,
+                        symbol.file_path,
                         symbol.range.start_line + 1
                     ));
 
@@ -795,6 +1009,15 @@ impl CodeIntelligenceServer {
                         result.push_str(&format!("   Signature: {sig}\n"));
                     }
 
+                    result.push('\n');
+                }
+
+                // Add system guidance
+                if let Some(guidance) =
+                    generate_mcp_guidance(indexer.settings(), "semantic_search_docs", results.len())
+                {
+                    result.push_str("\n---\n💡 ");
+                    result.push_str(&guidance);
                     result.push('\n');
                 }
 
@@ -863,9 +1086,16 @@ impl CodeIntelligenceServer {
         match search_results {
             Ok(results) => {
                 if results.is_empty() {
-                    return Ok(CallToolResult::success(vec![Content::text(format!(
-                        "No documentation found matching query: {query}"
-                    ))]));
+                    let mut output = format!("No documentation found matching query: {query}");
+                    // Add guidance for no results
+                    if let Some(guidance) =
+                        generate_mcp_guidance(indexer.settings(), "semantic_search_with_context", 0)
+                    {
+                        output.push_str("\n\n---\n💡 ");
+                        output.push_str(&guidance);
+                        output.push('\n');
+                    }
+                    return Ok(CallToolResult::success(vec![Content::text(output)]));
                 }
 
                 let mut output = String::new();
@@ -877,18 +1107,14 @@ impl CodeIntelligenceServer {
 
                 // For each result, gather comprehensive context
                 for (idx, (symbol, score)) in results.iter().enumerate() {
-                    let file_path = indexer
-                        .get_file_path(symbol.file_id)
-                        .unwrap_or_else(|| "<unknown>".to_string());
-
                     // Basic symbol information - matching find_symbol format
                     output.push_str(&format!(
-                        "{}. {} - {:?} at {}:{}\n",
+                        "{}. {} - {:?} at {} [symbol_id:{}]\n",
                         idx + 1,
                         symbol.name,
                         symbol.kind,
-                        file_path,
-                        symbol.range.start_line + 1
+                        crate::symbol::context::SymbolContext::symbol_location(symbol),
+                        symbol.id.value()
                     ));
                     output.push_str(&format!("   Similarity Score: {score:.3}\n"));
 
@@ -920,53 +1146,62 @@ impl CodeIntelligenceServer {
                             for (i, (called, metadata)) in
                                 called_with_metadata.iter().take(10).enumerate()
                             {
-                                let called_file = indexer
-                                    .get_file_path(called.file_id)
-                                    .unwrap_or_else(|| "<unknown>".to_string());
+                                // Parse receiver information from metadata and get call site location
+                                let (call_display, call_line) = if let Some(meta) = metadata {
+                                    let display = if let Some(context) = &meta.context {
+                                        if context.contains("receiver:")
+                                            && context.contains("static:")
+                                        {
+                                            let parts: Vec<&str> = context.split(',').collect();
+                                            let mut receiver = None;
+                                            let mut is_static = false;
 
-                                // Parse receiver information from metadata
-                                let call_display = if let Some(meta) = metadata {
-                                    // Parse metadata context for receiver info
-                                    if meta.contains("receiver:") && meta.contains("static:") {
-                                        let parts: Vec<&str> = meta.split(',').collect();
-                                        let mut receiver = None;
-                                        let mut is_static = false;
+                                            for part in parts {
+                                                if let Some(recv) = part.strip_prefix("receiver:") {
+                                                    receiver = Some(recv.trim());
+                                                } else if let Some(static_val) =
+                                                    part.strip_prefix("static:")
+                                                {
+                                                    is_static = static_val.trim() == "true";
+                                                }
+                                            }
 
-                                        for part in parts {
-                                            if let Some(recv) = part.strip_prefix("receiver:") {
-                                                receiver = Some(recv.trim());
-                                            } else if let Some(static_val) =
-                                                part.strip_prefix("static:")
-                                            {
-                                                is_static = static_val.trim() == "true";
+                                            match (receiver, is_static) {
+                                                (Some("self"), false) => {
+                                                    format!("(self.{})", called.name)
+                                                }
+                                                (Some(recv), true) if recv != "self" => {
+                                                    format!("({}::{})", recv, called.name)
+                                                }
+                                                (Some(recv), false) if recv != "self" => {
+                                                    format!("({}.{})", recv, called.name)
+                                                }
+                                                _ => called.name.to_string(),
                                             }
-                                        }
-
-                                        match (receiver, is_static) {
-                                            (Some("self"), false) => {
-                                                format!("(self.{})", called.name)
-                                            }
-                                            (Some(recv), true) if recv != "self" => {
-                                                format!("({}::{})", recv, called.name)
-                                            }
-                                            (Some(recv), false) if recv != "self" => {
-                                                format!("({}.{})", recv, called.name)
-                                            }
-                                            _ => called.name.to_string(),
+                                        } else {
+                                            called.name.to_string()
                                         }
                                     } else {
                                         called.name.to_string()
-                                    }
+                                    };
+
+                                    // Use call site line if available
+                                    let line = meta
+                                        .line
+                                        .map(|l| l + 1)
+                                        .unwrap_or(called.range.start_line + 1);
+                                    (display, line)
                                 } else {
-                                    called.name.to_string()
+                                    (called.name.to_string(), called.range.start_line + 1)
                                 };
 
                                 output.push_str(&format!(
-                                    "     -> {:?} {} at {}:{}\n",
+                                    "     -> {:?} {} at {}:{} [symbol_id:{}]\n",
                                     called.kind,
                                     call_display,
-                                    called_file,
-                                    called.range.start_line + 1
+                                    called.file_path,
+                                    call_line,
+                                    called.id.value()
                                 ));
                                 if i == 9 && called_with_metadata.len() > 10 {
                                     output.push_str(&format!(
@@ -989,50 +1224,61 @@ impl CodeIntelligenceServer {
                             for (i, (caller, metadata)) in
                                 calling_functions_with_metadata.iter().take(10).enumerate()
                             {
-                                let caller_file = indexer
-                                    .get_file_path(caller.file_id)
-                                    .unwrap_or_else(|| "<unknown>".to_string());
+                                // Parse metadata to extract receiver info and call site location
+                                let (call_info, call_line) = if let Some(meta) = metadata {
+                                    let info = if let Some(context) = &meta.context {
+                                        if context.contains("receiver:")
+                                            && context.contains("static:")
+                                        {
+                                            // Parse "receiver:{receiver},static:{is_static}"
+                                            let parts: Vec<&str> = context.split(',').collect();
+                                            let mut receiver = "";
+                                            let mut is_static = false;
 
-                                // Parse metadata to extract receiver info
-                                let call_info = if let Some(meta) = metadata {
-                                    if meta.contains("receiver:") && meta.contains("static:") {
-                                        // Parse "receiver:{receiver},static:{is_static}"
-                                        let parts: Vec<&str> = meta.split(',').collect();
-                                        let mut receiver = "";
-                                        let mut is_static = false;
-
-                                        for part in parts {
-                                            if let Some(r) = part.strip_prefix("receiver:") {
-                                                receiver = r;
-                                            } else if let Some(s) = part.strip_prefix("static:") {
-                                                is_static = s == "true";
+                                            for part in parts {
+                                                if let Some(r) = part.strip_prefix("receiver:") {
+                                                    receiver = r;
+                                                } else if let Some(s) = part.strip_prefix("static:")
+                                                {
+                                                    is_static = s == "true";
+                                                }
                                             }
-                                        }
 
-                                        if !receiver.is_empty() {
-                                            let qualified_name = if is_static {
-                                                format!("{}::{}", receiver, symbol.name)
+                                            if !receiver.is_empty() {
+                                                let qualified_name = if is_static {
+                                                    format!("{}::{}", receiver, symbol.name)
+                                                } else {
+                                                    format!("{}.{}", receiver, symbol.name)
+                                                };
+                                                format!(" (calls {qualified_name})")
                                             } else {
-                                                format!("{}.{}", receiver, symbol.name)
-                                            };
-                                            format!(" (calls {qualified_name})")
+                                                String::new()
+                                            }
                                         } else {
                                             String::new()
                                         }
                                     } else {
                                         String::new()
-                                    }
+                                    };
+
+                                    // Use call site line if available
+                                    let line = meta
+                                        .line
+                                        .map(|l| l + 1)
+                                        .unwrap_or(caller.range.start_line + 1);
+                                    (info, line)
                                 } else {
-                                    String::new()
+                                    (String::new(), caller.range.start_line + 1)
                                 };
 
                                 output.push_str(&format!(
-                                    "     <- {:?} {} at {}:{}{}\n",
+                                    "     <- {:?} {} at {}:{}{} [symbol_id:{}]\n",
                                     caller.kind,
                                     caller.name,
-                                    caller_file,
-                                    caller.range.start_line + 1,
-                                    call_info
+                                    caller.file_path,
+                                    call_line,
+                                    call_info,
+                                    caller.id.value()
                                 ));
                                 if i == 9 && calling_functions_with_metadata.len() > 10 {
                                     output.push_str(&format!(
@@ -1074,7 +1320,11 @@ impl CodeIntelligenceServer {
                             if !methods.is_empty() {
                                 output.push_str(&format!("\n     methods ({}):\n", methods.len()));
                                 for method in methods.iter().take(5) {
-                                    output.push_str(&format!("       - {}\n", method.name));
+                                    output.push_str(&format!(
+                                        "       - {} [symbol_id:{}]\n",
+                                        method.name,
+                                        method.id.value()
+                                    ));
                                 }
                                 if methods.len() > 5 {
                                     output.push_str(&format!(
@@ -1090,7 +1340,11 @@ impl CodeIntelligenceServer {
                                     functions.len()
                                 ));
                                 for func in functions.iter().take(5) {
-                                    output.push_str(&format!("       - {}\n", func.name));
+                                    output.push_str(&format!(
+                                        "       - {} [symbol_id:{}]\n",
+                                        func.name,
+                                        func.id.value()
+                                    ));
                                 }
                                 if functions.len() > 5 {
                                     output.push_str(&format!(
@@ -1104,14 +1358,136 @@ impl CodeIntelligenceServer {
                                 output.push_str(&format!("\n     other ({}):\n", other.len()));
                                 for sym in other.iter().take(3) {
                                     output.push_str(&format!(
-                                        "       - {} ({:?})\n",
-                                        sym.name, sym.kind
+                                        "       - {} ({:?}) [symbol_id:{}]\n",
+                                        sym.name,
+                                        sym.kind,
+                                        sym.id.value()
                                     ));
                                 }
                             }
                         }
                     }
 
+                    // Show inheritance relationships for classes
+                    if matches!(
+                        symbol.kind,
+                        crate::SymbolKind::Class | crate::SymbolKind::Struct
+                    ) {
+                        // What does this class extend?
+                        let extends = indexer.get_extends(symbol.id);
+                        if !extends.is_empty() {
+                            output.push_str(&format!(
+                                "\n   {} extends {} class(es):\n",
+                                symbol.name,
+                                extends.len()
+                            ));
+                            for (i, base_class) in extends.iter().take(5).enumerate() {
+                                output.push_str(&format!(
+                                    "     -> {:?} {} at {} [symbol_id:{}]\n",
+                                    base_class.kind,
+                                    base_class.name,
+                                    crate::symbol::context::SymbolContext::symbol_location(
+                                        base_class
+                                    ),
+                                    base_class.id.value()
+                                ));
+                                if i == 4 && extends.len() > 5 {
+                                    output.push_str(&format!(
+                                        "     ... and {} more\n",
+                                        extends.len() - 5
+                                    ));
+                                }
+                            }
+                        }
+
+                        // What classes extend this class?
+                        let extended_by = indexer.get_extended_by(symbol.id);
+                        if !extended_by.is_empty() {
+                            output.push_str(&format!(
+                                "\n   {} class(es) extend {}:\n",
+                                extended_by.len(),
+                                symbol.name
+                            ));
+                            for (i, derived_class) in extended_by.iter().take(5).enumerate() {
+                                output.push_str(&format!(
+                                    "     <- {:?} {} at {} [symbol_id:{}]\n",
+                                    derived_class.kind,
+                                    derived_class.name,
+                                    crate::symbol::context::SymbolContext::symbol_location(
+                                        derived_class
+                                    ),
+                                    derived_class.id.value()
+                                ));
+                                if i == 4 && extended_by.len() > 5 {
+                                    output.push_str(&format!(
+                                        "     ... and {} more\n",
+                                        extended_by.len() - 5
+                                    ));
+                                }
+                            }
+                        }
+                    }
+
+                    // Show uses relationships (for all symbols)
+                    let uses = indexer.get_uses(symbol.id);
+                    if !uses.is_empty() {
+                        output.push_str(&format!(
+                            "\n   {} uses {} type(s):\n",
+                            symbol.name,
+                            uses.len()
+                        ));
+                        for (i, used_type) in uses.iter().take(5).enumerate() {
+                            output.push_str(&format!(
+                                "     -> {:?} {} at {} [symbol_id:{}]\n",
+                                used_type.kind,
+                                used_type.name,
+                                crate::symbol::context::SymbolContext::symbol_location(used_type),
+                                used_type.id.value()
+                            ));
+                            if i == 4 && uses.len() > 5 {
+                                output.push_str(&format!("     ... and {} more\n", uses.len() - 5));
+                            }
+                        }
+                    }
+
+                    // What symbols use this type?
+                    let used_by = indexer.get_used_by(symbol.id);
+                    if !used_by.is_empty() {
+                        output.push_str(&format!(
+                            "\n   {} type(s) use {}:\n",
+                            used_by.len(),
+                            symbol.name
+                        ));
+                        for (i, using_symbol) in used_by.iter().take(5).enumerate() {
+                            output.push_str(&format!(
+                                "     <- {:?} {} at {} [symbol_id:{}]\n",
+                                using_symbol.kind,
+                                using_symbol.name,
+                                crate::symbol::context::SymbolContext::symbol_location(
+                                    using_symbol
+                                ),
+                                using_symbol.id.value()
+                            ));
+                            if i == 4 && used_by.len() > 5 {
+                                output.push_str(&format!(
+                                    "     ... and {} more\n",
+                                    used_by.len() - 5
+                                ));
+                            }
+                        }
+                    }
+
+                    output.push('\n');
+                }
+
+                // Add system guidance
+                if let Some(guidance) = generate_mcp_guidance(
+                    indexer.settings(),
+                    "semantic_search_with_context",
+                    results.len(),
+                ) {
+                    output.push_str("\n---\n💡 ");
+                    output.push_str(&guidance);
                     output.push('\n');
                 }
 
@@ -1157,9 +1533,16 @@ impl CodeIntelligenceServer {
         ) {
             Ok(results) => {
                 if results.is_empty() {
-                    return Ok(CallToolResult::success(vec![Content::text(format!(
-                        "No results found for query: {query}"
-                    ))]));
+                    let mut output = format!("No results found for query: {query}");
+                    // Add guidance for no results
+                    if let Some(guidance) =
+                        generate_mcp_guidance(indexer.settings(), "search_symbols", 0)
+                    {
+                        output.push_str("\n\n---\n💡 ");
+                        output.push_str(&guidance);
+                        output.push('\n');
+                    }
+                    return Ok(CallToolResult::success(vec![Content::text(output)]));
                 }
 
                 let mut result = format!(
@@ -1195,6 +1578,15 @@ impl CodeIntelligenceServer {
                     }
 
                     result.push_str(&format!("   Score: {:.2}\n", search_result.score));
+                    result.push('\n');
+                }
+
+                // Add system guidance
+                if let Some(guidance) =
+                    generate_mcp_guidance(indexer.settings(), "search_symbols", results.len())
+                {
+                    result.push_str("\n---\n💡 ");
+                    result.push_str(&guidance);
                     result.push('\n');
                 }
 
@@ -1235,9 +1627,14 @@ impl ServerHandler for CodeIntelligenceServer {
 
     async fn initialize(
         &self,
-        _request: InitializeRequestParam,
+        request: InitializeRequestParam,
         context: RequestContext<RoleServer>,
     ) -> Result<InitializeResult, McpError> {
+        // Register client capabilities (required for MCP handshake)
+        if context.peer.peer_info().is_none() {
+            context.peer.set_peer_info(request);
+        }
+
         // Store the peer reference for sending notifications
         let mut peer_guard = self.peer.lock().await;
         *peer_guard = Some(context.peer.clone());

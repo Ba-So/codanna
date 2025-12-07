@@ -14,6 +14,7 @@ pub mod input;
 pub mod output;
 pub mod parse;
 pub mod schema;
+pub mod status_line;
 #[cfg(test)]
 mod test;
 
@@ -21,4 +22,5 @@ pub use exit_code::ExitCode;
 pub use format::{ErrorDetails, JsonResponse, OutputFormat, ResponseMeta};
 pub use output::OutputManager;
 pub use schema::{EntityType, OutputData, OutputStatus, UnifiedOutput, UnifiedOutputBuilder};
+pub use status_line::{ProgressBar, ProgressBarOptions, ProgressBarStyle, Spinner, SpinnerOptions};
 // Future: pub use input::{JsonRpcRequest, JsonRpcResponse};

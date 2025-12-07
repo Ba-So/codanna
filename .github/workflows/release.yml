@@ -1,51 +1,248 @@
-name: Build Release Binaries
-# Manual trigger for building release binaries
-# This workflow is triggered by the release-tag.yml workflow
+name: Release
+
 on:
   workflow_dispatch:
-    inputs:
-      version:
-        description: 'Release version (e.g., 1.0.0)'
-        required: true
-        type: string
+  push:
+    tags:
+      - "v*.*.*"
+
+env:
+  CARGO_TERM_COLOR: always
 
 jobs:
+  info:
+    name: Gather info
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract version
+        id: version
+        shell: bash
+        run: |
+          set -euxo pipefail
+          version=$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)
+
+          if [[ -z "$version" ]]; then
+            echo "Error: no version found in Cargo.toml"
+            exit 1
+          fi
+
+          echo "version=$version" >> $GITHUB_OUTPUT
+          echo "Found version: $version"
+
   build:
-    name: Build - ${{ matrix.target }}
-    runs-on: ${{ matrix.os }}
     strategy:
       matrix:
         include:
-          # Just the essentials for now
-          - os: ubuntu-latest
+          # Linux x64
+          - name: linux-x64
+            os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-            name: linux-x64
-          
-          - os: macos-latest
+            variant: full
+            features: --all-features
+
+          - name: linux-x64-slim
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            variant: slim
+            features: ""
+
+          # macOS x64 (Intel)
+          - name: macos-x64
+            os: macos-14
             target: x86_64-apple-darwin
-            name: macos-x64
-          
-          - os: windows-latest
+            variant: full
+            features: --all-features
+
+          - name: macos-x64-slim
+            os: macos-14
+            target: x86_64-apple-darwin
+            variant: slim
+            features: ""
+
+          # macOS ARM64 (Apple Silicon)
+          - name: macos-arm64
+            os: macos-15
+            target: aarch64-apple-darwin
+            variant: full
+            features: --all-features
+
+          - name: macos-arm64-slim
+            os: macos-15
+            target: aarch64-apple-darwin
+            variant: slim
+            features: ""
+
+          # Windows x64
+          - name: windows-x64
+            os: windows-latest
             target: x86_64-pc-windows-msvc
-            name: windows-x64
+            variant: full
+            features: --all-features
+
+          - name: windows-x64-slim
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+            variant: slim
+            features: ""
+
+    name: Build ${{ matrix.name }}
+    needs: info
+    runs-on: ${{ matrix.os }}
+
+    env:
+      version: ${{ needs.info.outputs.version }}
 
     steps:
       - uses: actions/checkout@v4
-      
+
+      - name: Configure toolchain
+        run: |
+          rustup toolchain install --profile minimal --no-self-update stable
+          rustup default stable
+          rustup target add ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}-${{ matrix.variant }}
+
       - name: Build binary
-        run: cargo build --release
-      
-      - name: Package binary
+        run: cargo build --release --locked --target ${{ matrix.target }} ${{ matrix.features }}
+
+      - name: Package (Unix)
+        if: runner.os != 'Windows'
         shell: bash
         run: |
-          if [ "${{ matrix.os }}" = "windows-latest" ]; then
-            cp target/release/codanna.exe codanna-${{ inputs.version }}-${{ matrix.name }}.exe
+          set -euxo pipefail
+
+          bin="target/${{ matrix.target }}/release/codanna"
+          dst="codanna-${{ env.version }}-${{ matrix.name }}"
+
+          mkdir "$dst"
+          cp "$bin" "$dst/"
+          cp LICENSE "$dst/"
+
+          tar -cJf "$dst.tar.xz" "$dst"
+
+          # Generate checksums (macOS uses shasum, Linux uses sha256sum)
+          if command -v sha256sum > /dev/null; then
+            sha256sum "$dst.tar.xz" | cut -d' ' -f1 > "$dst.tar.xz.sha256"
+            sha512sum "$dst.tar.xz" | cut -d' ' -f1 > "$dst.tar.xz.sha512"
           else
-            cp target/release/codanna codanna-${{ inputs.version }}-${{ matrix.name }}
+            shasum -a 256 "$dst.tar.xz" | cut -d' ' -f1 > "$dst.tar.xz.sha256"
+            shasum -a 512 "$dst.tar.xz" | cut -d' ' -f1 > "$dst.tar.xz.sha512"
           fi
-      
-      - name: Upload binary
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          bin="target/${{ matrix.target }}/release/codanna.exe"
+          dst="codanna-${{ env.version }}-${{ matrix.name }}"
+
+          mkdir "$dst"
+          cp "$bin" "$dst/"
+          cp LICENSE "$dst/"
+
+          7z a "$dst.zip" "$dst"
+
+          # Generate checksums
+          sha256sum "$dst.zip" | cut -d' ' -f1 > "$dst.zip.sha256"
+          sha512sum "$dst.zip" | cut -d' ' -f1 > "$dst.zip.sha512"
+
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: codanna-${{ inputs.version }}-${{ matrix.name }}
-          path: codanna-${{ inputs.version }}-${{ matrix.name }}*
+          name: ${{ matrix.name }}
+          retention-days: 1
+          path: |
+            codanna-*.tar.xz
+            codanna-*.zip
+            *.sha256
+            *.sha512
+
+  upload:
+    needs: [build, info]
+    name: Create release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+
+      - name: Generate bulk checksums
+        run: |
+          shasum -a 256 codanna-* | tee SHA256SUMS
+          shasum -a 512 codanna-* | tee SHA512SUMS
+
+      - name: Create manifest
+        run: |
+          version="${{ needs.info.outputs.version }}"
+          repo="${{ github.repository }}"
+
+          {
+            echo "{"
+            echo "  \"version\": \"$version\","
+            echo "  \"artifacts\": ["
+
+            first=true
+            for file in codanna-*.tar.xz codanna-*.zip; do
+              [[ -f "$file" ]] || continue
+
+              # Extract platform and variant
+              platform=$(echo "$file" | sed -n 's/codanna-[^-]*-\([^.]*\)\..*/\1/p')
+              variant="full"
+              if [[ "$file" == *"-slim."* ]]; then
+                variant="slim"
+                platform=$(echo "$platform" | sed 's/-slim$//')
+              fi
+
+              # Get checksum
+              sha256=$(shasum -a 256 "$file" | cut -d' ' -f1)
+
+              # Build URL
+              url="https://github.com/${repo}/releases/download/v${version}/${file}"
+
+              # Add comma if not first
+              [[ "$first" == "false" ]] && echo ","
+              first=false
+
+              # Output artifact entry (without tab in echo to avoid YAML issues)
+              echo "    {"
+              echo "      \"name\": \"$file\","
+              echo "      \"url\": \"$url\","
+              echo "      \"sha256\": \"$sha256\","
+              echo "      \"platform\": \"$platform\","
+              echo "      \"variant\": \"$variant\""
+              echo "    }"
+            done
+
+            echo "  ]"
+            echo "}"
+          } > dist-manifest.json
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: v${{ needs.info.outputs.version }}
+          name: v${{ needs.info.outputs.version }}
+          draft: true
+          files: |
+            dist-manifest.json
+            codanna-*.tar.xz
+            codanna-*.zip
+            *SUMS
+            *.sha256
+            *.sha512
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

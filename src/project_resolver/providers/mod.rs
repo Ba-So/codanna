@@ -3,6 +3,12 @@
 //! Each language implements the ProjectResolutionProvider trait to handle
 //! project configuration files and path resolution rules.
 
+pub mod java;
+pub mod javascript;
+pub mod swift;
 pub mod typescript;
 
+pub use java::JavaProvider;
+pub use javascript::JavaScriptProvider;
+pub use swift::SwiftProvider;
 pub use typescript::TypeScriptProvider;

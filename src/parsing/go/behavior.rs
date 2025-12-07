@@ -309,7 +309,7 @@ impl LanguageBehavior for GoBehavior {
             match scope_context {
                 ScopeContext::Module | ScopeContext::Global | ScopeContext::Package => true,
                 ScopeContext::Local { .. } | ScopeContext::Parameter => false,
-                ScopeContext::ClassMember => {
+                ScopeContext::ClassMember { .. } => {
                     // Struct/interface members are resolvable if exported (uppercase)
                     matches!(symbol.visibility, Visibility::Public)
                 }
@@ -739,7 +739,8 @@ mod tests {
         behavior.register_file_with_state(test_file.clone(), file_id, "src".to_string());
 
         // Create a mock document index
-        let doc_index = DocumentIndex::new(temp_dir.path().join("index")).unwrap();
+        let settings = crate::config::Settings::default();
+        let doc_index = DocumentIndex::new(temp_dir.path().join("index"), &settings).unwrap();
 
         // Test get_project_root_for_file
         let root = behavior.get_project_root_for_file(file_id, &doc_index);
@@ -790,6 +791,7 @@ mod tests {
                 end_line: 1,
                 end_column: 10,
             },
+            file_path: "<unknown>".into(),
             doc_comment: None,
             visibility: Visibility::Private, // Will be updated by configure_symbol
             scope_context: None,
@@ -818,6 +820,7 @@ mod tests {
                 end_line: 1,
                 end_column: 10,
             },
+            file_path: "<unknown>".into(),
             doc_comment: None,
             visibility: Visibility::Public, // Will be updated by configure_symbol
             scope_context: None,

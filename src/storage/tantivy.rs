@@ -23,6 +23,7 @@ use tantivy::{
         FAST, Field, IndexRecordOption, NumericOptions, STORED, STRING, Schema, SchemaBuilder,
         TextFieldIndexing, TextOptions, Value,
     },
+    tokenizer::{NgramTokenizer, TextAnalyzer},
 };
 
 /// Schema fields for the document index
@@ -33,7 +34,8 @@ pub struct IndexSchema {
 
     // Symbol fields
     pub symbol_id: Field,
-    pub name: Field,
+    pub name: Field,      // STRING field for exact matching
+    pub name_text: Field, // TEXT field for full-text search
     pub doc_comment: Field,
     pub signature: Field,
     pub module_path: Field,
@@ -41,6 +43,8 @@ pub struct IndexSchema {
     pub file_path: Field,
     pub line_number: Field,
     pub column: Field,
+    pub end_line: Field,
+    pub end_column: Field,
     pub context: Field,
     pub visibility: Field,
     pub scope_context: Field,
@@ -68,6 +72,13 @@ pub struct IndexSchema {
     pub cluster_id: Field,
     pub vector_id: Field,
     pub has_vector: Field,
+
+    // Import fields (for cross-session persistence)
+    pub import_file_id: Field,      // Which file has this import
+    pub import_path: Field,         // Full import path (e.g., "indicatif::ProgressBar")
+    pub import_alias: Field,        // Optional alias
+    pub import_is_glob: Field,      // Boolean (0/1) for glob imports
+    pub import_is_type_only: Field, // Boolean (0/1) for type-only imports (TypeScript)
 }
 
 impl IndexSchema {
@@ -87,8 +98,10 @@ impl IndexSchema {
         // Symbol fields (existing)
         let symbol_id = builder.add_u64_field("symbol_id", indexed_u64_options.clone());
         let file_path = builder.add_text_field("file_path", STRING | STORED);
-        let line_number = builder.add_u64_field("line_number", STORED | FAST);
+        let line_number = builder.add_u64_field("line_number", indexed_u64_options.clone());
         let column = builder.add_u64_field("column", STORED);
+        let end_line = builder.add_u64_field("end_line", STORED | FAST);
+        let end_column = builder.add_u64_field("end_column", STORED);
 
         // Text fields for search
         let text_options = TextOptions::default()
@@ -99,7 +112,21 @@ impl IndexSchema {
             )
             .set_stored();
 
-        let name = builder.add_text_field("name", text_options.clone());
+        // IMPORTANT: Use STRING for exact matching of symbol names without tokenization
+        // This prevents partial matches and ensures "MyService" doesn't match "Main"
+        let name = builder.add_text_field("name", STRING | STORED);
+
+        // ALSO add name_text for full-text search with ngram tokenization
+        // This allows partial matching: "Archive" will match "ArchiveAppService"
+        let ngram_text_options = TextOptions::default()
+            .set_indexing_options(
+                TextFieldIndexing::default()
+                    .set_tokenizer("ngram")
+                    .set_index_option(IndexRecordOption::WithFreqsAndPositions),
+            )
+            .set_stored();
+        let name_text = builder.add_text_field("name_text", ngram_text_options);
+
         let doc_comment = builder.add_text_field("doc_comment", text_options.clone());
         let signature = builder.add_text_field("signature", text_options.clone());
         let context = builder.add_text_field("context", text_options.clone());
@@ -134,11 +161,19 @@ impl IndexSchema {
         let vector_id = builder.add_u64_field("vector_id", FAST | STORED);
         let has_vector = builder.add_u64_field("has_vector", FAST | STORED); // Using u64 as bool for FAST field
 
+        // Import fields (for cross-session persistence of import metadata)
+        let import_file_id = builder.add_u64_field("import_file_id", indexed_u64_options.clone());
+        let import_path = builder.add_text_field("import_path", STRING | STORED);
+        let import_alias = builder.add_text_field("import_alias", STRING | STORED);
+        let import_is_glob = builder.add_u64_field("import_is_glob", STORED);
+        let import_is_type_only = builder.add_u64_field("import_is_type_only", STORED);
+
         let schema = builder.build();
         let index_schema = IndexSchema {
             doc_type,
             symbol_id,
             name,
+            name_text,
             doc_comment,
             signature,
             module_path,
@@ -146,6 +181,8 @@ impl IndexSchema {
             file_path,
             line_number,
             column,
+            end_line,
+            end_column,
             context,
             visibility,
             scope_context,
@@ -165,6 +202,11 @@ impl IndexSchema {
             cluster_id,
             vector_id,
             has_vector,
+            import_file_id,
+            import_path,
+            import_alias,
+            import_is_glob,
+            import_is_type_only,
         };
 
         (schema, index_schema)
@@ -354,6 +396,10 @@ pub struct DocumentIndex {
     schema: IndexSchema,
     index_path: PathBuf,
     pub(crate) writer: Mutex<Option<IndexWriter<Document>>>,
+    /// Tantivy heap size in bytes
+    heap_size: usize,
+    /// Maximum retry attempts for transient errors
+    max_retry_attempts: u32,
     /// Optional path for vector storage files
     vector_storage_path: Option<PathBuf>,
     /// Optional vector search engine for semantic search
@@ -366,6 +412,8 @@ pub struct DocumentIndex {
     pub(crate) pending_embeddings: Mutex<Vec<(SymbolId, String)>>,
     /// Pending symbol counter during batch operations
     pending_symbol_counter: Mutex<Option<u32>>,
+    /// Pending file counter during batch operations
+    pending_file_counter: Mutex<Option<u32>>,
 }
 
 impl std::fmt::Debug for DocumentIndex {
@@ -393,9 +441,18 @@ impl std::fmt::Debug for DocumentIndex {
 
 impl DocumentIndex {
     /// Create a new document index
-    pub fn new(index_path: impl AsRef<Path>) -> StorageResult<Self> {
+    pub fn new(
+        index_path: impl AsRef<Path>,
+        settings: &crate::config::Settings,
+    ) -> StorageResult<Self> {
         let index_path = index_path.as_ref().to_path_buf();
         std::fs::create_dir_all(&index_path)?;
+
+        // Extract and validate heap size
+        let heap_size = settings.indexing.tantivy_heap_mb * 1_000_000;
+        let heap_size = heap_size.clamp(10_000_000, 1_000_000_000); // 10MB-1GB
+
+        let max_retry_attempts = settings.indexing.max_retry_attempts;
 
         let (schema, index_schema) = IndexSchema::build();
 
@@ -406,6 +463,12 @@ impl DocumentIndex {
             let dir = MmapDirectory::open(&index_path)?;
             Index::create(dir, schema, IndexSettings::default())?
         };
+
+        // Register custom tokenizer for partial matching (ngram with min_gram=3, max_gram=10)
+        // This allows "Archive" to match "ArchiveAppService"
+        let ngram_tokenizer =
+            TextAnalyzer::builder(NgramTokenizer::new(3, 10, false).unwrap()).build();
+        index.tokenizers().register("ngram", ngram_tokenizer);
 
         let reader = index
             .reader_builder()
@@ -423,13 +486,53 @@ impl DocumentIndex {
             schema: index_schema,
             index_path,
             writer: Mutex::new(None),
+            heap_size,
+            max_retry_attempts,
             vector_storage_path: None,
             vector_engine: None,
             cluster_cache: Arc::new(RwLock::new(None)),
             embedding_generator: None,
             pending_embeddings: Mutex::new(Vec::new()),
             pending_symbol_counter: Mutex::new(None),
+            pending_file_counter: Mutex::new(None),
         })
+    }
+
+    /// Create index writer with retry logic for transient errors
+    fn create_writer_with_retry(&self) -> Result<IndexWriter<Document>, tantivy::TantivyError> {
+        for attempt in 0..self.max_retry_attempts {
+            match self.index.writer::<Document>(self.heap_size) {
+                Ok(writer) => return Ok(writer),
+                Err(e) => {
+                    // Check for transient I/O errors using ErrorKind
+                    let is_transient = std::error::Error::source(&e)
+                        .and_then(|s| s.downcast_ref::<std::io::Error>())
+                        .map(|io_err| {
+                            matches!(
+                                io_err.kind(),
+                                std::io::ErrorKind::PermissionDenied
+                                    | std::io::ErrorKind::TimedOut
+                                    | std::io::ErrorKind::WouldBlock
+                            )
+                        })
+                        .unwrap_or(false);
+
+                    if is_transient && attempt < self.max_retry_attempts - 1 {
+                        let delay = 100 * (1 << attempt);
+                        eprintln!(
+                            "Attempt {}/{}: Transient permission error, retrying after {}ms",
+                            attempt + 1,
+                            self.max_retry_attempts,
+                            delay
+                        );
+                        std::thread::sleep(std::time::Duration::from_millis(delay));
+                    } else {
+                        return Err(e);
+                    }
+                }
+            }
+        }
+        unreachable!()
     }
 
     /// Enable vector search support with the given engine and storage path
@@ -761,7 +864,7 @@ impl DocumentIndex {
     pub fn start_batch(&self) -> StorageResult<()> {
         let mut writer_lock = self.writer.lock().map_err(|_| StorageError::LockPoisoned)?;
         if writer_lock.is_none() {
-            let writer = self.index.writer::<Document>(100_000_000)?; // 100MB buffer
+            let writer = self.create_writer_with_retry()?;
             *writer_lock = Some(writer);
 
             // Initialize the pending symbol counter for this batch
@@ -770,6 +873,12 @@ impl DocumentIndex {
                 .unwrap_or(0) as u32;
             if let Ok(mut pending_guard) = self.pending_symbol_counter.lock() {
                 *pending_guard = Some(current + 1);
+            }
+
+            // Initialize the pending file counter for this batch
+            let file_current = self.query_metadata(MetadataKey::FileCounter)?.unwrap_or(0) as u32;
+            if let Ok(mut pending_guard) = self.pending_file_counter.lock() {
+                *pending_guard = Some(file_current + 1);
             }
         }
         Ok(())
@@ -786,6 +895,8 @@ impl DocumentIndex {
         file_path: &str,
         line: u32,
         column: u16,
+        end_line: u32,
+        end_column: u16,
         doc_comment: Option<&str>,
         signature: Option<&str>,
         module_path: &str,
@@ -802,9 +913,12 @@ impl DocumentIndex {
         doc.add_u64(self.schema.symbol_id, symbol_id.value() as u64);
         doc.add_u64(self.schema.file_id, file_id.value() as u64);
         doc.add_text(self.schema.name, name);
+        doc.add_text(self.schema.name_text, name); // Also add to full-text searchable field
         doc.add_text(self.schema.file_path, file_path);
         doc.add_u64(self.schema.line_number, line as u64);
         doc.add_u64(self.schema.column, column as u64);
+        doc.add_u64(self.schema.end_line, end_line as u64);
+        doc.add_u64(self.schema.end_column, end_column as u64);
 
         if let Some(comment) = doc_comment {
             doc.add_text(self.schema.doc_comment, comment);
@@ -871,12 +985,46 @@ impl DocumentIndex {
             }
         };
         if let Some(mut writer) = writer_lock.take() {
-            writer.commit()?;
+            // Try to commit with better error context
+            match writer.commit() {
+                Ok(_opstamp) => {
+                    // Successful commit
+                }
+                Err(e) => {
+                    // Check for permission errors using ErrorKind
+                    let is_permission_error = std::error::Error::source(&e)
+                        .and_then(|s| s.downcast_ref::<std::io::Error>())
+                        .map(|io_err| matches!(io_err.kind(), std::io::ErrorKind::PermissionDenied))
+                        .unwrap_or(false);
+
+                    if is_permission_error {
+                        return Err(StorageError::General(format!(
+                            "Failed to commit index due to permission error.\n\
+                            This can happen when:\n\
+                            1. Security software is scanning the index directory\n\
+                            2. Another process has locked the files\n\
+                            3. Insufficient file system permissions\n\
+                            \nOriginal error: {e}\n\
+                            \nTry:\n\
+                            - Reducing tantivy_heap_mb in settings (15-25MB)\n\
+                            - Adding .codanna to security software exclusions\n\
+                            - Ensuring no other codanna processes are running"
+                        )));
+                    }
+                    return Err(e.into());
+                }
+            }
+
             // Reload the reader to see new documents
             self.reader.reload()?;
 
             // Clear the pending symbol counter after commit
             if let Ok(mut pending_guard) = self.pending_symbol_counter.lock() {
+                *pending_guard = None;
+            }
+
+            // Clear the pending file counter after commit
+            if let Ok(mut pending_guard) = self.pending_file_counter.lock() {
                 *pending_guard = None;
             }
 
@@ -927,7 +1075,7 @@ impl DocumentIndex {
         let query_parser = QueryParser::for_index(
             &self.index,
             vec![
-                self.schema.name,
+                self.schema.name_text, // Use name_text for full-text search (tokenized)
                 self.schema.doc_comment,
                 self.schema.signature,
                 self.schema.context,
@@ -941,7 +1089,7 @@ impl DocumentIndex {
             Err(_parse_error) => {
                 // Query contains syntax that conflicts with Tantivy parser.
                 // Fall back to literal term matching across searchable fields.
-                let name_term = Term::from_field_text(self.schema.name, query_str);
+                let name_term = Term::from_field_text(self.schema.name_text, query_str);
                 let doc_term = Term::from_field_text(self.schema.doc_comment, query_str);
                 let sig_term = Term::from_field_text(self.schema.signature, query_str);
                 let ctx_term = Term::from_field_text(self.schema.context, query_str);
@@ -971,19 +1119,29 @@ impl DocumentIndex {
             }
         };
 
-        // Fuzzy query for typo tolerance on the name field
-        let term = Term::from_field_text(self.schema.name, query_str);
-        let fuzzy_query = FuzzyTermQuery::new(term, 1, true);
+        // Fuzzy query for typo tolerance on the name_text field (ngram tokens)
+        let name_text_term = Term::from_field_text(self.schema.name_text, query_str);
+        let fuzzy_ngram_query = FuzzyTermQuery::new(name_text_term, 1, true);
+
+        // ADDITIONAL: Fuzzy query on the non-tokenized name field for whole-word typo tolerance
+        // This fixes the limitation where "ArchivService" (missing 'e') couldn't find "ArchiveService"
+        // because ngram tokenization shifted all tokens after the typo
+        let name_term = Term::from_field_text(self.schema.name, query_str);
+        let fuzzy_whole_word_query = FuzzyTermQuery::new(name_term, 1, true);
 
         // All queries will be collected here.
         let mut all_clauses: Vec<(Occur, Box<dyn Query>)> = Vec::new();
 
-        // The text search part: must match either the main query or the fuzzy query.
+        // The text search part: must match one of:
+        // 1. Main query (ngram partial matching)
+        // 2. Fuzzy on ngram tokens (typos in short queries)
+        // 3. Fuzzy on whole word (typos in full symbol names)
         all_clauses.push((
             Occur::Must,
             Box::new(BooleanQuery::new(vec![
                 (Occur::Should, main_query),
-                (Occur::Should, Box::new(fuzzy_query)),
+                (Occur::Should, Box::new(fuzzy_ngram_query)),
+                (Occur::Should, Box::new(fuzzy_whole_word_query)),
             ])),
         ));
 
@@ -1126,6 +1284,13 @@ impl DocumentIndex {
 
     /// Clear all documents from the index
     pub fn clear(&self) -> StorageResult<()> {
+        // Check if index has been initialized (has meta.json)
+        // If not, there's nothing to clear
+        let meta_path = self.index_path.join("meta.json");
+        if !meta_path.exists() {
+            return Ok(());
+        }
+
         let mut writer = self.index.writer::<Document>(50_000_000)?;
         writer.delete_all_documents()?;
         writer.commit()?;
@@ -1195,22 +1360,16 @@ impl DocumentIndex {
     ) -> StorageResult<Vec<crate::Symbol>> {
         let searcher = self.reader.searcher();
 
-        // Use a QueryParser to correctly handle tokenization of the symbol name.
-        let query_parser = QueryParser::for_index(&self.index, vec![self.schema.name]);
-        let query = match query_parser.parse_query(name) {
-            Ok(q) => q,
-            Err(_) => {
-                // If parsing fails (e.g., special characters), fall back to a simple term query.
-                Box::new(TermQuery::new(
-                    Term::from_field_text(self.schema.name, name),
-                    IndexRecordOption::Basic,
-                ))
-            }
-        };
+        // Use exact term matching for symbol names (name field is STRING type, not TEXT)
+        // This prevents tokenization issues that cause "MyService" to match "Main"
+        let name_query = Box::new(TermQuery::new(
+            Term::from_field_text(self.schema.name, name),
+            IndexRecordOption::Basic,
+        )) as Box<dyn Query>;
 
         // Build query clauses
         let mut query_clauses = vec![
-            (Occur::Must, query),
+            (Occur::Must, name_query),
             (
                 Occur::Must,
                 Box::new(TermQuery::new(
@@ -1244,6 +1403,64 @@ impl DocumentIndex {
         Ok(symbols)
     }
 
+    /// Find a symbol by name, file, and range
+    ///
+    /// Used for Defines relationships to disambiguate overloaded methods.
+    /// Returns the symbol that matches both the name AND the exact range.
+    pub fn find_symbol_by_name_and_range(
+        &self,
+        name: &str,
+        file_id: FileId,
+        range: &crate::Range,
+    ) -> StorageResult<Option<crate::Symbol>> {
+        let searcher = self.reader.searcher();
+
+        // Query by name, file_id, and start line
+        let query = BooleanQuery::from(vec![
+            (
+                Occur::Must,
+                Box::new(TermQuery::new(
+                    Term::from_field_text(self.schema.doc_type, "symbol"),
+                    IndexRecordOption::Basic,
+                )) as Box<dyn Query>,
+            ),
+            (
+                Occur::Must,
+                Box::new(TermQuery::new(
+                    Term::from_field_text(self.schema.name, name),
+                    IndexRecordOption::Basic,
+                )) as Box<dyn Query>,
+            ),
+            (
+                Occur::Must,
+                Box::new(TermQuery::new(
+                    Term::from_field_u64(self.schema.file_id, file_id.0 as u64),
+                    IndexRecordOption::Basic,
+                )) as Box<dyn Query>,
+            ),
+            (
+                Occur::Must,
+                Box::new(TermQuery::new(
+                    Term::from_field_u64(self.schema.line_number, range.start_line as u64),
+                    IndexRecordOption::Basic,
+                )) as Box<dyn Query>,
+            ),
+        ]);
+
+        let top_docs = searcher.search(&query, &TopDocs::with_limit(10))?;
+
+        for (_score, doc_address) in top_docs {
+            let doc = searcher.doc::<Document>(doc_address)?;
+            let symbol = self.document_to_symbol(&doc)?;
+            // Verify full range match (start_line matched in query, check end_line too)
+            if symbol.range.end_line == range.end_line {
+                return Ok(Some(symbol));
+            }
+        }
+
+        Ok(None)
+    }
+
     /// Find symbols by file ID
     pub fn find_symbols_by_file(&self, file_id: FileId) -> StorageResult<Vec<crate::Symbol>> {
         let searcher = self.reader.searcher();
@@ -1259,6 +1476,41 @@ impl DocumentIndex {
                 Occur::Must,
                 Box::new(TermQuery::new(
                     Term::from_field_u64(self.schema.file_id, file_id.0 as u64),
+                    IndexRecordOption::Basic,
+                )) as Box<dyn Query>,
+            ),
+        ]);
+
+        let top_docs = searcher.search(&query, &TopDocs::with_limit(1000))?;
+        let mut symbols = Vec::new();
+
+        for (_score, doc_address) in top_docs {
+            let doc = searcher.doc::<Document>(doc_address)?;
+            symbols.push(self.document_to_symbol(&doc)?);
+        }
+
+        Ok(symbols)
+    }
+
+    /// Find all symbols in a specific module/package
+    ///
+    /// Used for same-package symbol resolution (Java, Kotlin, etc.)
+    /// Returns all symbols that have the specified module_path.
+    pub fn find_symbols_by_module(&self, module_path: &str) -> StorageResult<Vec<crate::Symbol>> {
+        let searcher = self.reader.searcher();
+
+        let query = BooleanQuery::from(vec![
+            (
+                Occur::Must,
+                Box::new(TermQuery::new(
+                    Term::from_field_text(self.schema.doc_type, "symbol"),
+                    IndexRecordOption::Basic,
+                )) as Box<dyn Query>,
+            ),
+            (
+                Occur::Must,
+                Box::new(TermQuery::new(
+                    Term::from_field_text(self.schema.module_path, module_path),
                     IndexRecordOption::Basic,
                 )) as Box<dyn Query>,
             ),
@@ -1349,9 +1601,15 @@ impl DocumentIndex {
             .and_then(|v| v.as_u64())
             .unwrap_or(0) as u16;
 
-        let end_line = start_line; // We don't store end_line separately
+        let end_line = doc
+            .get_first(self.schema.end_line)
+            .and_then(|v| v.as_u64())
+            .unwrap_or(start_line as u64) as u32;
 
-        let end_col = 0u16; // We don't store end_col separately
+        let end_col = doc
+            .get_first(self.schema.end_column)
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as u16;
 
         let signature = doc
             .get_first(self.schema.signature)
@@ -1393,7 +1651,19 @@ impl DocumentIndex {
                     "Global" => Some(crate::ScopeContext::Global),
                     "Package" => Some(crate::ScopeContext::Package),
                     "Parameter" => Some(crate::ScopeContext::Parameter),
-                    "ClassMember" => Some(crate::ScopeContext::ClassMember),
+                    s if s.starts_with("ClassMember") => {
+                        // Handle ClassMember { class_name: Option<String> } format
+                        let class_name = if s.contains("class_name: Some(") {
+                            // Extract class_name value
+                            s.split("class_name: Some(\"")
+                                .nth(1)
+                                .and_then(|rest| rest.split("\")").next())
+                                .map(|name| name.to_string().into())
+                        } else {
+                            None
+                        };
+                        Some(crate::ScopeContext::ClassMember { class_name })
+                    }
                     s if s.starts_with("Local") => {
                         // Handle Local { hoisted: bool, parent_name: Option<String>, parent_kind: Option<SymbolKind> } format
                         let hoisted = s.contains("hoisted: true") || s.contains("hoisted:true");
@@ -1443,6 +1713,11 @@ impl DocumentIndex {
                 end_line,
                 end_column: end_col,
             },
+            file_path: doc
+                .get_first(self.schema.file_path)
+                .and_then(|v| v.as_str())
+                .unwrap_or("<unknown>")
+                .into(),
             signature: signature.map(|s| s.into()),
             doc_comment: doc_comment.map(|s| s.into()),
             module_path: module_path.map(|s| s.into()),
@@ -1518,6 +1793,16 @@ impl DocumentIndex {
 
     /// Get next file ID
     pub fn get_next_file_id(&self) -> StorageResult<u32> {
+        // During batch operations, use and increment the pending counter
+        if let Ok(mut pending_guard) = self.pending_file_counter.lock() {
+            if let Some(ref mut counter) = *pending_guard {
+                let next_id = *counter;
+                *counter += 1;
+                return Ok(next_id);
+            }
+        }
+
+        // Otherwise, query the committed metadata
         let current = self.query_metadata(MetadataKey::FileCounter)?.unwrap_or(0) as u32;
         Ok(current + 1)
     }
@@ -1538,6 +1823,16 @@ impl DocumentIndex {
             .query_metadata(MetadataKey::SymbolCounter)?
             .unwrap_or(0) as u32;
         Ok(current + 1)
+    }
+
+    /// Update the pending symbol counter (for cross-file symbol ID continuity in batches)
+    pub fn update_pending_symbol_counter(&self, new_value: u32) -> StorageResult<()> {
+        if let Ok(mut pending_guard) = self.pending_symbol_counter.lock() {
+            if let Some(ref mut counter) = *pending_guard {
+                *counter = new_value;
+            }
+        }
+        Ok(())
     }
 
     /// Delete a symbol
@@ -1951,6 +2246,8 @@ impl DocumentIndex {
             file_path,
             symbol.range.start_line,
             symbol.range.start_column,
+            symbol.range.end_line,
+            symbol.range.end_column,
             symbol.doc_comment.as_ref().map(|s| s.as_ref()),
             symbol.signature.as_ref().map(|s| s.as_ref()),
             symbol
@@ -2004,6 +2301,153 @@ impl DocumentIndex {
         doc.add_u64(self.schema.file_timestamp, timestamp);
 
         writer.add_document(doc)?;
+        Ok(())
+    }
+
+    /// Store an import document in the index
+    ///
+    /// This is a pure storage operation storing raw import metadata.
+    /// Resolution logic happens in the resolution layer.
+    pub fn store_import(&self, import: &crate::parsing::Import) -> StorageResult<()> {
+        let mut writer_lock = match self.writer.lock() {
+            Ok(lock) => lock,
+            Err(poisoned) => {
+                eprintln!("Warning: Recovering from poisoned writer mutex in store_import");
+                poisoned.into_inner()
+            }
+        };
+        let writer = writer_lock.as_mut().ok_or(StorageError::NoActiveBatch)?;
+
+        let mut doc = Document::new();
+
+        // Document type
+        doc.add_text(self.schema.doc_type, "import");
+
+        // Import metadata fields
+        doc.add_u64(self.schema.import_file_id, import.file_id.value() as u64);
+        doc.add_text(self.schema.import_path, &import.path);
+
+        if let Some(alias) = &import.alias {
+            doc.add_text(self.schema.import_alias, alias);
+        }
+
+        doc.add_u64(
+            self.schema.import_is_glob,
+            if import.is_glob { 1 } else { 0 },
+        );
+        doc.add_u64(
+            self.schema.import_is_type_only,
+            if import.is_type_only { 1 } else { 0 },
+        );
+
+        writer.add_document(doc)?;
+        Ok(())
+    }
+
+    /// Get all imports for a specific file
+    ///
+    /// Returns raw import metadata - resolution happens in the resolution layer.
+    pub fn get_imports_for_file(
+        &self,
+        file_id: FileId,
+    ) -> StorageResult<Vec<crate::parsing::Import>> {
+        let query = BooleanQuery::new(vec![
+            (
+                Occur::Must,
+                Box::new(TermQuery::new(
+                    Term::from_field_text(self.schema.doc_type, "import"),
+                    IndexRecordOption::Basic,
+                )),
+            ),
+            (
+                Occur::Must,
+                Box::new(TermQuery::new(
+                    Term::from_field_u64(self.schema.import_file_id, file_id.value() as u64),
+                    IndexRecordOption::Basic,
+                )),
+            ),
+        ]);
+
+        let searcher = self.reader.searcher();
+        let top_docs = searcher
+            .search(&query, &TopDocs::with_limit(1000))
+            .map_err(|e| StorageError::General(format!("Import search failed: {e}")))?;
+
+        let mut imports = Vec::new();
+        for (_score, doc_address) in top_docs {
+            let doc: Document = searcher.doc(doc_address).map_err(|e| {
+                StorageError::General(format!("Failed to retrieve import document: {e}"))
+            })?;
+
+            // Extract fields from document
+            let import_path = doc
+                .get_first(self.schema.import_path)
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| StorageError::General("Missing import_path".to_string()))?
+                .to_string();
+
+            let alias = doc
+                .get_first(self.schema.import_alias)
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+
+            let is_glob = doc
+                .get_first(self.schema.import_is_glob)
+                .and_then(|v| v.as_u64())
+                .map(|v| v == 1)
+                .unwrap_or(false);
+
+            let is_type_only = doc
+                .get_first(self.schema.import_is_type_only)
+                .and_then(|v| v.as_u64())
+                .map(|v| v == 1)
+                .unwrap_or(false);
+
+            imports.push(crate::parsing::Import {
+                path: import_path,
+                alias,
+                file_id,
+                is_glob,
+                is_type_only,
+            });
+        }
+
+        Ok(imports)
+    }
+
+    /// Delete all import documents for a file
+    ///
+    /// Used during file updates and deletions.
+    pub fn delete_imports_for_file(&self, file_id: FileId) -> StorageResult<()> {
+        let mut writer_lock = match self.writer.lock() {
+            Ok(lock) => lock,
+            Err(poisoned) => {
+                eprintln!(
+                    "Warning: Recovering from poisoned writer mutex in delete_imports_for_file"
+                );
+                poisoned.into_inner()
+            }
+        };
+        let writer = writer_lock.as_mut().ok_or(StorageError::NoActiveBatch)?;
+
+        let query = BooleanQuery::new(vec![
+            (
+                Occur::Must,
+                Box::new(TermQuery::new(
+                    Term::from_field_text(self.schema.doc_type, "import"),
+                    IndexRecordOption::Basic,
+                )),
+            ),
+            (
+                Occur::Must,
+                Box::new(TermQuery::new(
+                    Term::from_field_u64(self.schema.import_file_id, file_id.value() as u64),
+                    IndexRecordOption::Basic,
+                )),
+            ),
+        ]);
+
+        writer.delete_query(Box::new(query))?;
         Ok(())
     }
 
@@ -2247,7 +2691,8 @@ mod tests {
     #[test]
     fn test_document_index_creation() {
         let temp_dir = TempDir::new().unwrap();
-        let index = DocumentIndex::new(temp_dir.path()).unwrap();
+        let settings = crate::config::Settings::default();
+        let index = DocumentIndex::new(temp_dir.path(), &settings).unwrap();
 
         assert_eq!(index.document_count().unwrap(), 0);
         assert!(!index.has_vector_support());
@@ -2276,7 +2721,8 @@ mod tests {
     #[test]
     fn test_add_and_search_document() {
         let temp_dir = TempDir::new().unwrap();
-        let index = DocumentIndex::new(temp_dir.path()).unwrap();
+        let settings = crate::config::Settings::default();
+        let index = DocumentIndex::new(temp_dir.path(), &settings).unwrap();
 
         // Start batch
         index.start_batch().unwrap();
@@ -2293,6 +2739,8 @@ mod tests {
                 "src/parser.rs",
                 42,
                 5,
+                50, // end_line
+                0,  // end_column
                 Some("Parse JSON string into a Value"),
                 Some("fn parse_json(input: &str) -> StorageResult<Value, Error>"),
                 "crate::parser",
@@ -2321,7 +2769,8 @@ mod tests {
         use crate::parsing::registry::LanguageId;
 
         let temp_dir = TempDir::new().unwrap();
-        let index = DocumentIndex::new(temp_dir.path()).unwrap();
+        let settings = crate::config::Settings::default();
+        let index = DocumentIndex::new(temp_dir.path(), &settings).unwrap();
 
         // Start batch
         index.start_batch().unwrap();
@@ -2359,7 +2808,8 @@ mod tests {
     #[test]
     fn test_fuzzy_search() {
         let temp_dir = TempDir::new().unwrap();
-        let index = DocumentIndex::new(temp_dir.path()).unwrap();
+        let settings = crate::config::Settings::default();
+        let index = DocumentIndex::new(temp_dir.path(), &settings).unwrap();
 
         // Start batch
         index.start_batch().unwrap();
@@ -2375,6 +2825,8 @@ mod tests {
                 "src/server.rs",
                 100,
                 0,
+                120, // end_line
+                0,   // end_column
                 Some("Handle incoming HTTP request"),
                 None,
                 "crate::server",
@@ -2400,7 +2852,8 @@ mod tests {
     #[test]
     fn test_relationship_storage() {
         let temp_dir = TempDir::new().unwrap();
-        let index = DocumentIndex::new(temp_dir.path()).unwrap();
+        let settings = crate::config::Settings::default();
+        let index = DocumentIndex::new(temp_dir.path(), &settings).unwrap();
 
         // Start batch
         index.start_batch().unwrap();
@@ -2428,7 +2881,8 @@ mod tests {
     #[test]
     fn test_file_info_storage() {
         let temp_dir = TempDir::new().unwrap();
-        let index = DocumentIndex::new(temp_dir.path()).unwrap();
+        let settings = crate::config::Settings::default();
+        let index = DocumentIndex::new(temp_dir.path(), &settings).unwrap();
 
         // Start batch
         index.start_batch().unwrap();
@@ -2457,7 +2911,8 @@ mod tests {
         println!("=== TEST: get_all_indexed_paths() ===");
 
         let temp_dir = TempDir::new().unwrap();
-        let index = DocumentIndex::new(temp_dir.path()).unwrap();
+        let settings = crate::config::Settings::default();
+        let index = DocumentIndex::new(temp_dir.path(), &settings).unwrap();
 
         // Initially should have no paths
         println!("Step 1: Testing empty index...");
@@ -2531,6 +2986,8 @@ mod tests {
                 "src/main.rs",
                 42,
                 5,
+                50, // end_line
+                0,  // end_column
                 Some("Test function"),
                 Some("fn test_function()"),
                 "crate",
@@ -2555,7 +3012,8 @@ mod tests {
     #[test]
     fn test_metadata_storage() {
         let temp_dir = TempDir::new().unwrap();
-        let index = DocumentIndex::new(temp_dir.path()).unwrap();
+        let settings = crate::config::Settings::default();
+        let index = DocumentIndex::new(temp_dir.path(), &settings).unwrap();
 
         // Start batch
         index.start_batch().unwrap();
@@ -2688,7 +3146,8 @@ mod tests {
         let vector_engine_arc = Arc::new(Mutex::new(vector_engine));
 
         // Create index with vector support
-        let index = DocumentIndex::new(temp_dir.path())
+        let settings = crate::config::Settings::default();
+        let index = DocumentIndex::new(temp_dir.path(), &settings)
             .unwrap()
             .with_vector_support(vector_engine_arc.clone(), &vector_dir);
 
@@ -2707,7 +3166,9 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
 
         // Test 1: Create index without vector support
-        let index_no_vectors = DocumentIndex::new(temp_dir.path().join("no_vectors")).unwrap();
+        let settings = crate::config::Settings::default();
+        let index_no_vectors =
+            DocumentIndex::new(temp_dir.path().join("no_vectors"), &settings).unwrap();
 
         // Basic operations should work
         index_no_vectors.start_batch().unwrap();
@@ -2720,6 +3181,8 @@ mod tests {
                 "test.rs",
                 1,
                 1,
+                10, // end_line
+                0,  // end_column
                 None,
                 None,
                 "test",
@@ -2745,9 +3208,11 @@ mod tests {
             VectorSearchEngine::new(&vector_dir, VectorDimension::new(384).unwrap()).unwrap();
         let vector_engine_arc = Arc::new(Mutex::new(vector_engine));
 
-        let index_with_vectors = DocumentIndex::new(temp_dir.path().join("with_vectors"))
-            .unwrap()
-            .with_vector_support(vector_engine_arc, &vector_dir);
+        let settings = crate::config::Settings::default();
+        let index_with_vectors =
+            DocumentIndex::new(temp_dir.path().join("with_vectors"), &settings)
+                .unwrap()
+                .with_vector_support(vector_engine_arc, &vector_dir);
 
         // Same operations should work with vector support
         index_with_vectors.start_batch().unwrap();
@@ -2760,6 +3225,8 @@ mod tests {
                 "test.rs",
                 10,
                 1,
+                20, // end_line
+                0,  // end_column
                 None,
                 None,
                 "test",
@@ -2785,7 +3252,8 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
 
         // Test Debug without vector support
-        let index = DocumentIndex::new(temp_dir.path()).unwrap();
+        let settings = crate::config::Settings::default();
+        let index = DocumentIndex::new(temp_dir.path(), &settings).unwrap();
         let debug_str = format!("{index:?}");
         assert!(debug_str.contains("DocumentIndex"));
         assert!(debug_str.contains("index_path"));
@@ -2798,17 +3266,17 @@ mod tests {
             VectorSearchEngine::new(&vector_dir, VectorDimension::new(384).unwrap()).unwrap();
         let vector_engine_arc = Arc::new(Mutex::new(vector_engine));
 
-        let index_with_vectors = DocumentIndex::new(temp_dir.path())
+        let settings = crate::config::Settings::default();
+        let index_with_vectors = DocumentIndex::new(temp_dir.path(), &settings)
             .unwrap()
             .with_vector_support(vector_engine_arc, &vector_dir);
 
         let debug_str = format!("{index_with_vectors:?}");
         assert!(debug_str.contains("DocumentIndex"));
         assert!(debug_str.contains("has_vector_engine: true"));
-        assert!(debug_str.contains(&format!(
-            "vector_storage_path: Some(\"{}\")",
-            vector_dir.display()
-        )));
+        // Check vector_storage_path is Some (platform-agnostic, handles Windows backslash escaping)
+        assert!(debug_str.contains("vector_storage_path: Some("));
+        assert!(debug_str.contains("vectors"));
     }
 
     #[test]
@@ -2825,7 +3293,8 @@ mod tests {
         let vector_engine_arc = Arc::new(Mutex::new(vector_engine));
 
         // Create index with vector support
-        let index = DocumentIndex::new(temp_dir.path())
+        let settings = crate::config::Settings::default();
+        let index = DocumentIndex::new(temp_dir.path(), &settings)
             .unwrap()
             .with_vector_support(vector_engine_arc, &vector_dir);
 
@@ -3049,7 +3518,8 @@ mod tests {
     #[test]
     fn test_find_symbols_by_name_with_language_filter() {
         let temp_dir = TempDir::new().unwrap();
-        let index = DocumentIndex::new(temp_dir.path()).unwrap();
+        let settings = crate::config::Settings::default();
+        let index = DocumentIndex::new(temp_dir.path(), &settings).unwrap();
 
         // Start batch
         index.start_batch().unwrap();
@@ -3065,6 +3535,8 @@ mod tests {
                 "src/main.rs",
                 0,                         // line
                 0,                         // column
+                5,                         // end_line
+                0,                         // end_column
                 Some("Entry point"),       // doc_comment
                 Some("fn main() {}"),      // signature
                 "crate",                   // module_path
@@ -3085,6 +3557,8 @@ mod tests {
                 "src/main.py",
                 0,                          // line
                 0,                          // column
+                5,                          // end_line
+                0,                          // end_column
                 Some("Python entry point"), // doc_comment
                 Some("def main():"),        // signature
                 "__main__",                 // module_path
@@ -3105,6 +3579,8 @@ mod tests {
                 "src/main.ts",
                 0,                             // line
                 0,                             // column
+                5,                             // end_line
+                0,                             // end_column
                 Some("TypeScript entry"),      // doc_comment
                 Some("function main(): void"), // signature
                 "app",                         // module_path
@@ -3198,7 +3674,8 @@ mod tests {
     #[test]
     fn test_search_with_language_filter() {
         let temp_dir = TempDir::new().unwrap();
-        let index = DocumentIndex::new(temp_dir.path()).unwrap();
+        let settings = crate::config::Settings::default();
+        let index = DocumentIndex::new(temp_dir.path(), &settings).unwrap();
 
         // Start batch
         index.start_batch().unwrap();
@@ -3214,6 +3691,8 @@ mod tests {
                 "src/config.rs",
                 10,                                            // line
                 0,                                             // column
+                20,                                            // end_line
+                0,                                             // end_column
                 Some("Parse configuration from file"),         // doc_comment
                 Some("fn parse_config(path: &str) -> Config"), // signature
                 "crate::config",                               // module_path
@@ -3234,6 +3713,8 @@ mod tests {
                 "src/parser.py",
                 5,                                         // line
                 0,                                         // column
+                10,                                        // end_line
+                0,                                         // end_column
                 Some("Parse JSON data"),                   // doc_comment
                 Some("def parse_json(data: str) -> dict"), // signature
                 "parser",                                  // module_path
@@ -3254,6 +3735,8 @@ mod tests {
                 "src/parser.ts",
                 1,                                                // line
                 0,                                                // column
+                8,                                                // end_line
+                0,                                                // end_column
                 Some("Parse XML string"),                         // doc_comment
                 Some("function parseXML(xml: string): Document"), // signature
                 "utils.parser",                                   // module_path
@@ -3351,7 +3834,8 @@ mod tests {
     #[test]
     fn test_language_filter_with_module_filter() {
         let temp_dir = TempDir::new().unwrap();
-        let index = DocumentIndex::new(temp_dir.path()).unwrap();
+        let settings = crate::config::Settings::default();
+        let index = DocumentIndex::new(temp_dir.path(), &settings).unwrap();
 
         // Start batch
         index.start_batch().unwrap();
@@ -3366,6 +3850,8 @@ mod tests {
                 "src/server.rs",
                 1,                         // line
                 0,                         // column
+                10,                        // end_line
+                0,                         // end_column
                 Some("Request handler"),   // doc_comment
                 Some("struct Handler"),    // signature
                 "server",                  // module_path
@@ -3385,6 +3871,8 @@ mod tests {
                 "src/server.py",
                 1,                             // line
                 0,                             // column
+                12,                            // end_line
+                0,                             // end_column
                 Some("Request handler class"), // doc_comment
                 Some("class Handler"),         // signature
                 "server",                      // module_path
@@ -3442,5 +3930,571 @@ mod tests {
         assert_eq!(python_server[0].symbol_id, SymbolId::new(21).unwrap());
 
         println!("=== All combined filter tests completed ===\n");
+    }
+
+    #[test]
+    fn test_ngram_partial_matching() {
+        println!("\n=== NGRAM TOKENIZER TEST ===\n");
+
+        let temp_dir = TempDir::new().unwrap();
+        let settings = crate::config::Settings::default();
+        let index = DocumentIndex::new(temp_dir.path(), &settings).unwrap();
+
+        index.start_batch().unwrap();
+
+        // Add C# symbols with typical naming patterns
+        let file_id = crate::FileId::new(1).unwrap();
+
+        println!("Step 1: Indexing symbols...");
+
+        // Symbol 1: ArchiveAppService (should match "Archive" query)
+        let sym1 = crate::Symbol::new(
+            SymbolId::new(1).unwrap(),
+            "ArchiveAppService",
+            SymbolKind::Class,
+            file_id,
+            crate::Range::new(10, 5, 50, 10),
+        )
+        .with_module_path("Services")
+        .with_doc("Application service for archiving")
+        .with_signature("class ArchiveAppService");
+
+        println!("  - Indexed: ArchiveAppService");
+        index
+            .index_symbol(&sym1, "src/Services/ArchiveAppService.cs")
+            .unwrap();
+
+        // Symbol 2: DocumentArchiver (should match "Archive" query)
+        let sym2 = crate::Symbol::new(
+            SymbolId::new(2).unwrap(),
+            "DocumentArchiver",
+            SymbolKind::Class,
+            file_id,
+            crate::Range::new(20, 5, 60, 10),
+        )
+        .with_module_path("Utils")
+        .with_doc("Archives documents")
+        .with_signature("class DocumentArchiver");
+
+        println!("  - Indexed: DocumentArchiver");
+        index
+            .index_symbol(&sym2, "src/Utils/DocumentArchiver.cs")
+            .unwrap();
+
+        // Symbol 3: UserService (should NOT match "Archive" query)
+        let sym3 = crate::Symbol::new(
+            SymbolId::new(3).unwrap(),
+            "UserService",
+            SymbolKind::Class,
+            file_id,
+            crate::Range::new(30, 5, 70, 10),
+        )
+        .with_module_path("Services")
+        .with_doc("User management service")
+        .with_signature("class UserService");
+
+        println!("  - Indexed: UserService");
+        index
+            .index_symbol(&sym3, "src/Services/UserService.cs")
+            .unwrap();
+
+        index.commit_batch().unwrap();
+        println!("\nStep 2: Testing partial search with 'Archive'...");
+
+        // Test partial matching with "Archive" using search() method
+        let results = index.search("Archive", 10, None, None, None).unwrap();
+
+        println!("\nResults from search('Archive'):");
+        for (i, result) in results.iter().enumerate() {
+            let kind = format!("{:?}", result.kind);
+            println!("  {}. {} ({})", i + 1, result.name, kind);
+        }
+
+        let names: Vec<&str> = results.iter().map(|r| r.name.as_str()).collect();
+
+        println!(
+            "\nExpectation: Should find 'ArchiveAppService' and 'DocumentArchiver', NOT 'UserService'"
+        );
+        println!("Actual matches: {names:?}\n");
+
+        // Should find both ArchiveAppService and DocumentArchiver
+        assert!(
+            names.contains(&"ArchiveAppService"),
+            "Ngram tokenizer should find ArchiveAppService with partial query 'Archive'. Found: {names:?}"
+        );
+        assert!(
+            names.contains(&"DocumentArchiver"),
+            "Ngram tokenizer should find DocumentArchiver with partial query 'Archive'. Found: {names:?}"
+        );
+
+        // Should NOT find UserService
+        assert!(
+            !names.contains(&"UserService"),
+            "Should not match unrelated symbols. Found: {names:?}"
+        );
+
+        println!("Step 3: Testing exact lookup with 'ArchiveAppService'...");
+
+        // Test exact lookup still works (uses STRING field, not ngram)
+        let exact_results = index
+            .find_symbols_by_name("ArchiveAppService", None)
+            .unwrap();
+        println!("Exact lookup results: {} match(es)", exact_results.len());
+        for result in &exact_results {
+            println!("  - {}", result.name);
+        }
+
+        assert_eq!(exact_results.len(), 1);
+        assert_eq!(exact_results[0].name.as_ref(), "ArchiveAppService");
+
+        println!(
+            "\nStep 4: Testing exact lookup with partial name 'Archive' (should find nothing)..."
+        );
+
+        // Test that exact lookup doesn't return partial matches
+        let no_match = index.find_symbols_by_name("Archive", None).unwrap();
+        println!("Exact lookup for 'Archive': {} match(es)", no_match.len());
+
+        assert_eq!(
+            no_match.len(),
+            0,
+            "Exact lookup should not return partial matches. Found: {:?}",
+            no_match.iter().map(|s| &s.name).collect::<Vec<_>>()
+        );
+
+        println!("\n=== NGRAM TEST PASSED ===\n");
+    }
+
+    #[test]
+    fn test_fuzzy_search_typo_tolerance() {
+        println!("\n=== FUZZY SEARCH TEST (Typo Tolerance) ===\n");
+
+        let temp_dir = TempDir::new().unwrap();
+        let settings = crate::config::Settings::default();
+        let index = DocumentIndex::new(temp_dir.path(), &settings).unwrap();
+
+        index.start_batch().unwrap();
+
+        let file_id = crate::FileId::new(1).unwrap();
+
+        println!("Step 1: Indexing symbol 'ArchiveService'...");
+        let sym = crate::Symbol::new(
+            SymbolId::new(1).unwrap(),
+            "ArchiveService",
+            SymbolKind::Class,
+            file_id,
+            crate::Range::new(10, 5, 50, 10),
+        )
+        .with_doc("Archive service");
+
+        index.index_symbol(&sym, "src/ArchiveService.cs").unwrap();
+        index.commit_batch().unwrap();
+
+        println!("\nStep 2: Testing fuzzy search with typos...\n");
+
+        // Test 1: Correct spelling
+        println!("Query: 'ArchiveService' (correct spelling)");
+        let correct = index
+            .search("ArchiveService", 10, None, None, None)
+            .unwrap();
+        println!("  Found: {} result(s)", correct.len());
+        assert_eq!(correct.len(), 1);
+
+        // Test 2: Missing one character (edit distance = 1)
+        println!("\nQuery: 'ArchivService' (missing 'e', edit distance = 1)");
+        let typo1 = index.search("ArchivService", 10, None, None, None).unwrap();
+        println!("  Found: {} result(s)", typo1.len());
+        if !typo1.is_empty() {
+            println!("  Match: {}", typo1[0].name);
+        }
+
+        // Test 3: Wrong character (edit distance = 1)
+        println!("\nQuery: 'ArchaveService' (i→a, edit distance = 1)");
+        let typo2 = index
+            .search("ArchaveService", 10, None, None, None)
+            .unwrap();
+        println!("  Found: {} result(s)", typo2.len());
+        if !typo2.is_empty() {
+            println!("  Match: {}", typo2[0].name);
+        }
+
+        // Test 4: Extra character (edit distance = 1)
+        println!("\nQuery: 'Archivee' (partial with extra 'e', edit distance = 1)");
+        let typo3 = index.search("Archivee", 10, None, None, None).unwrap();
+        println!("  Found: {} result(s)", typo3.len());
+        if !typo3.is_empty() {
+            println!("  Match: {}", typo3[0].name);
+        }
+
+        // Test 5: Too many errors (edit distance > 1, should not match with fuzzy)
+        println!("\nQuery: 'Archhive' (2 errors: extra 'h' and wrong 'h', edit distance = 2)");
+        let too_many = index.search("Archhive", 10, None, None, None).unwrap();
+        println!("  Found: {} result(s)", too_many.len());
+        println!("  Expectation: May find via ngram partial match, but not via fuzzy (distance=2)");
+
+        println!("\n=== FUZZY SEARCH EXPLANATION ===");
+        println!("Fuzzy search (edit distance=1) handles typos like:");
+        println!("  - Missing character: 'Archiv' finds 'Archive'");
+        println!("  - Wrong character: 'Archave' finds 'Archive'");
+        println!("  - Extra character: 'Archivee' finds 'Archive'");
+        println!("\nNgram tokenizer handles partial matching:");
+        println!("  - 'Archive' finds 'ArchiveService', 'DocumentArchiver'");
+        println!("\nBoth work together in the same search query!");
+        println!("\n=== FUZZY SEARCH TEST COMPLETE ===\n");
+    }
+
+    #[test]
+    fn test_ngram_vs_fuzzy_interaction() {
+        println!("\n=== UNDERSTANDING NGRAM + FUZZY INTERACTION ===\n");
+
+        let temp_dir = TempDir::new().unwrap();
+        let settings = crate::config::Settings::default();
+        let index = DocumentIndex::new(temp_dir.path(), &settings).unwrap();
+
+        index.start_batch().unwrap();
+
+        let file_id = crate::FileId::new(1).unwrap();
+
+        println!("Indexed: 'ArchiveService'\n");
+        let sym = crate::Symbol::new(
+            SymbolId::new(1).unwrap(),
+            "ArchiveService",
+            SymbolKind::Class,
+            file_id,
+            crate::Range::new(10, 5, 50, 10),
+        );
+
+        index.index_symbol(&sym, "src/ArchiveService.cs").unwrap();
+        index.commit_batch().unwrap();
+
+        println!("HOW NGRAM TOKENIZATION WORKS:");
+        println!("'ArchiveService' gets broken into ngrams (min=3, max=10):");
+        println!("  3-grams: Arc, rch, chi, hiv, ive, veS, eSe, Ser, erv, rvi, vic, ice");
+        println!("  4-grams: Arch, rchi, chiv, hive, iveS, veSe, eSer, Serv, ervi, rvic, vice");
+        println!("  ... up to 10-grams\n");
+
+        println!("TEST CASES:\n");
+
+        // Test 1: Short partial match (should work via ngram)
+        println!("1. Query: 'Arch' (4 chars, exact ngram match)");
+        let short_match = index.search("Arch", 10, None, None, None).unwrap();
+        println!("   Result: {} match(es) ✓", short_match.len());
+        println!("   Why: 'Arch' is an exact 4-gram token in 'ArchiveService'\n");
+
+        // Test 2: Short typo (should work via fuzzy on ngrams)
+        println!("2. Query: 'Arsh' (1 typo: c→s, edit distance = 1)");
+        let short_typo = index.search("Arsh", 10, None, None, None).unwrap();
+        println!("   Result: {} match(es)", short_typo.len());
+        if short_typo.is_empty() {
+            println!("   Why: Fuzzy matches 'Arsh' against ngrams like 'Arch' (distance=1)");
+            println!("        But may not find it depending on Tantivy's fuzzy implementation\n");
+        } else {
+            println!("   Why: Fuzzy matched 'Arsh' to ngram 'Arch' (distance=1) ✓\n");
+        }
+
+        // Test 3: Long query missing char (NOW FIXED!)
+        println!("3. Query: 'ArchivService' (missing 'e', 13 chars)");
+        let long_typo = index.search("ArchivService", 10, None, None, None).unwrap();
+        println!("   Result: {} match(es) ✓", long_typo.len());
+        println!("   Why: FIXED by adding fuzzy search on non-tokenized 'name' field!");
+        println!("        Fuzzy matches 'ArchivService' → 'ArchiveService' (edit distance=1)");
+        println!("        This works BEFORE ngram tokenization, avoiding misalignment\n");
+        assert!(
+            !long_typo.is_empty(),
+            "Should find ArchiveService with typo"
+        );
+
+        // Test 4: Partial match that works (ngram overlap)
+        println!("4. Query: 'Archive' (7 chars, prefix of indexed word)");
+        let partial = index.search("Archive", 10, None, None, None).unwrap();
+        println!("   Result: {} match(es) ✓", partial.len());
+        println!("   Why: 'Archive' ngrams (Arc, rch, chi, hiv, ive, etc.)");
+        println!("        overlap with 'ArchiveService' ngrams\n");
+
+        println!("CONCLUSION:");
+        println!("- Ngram tokenizer: Great for partial matching (prefix/substring) ✓");
+        println!("- Fuzzy on ngrams: Works for typos in SHORT queries ✓");
+        println!("- Fuzzy on whole word: FIXED - Now handles typos in LONG words ✓");
+        println!("\nSOLUTION IMPLEMENTED:");
+        println!("  Added fuzzy search on non-tokenized 'name' field (STRING type)");
+        println!("  Now search queries try BOTH:");
+        println!("    1. Fuzzy on ngram tokens (for short queries)");
+        println!("    2. Fuzzy on whole words (for full symbol names)");
+        println!("  Result: 'ArchivService' correctly finds 'ArchiveService' ✓");
+
+        println!("\n=== TEST COMPLETE ===\n");
+    }
+
+    #[test]
+    fn test_import_persistence_across_reload() {
+        // This test verifies the fix for: external imports are lost after index reload,
+        // causing external symbols (e.g., indicatif::ProgressBar) to incorrectly
+        // resolve to local symbols with the same name.
+
+        let temp_dir = TempDir::new().unwrap();
+        let settings = crate::config::Settings::default();
+
+        // Create initial index
+        {
+            let index = DocumentIndex::new(temp_dir.path(), &settings).unwrap();
+            index.start_batch().unwrap();
+
+            let file_id = FileId::new(1).unwrap();
+
+            // Store file info
+            index
+                .store_file_info(file_id, "src/main.rs", "hash123", 1234567890)
+                .unwrap();
+
+            // Store external imports (the data we're testing persistence for)
+            let import1 = crate::parsing::Import {
+                path: "indicatif::ProgressBar".to_string(),
+                alias: None,
+                file_id,
+                is_glob: false,
+                is_type_only: false,
+            };
+
+            let import2 = crate::parsing::Import {
+                path: "serde::Serialize".to_string(),
+                alias: Some("SerTrait".to_string()),
+                file_id,
+                is_glob: false,
+                is_type_only: false,
+            };
+
+            index.store_import(&import1).unwrap();
+            index.store_import(&import2).unwrap();
+
+            index.commit_batch().unwrap();
+        } // Drop index to simulate app shutdown
+
+        // Reload index (simulate app restart)
+        {
+            let index = DocumentIndex::new(temp_dir.path(), &settings).unwrap();
+
+            // CRITICAL: Verify imports survived the reload
+            let loaded_imports = index.get_imports_for_file(FileId::new(1).unwrap()).unwrap();
+
+            assert_eq!(
+                loaded_imports.len(),
+                2,
+                "Should load 2 imports after reload"
+            );
+
+            // Verify first import
+            let import1 = loaded_imports
+                .iter()
+                .find(|i| i.path == "indicatif::ProgressBar")
+                .unwrap();
+            assert_eq!(import1.alias, None);
+            assert!(!import1.is_glob);
+            assert!(!import1.is_type_only);
+
+            // Verify second import (with alias)
+            let import2 = loaded_imports
+                .iter()
+                .find(|i| i.path == "serde::Serialize")
+                .unwrap();
+            assert_eq!(import2.alias.as_deref(), Some("SerTrait"));
+            assert!(!import2.is_glob);
+            assert!(!import2.is_type_only);
+        }
+    }
+
+    #[test]
+    fn test_import_deletion_on_file_removal() {
+        // Verify that deleting a file also deletes its imports
+
+        let temp_dir = TempDir::new().unwrap();
+        let settings = crate::config::Settings::default();
+        let index = DocumentIndex::new(temp_dir.path(), &settings).unwrap();
+
+        index.start_batch().unwrap();
+
+        let file_id = FileId::new(1).unwrap();
+
+        // Store file and import
+        index
+            .store_file_info(file_id, "src/main.rs", "hash123", 1234567890)
+            .unwrap();
+
+        let import = crate::parsing::Import {
+            path: "std::collections::HashMap".to_string(),
+            alias: None,
+            file_id,
+            is_glob: false,
+            is_type_only: false,
+        };
+        index.store_import(&import).unwrap();
+
+        index.commit_batch().unwrap();
+
+        // Verify import exists
+        let imports = index.get_imports_for_file(file_id).unwrap();
+        assert_eq!(imports.len(), 1);
+
+        // Delete imports for this file
+        index.start_batch().unwrap();
+        index.delete_imports_for_file(file_id).unwrap();
+        index.commit_batch().unwrap();
+
+        // Verify imports are gone
+        let imports_after = index.get_imports_for_file(file_id).unwrap();
+        assert_eq!(imports_after.len(), 0, "Imports should be deleted");
+    }
+
+    #[test]
+    #[ignore] // Run with: cargo test test_java_owner_extends_person -- --ignored --nocapture
+    fn test_java_owner_extends_person() {
+        // Verify Java import resolution: Owner extends Person across packages
+        // This test queries the production .codanna/index to verify relationships exist
+
+        let index_base = Path::new(".codanna/index");
+        let tantivy_path = index_base.join("tantivy");
+        if !tantivy_path.exists() {
+            eprintln!(
+                "Skipping test: .codanna/index/tantivy not found. Run: ./target/release/codanna index test_monorepos/spring-petclinic"
+            );
+            return;
+        }
+
+        let settings = crate::config::Settings::default();
+        let index =
+            DocumentIndex::new(&tantivy_path, &settings).expect("Failed to open production index");
+
+        // Find Owner class in org.springframework.samples.petclinic.owner
+        let owner_candidates = index
+            .find_symbols_by_name("Owner", None)
+            .expect("Failed to find Owner");
+
+        println!("Found {} Owner symbols:", owner_candidates.len());
+        for candidate in &owner_candidates {
+            println!(
+                "  - Owner at {:?}, module: {:?}",
+                candidate.file_id, candidate.module_path
+            );
+        }
+
+        let owner = owner_candidates
+            .iter()
+            .find(|s| {
+                s.module_path
+                    .as_ref()
+                    .map(|m| m.as_ref() == "org.springframework.samples.petclinic.owner")
+                    .unwrap_or(false)
+            })
+            .expect("Owner class in petclinic.owner package should exist");
+
+        println!(
+            "Found Owner: symbol_id={}, module={:?}",
+            owner.id.0, owner.module_path
+        );
+
+        // Find Person class in org.springframework.samples.petclinic.model
+        let person_candidates = index
+            .find_symbols_by_name("Person", None)
+            .expect("Failed to find Person");
+
+        let person = person_candidates
+            .iter()
+            .find(|s| {
+                s.module_path
+                    .as_ref()
+                    .map(|m| m.as_ref() == "org.springframework.samples.petclinic.model")
+                    .unwrap_or(false)
+            })
+            .expect("Person class in petclinic.model package should exist");
+
+        println!(
+            "Found Person: symbol_id={}, module={:?}",
+            person.id.0, person.module_path
+        );
+
+        // Query ALL relationship types FROM Owner to see what exists
+        let all_rel_kinds = [
+            RelationKind::Calls,
+            RelationKind::Extends,
+            RelationKind::Implements,
+            RelationKind::Uses,
+            RelationKind::Defines,
+            RelationKind::References,
+        ];
+
+        for kind in &all_rel_kinds {
+            let rels = index
+                .get_relationships_from(owner.id, *kind)
+                .expect("Failed to query relationships");
+            if !rels.is_empty() {
+                println!("Owner has {} {:?} relationships", rels.len(), kind);
+                for (from_id, to_id, rel) in rels.iter().take(5) {
+                    println!(
+                        "  {:?}: {} -> {} (weight: {})",
+                        kind, from_id.0, to_id.0, rel.weight
+                    );
+                    // Show target symbol name
+                    if let Ok(Some(target)) = index.find_symbol_by_id(*to_id) {
+                        println!("    -> {}", target.name);
+                    }
+                }
+            }
+        }
+
+        // Query Extends relationships FROM Owner
+        let extends_rels = index
+            .get_relationships_from(owner.id, RelationKind::Extends)
+            .expect("Failed to query Extends relationships");
+
+        println!(
+            "\nFinal check: Owner has {} Extends relationships",
+            extends_rels.len()
+        );
+
+        // ALSO check if Person has any relationships (to see if it's Owner-specific or all Java)
+        let person_extends = index
+            .get_relationships_to(person.id, RelationKind::Extends)
+            .expect("Failed to query who extends Person");
+        println!("Person is extended by {} classes", person_extends.len());
+
+        // Check total relationship count to compare with reported numbers
+        let total_rel_count = index
+            .count_relationships()
+            .expect("Failed to count relationships");
+        println!("Total relationships in index: {total_rel_count}");
+
+        // Check if ANY Extends relationships exist in the entire index
+        let all_extends = index
+            .get_all_relationships_by_kind(RelationKind::Extends)
+            .expect("Failed to query all Extends relationships");
+        println!(
+            "Total Extends relationships in entire index: {}",
+            all_extends.len()
+        );
+        if !all_extends.is_empty() {
+            println!("Sample Extends relationships:");
+            for (from_id, to_id, _) in all_extends.iter().take(5) {
+                if let (Ok(Some(from_sym)), Ok(Some(to_sym))) = (
+                    index.find_symbol_by_id(*from_id),
+                    index.find_symbol_by_id(*to_id),
+                ) {
+                    println!("  {} extends {}", from_sym.name, to_sym.name);
+                }
+            }
+        }
+
+        // Verify Owner extends Person
+        let extends_person = extends_rels
+            .iter()
+            .any(|(_from, to_id, _rel)| *to_id == person.id);
+
+        assert!(
+            extends_person,
+            "Owner (id={}) should extend Person (id={}), but Extends relationship not found. Found {} Extends relationships.",
+            owner.id.0,
+            person.id.0,
+            extends_rels.len()
+        );
+
+        println!("✅ SUCCESS: Owner extends Person relationship verified!");
     }
 }

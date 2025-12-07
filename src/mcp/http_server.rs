@@ -11,6 +11,7 @@ pub async fn serve_http(config: crate::Settings, watch: bool, bind: String) -> a
     use crate::{IndexPersistence, SimpleIndexer};
     use axum::Router;
     use rmcp::transport::{SseServer, sse_server::SseServerConfig};
+    use std::path::PathBuf;
     use std::sync::Arc;
     use std::time::Duration;
     use tokio::sync::RwLock;
@@ -118,6 +119,47 @@ pub async fn serve_http(config: crate::Settings, watch: bool, bind: String) -> a
             Err(e) => {
                 eprintln!("Failed to start file watcher: {e}");
                 eprintln!("Continuing without file watching");
+            }
+        }
+
+        // Start config file watcher (watches settings.toml for indexed_paths changes)
+        use crate::indexing::ConfigFileWatcher;
+
+        let config_watcher_indexer = indexer.clone();
+        let config_watcher_broadcaster = broadcaster.clone();
+        let settings_path = config
+            .workspace_root
+            .clone()
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+            .join(".codanna/settings.toml");
+
+        match ConfigFileWatcher::new(
+            settings_path.clone(),
+            config_watcher_indexer,
+            config.mcp.debug,
+        ) {
+            Ok(config_watcher) => {
+                let config_watcher = config_watcher.with_broadcaster(config_watcher_broadcaster);
+                let config_watcher_ct = ct.clone();
+                tokio::spawn(async move {
+                    tokio::select! {
+                        result = config_watcher.watch() => {
+                            if let Err(e) = result {
+                                eprintln!("Config watcher error: {e}");
+                            }
+                        }
+                        _ = config_watcher_ct.cancelled() => {
+                            eprintln!("Config watcher stopped by cancellation token");
+                        }
+                    }
+                });
+                eprintln!(
+                    "Config watcher started - monitoring {}",
+                    settings_path.display()
+                );
+            }
+            Err(e) => {
+                eprintln!("Failed to start config watcher: {e}");
             }
         }
     }

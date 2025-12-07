@@ -22,6 +22,11 @@ pub struct IndexMetadata {
 
     /// Last modification timestamp
     pub last_modified: u64,
+
+    /// Directories that were indexed (canonicalized paths)
+    /// Used to detect config changes and auto-sync on load
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub indexed_paths: Option<Vec<PathBuf>>,
 }
 
 /// Describes where the index data came from
@@ -46,6 +51,7 @@ impl Default for IndexMetadata {
             symbol_count: 0,
             file_count: 0,
             last_modified: crate::indexing::get_utc_timestamp(),
+            indexed_paths: None,
         }
     }
 }
@@ -60,6 +66,12 @@ impl IndexMetadata {
     pub fn update_counts(&mut self, symbol_count: u32, file_count: u32) {
         self.symbol_count = symbol_count;
         self.file_count = file_count;
+        self.last_modified = crate::indexing::get_utc_timestamp();
+    }
+
+    /// Update indexed paths from the indexer
+    pub fn update_indexed_paths(&mut self, paths: Vec<PathBuf>) {
+        self.indexed_paths = Some(paths);
         self.last_modified = crate::indexing::get_utc_timestamp();
     }
 

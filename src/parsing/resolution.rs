@@ -4,7 +4,7 @@
 //! its own resolution logic while keeping the indexer language-agnostic.
 
 use super::context::ScopeType;
-use crate::{FileId, SymbolId};
+use crate::{FileId, SymbolId, parsing::Import};
 use std::collections::HashMap;
 
 /// Scope levels that work across all languages
@@ -18,6 +18,30 @@ pub enum ScopeLevel {
     Package,
     /// Global/project scope (public exports)
     Global,
+}
+
+/// Classification of where an import originates from
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImportOrigin {
+    /// The import refers to code defined within the current project/crate
+    Internal,
+    /// The import comes from an external dependency that is not indexed
+    External,
+    /// The origin could not be determined
+    Unknown,
+}
+
+/// Binding information for an import exposed to a file
+#[derive(Debug, Clone)]
+pub struct ImportBinding {
+    /// Original import record extracted from the parser or index
+    pub import: Import,
+    /// The name that becomes visible in the file (alias or trailing segment)
+    pub exposed_name: String,
+    /// Where the import originates from
+    pub origin: ImportOrigin,
+    /// Resolved local symbol, if any
+    pub resolved_symbol: Option<SymbolId>,
 }
 
 /// Language-agnostic resolution scope
@@ -76,6 +100,89 @@ pub trait ResolutionScope: Send + Sync {
         // Languages can override for relationship-specific logic
         let _ = (from_name, kind, from_file); // Unused in default impl
         self.resolve(to_name)
+    }
+
+    /// Populate import records into the resolution context
+    ///
+    /// Called during context building to load import statements from the index.
+    /// Each language converts Import records into their internal representation
+    /// for later use in is_external_import() checks.
+    ///
+    /// # Parameters
+    /// - `imports`: List of Import records from the index for this file
+    ///
+    /// # Default Behavior
+    /// Does nothing - languages that need import tracking must override this.
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// // Rust context would call add_import() for each Import record
+    /// for import in imports {
+    ///     rust_context.add_import(import.path, import.alias);
+    /// }
+    /// ```
+    fn populate_imports(&mut self, imports: &[crate::parsing::Import]) {
+        let _ = imports; // Unused in default impl
+    }
+
+    /// Register a processed import binding for later queries
+    ///
+    /// Default implementation ignores the binding. Languages that need import-aware
+    /// resolution should override to record the binding.
+    fn register_import_binding(&mut self, binding: ImportBinding) {
+        let _ = binding;
+    }
+
+    /// Retrieve a previously registered import binding by exposed name
+    ///
+    /// Implementations should return a cloned binding if one exists. Default returns None.
+    fn import_binding(&self, _name: &str) -> Option<ImportBinding> {
+        None
+    }
+
+    /// Resolve an expression (e.g., receiver) to a concrete type string if available
+    ///
+    /// Default implementation returns None. Languages can override to provide
+    /// richer resolution data (e.g., Kotlin generic flow).
+    fn resolve_expression_type(&self, _expr: &str) -> Option<String> {
+        None
+    }
+
+    /// Check if a name refers to an external import
+    ///
+    /// This method determines if a symbol name comes from an external library
+    /// or package that is not indexed in the current codebase.
+    ///
+    /// When true, the indexer will not attempt to resolve methods or members
+    /// of this symbol, preventing incorrect resolution to local symbols with
+    /// the same name.
+    ///
+    /// # Parameters
+    /// - `name`: The symbol name to check (e.g., "ProgressBar", "React")
+    ///
+    /// # Returns
+    /// true if the name is from an external import with no local symbol_id
+    ///
+    /// # Default Behavior
+    /// Returns false - assumes all symbols are local or can be resolved.
+    /// Languages should override this to check their import lists.
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// // Rust: use indicatif::ProgressBar;
+    /// context.is_external_import("ProgressBar") // true - external crate
+    /// context.is_external_import("MyStruct")     // false - local symbol
+    /// ```
+    fn is_external_import(&self, name: &str) -> bool {
+        if let Some(binding) = self.import_binding(name) {
+            match binding.origin {
+                ImportOrigin::External => true,
+                ImportOrigin::Internal => binding.resolved_symbol.is_none(),
+                ImportOrigin::Unknown => binding.resolved_symbol.is_none(),
+            }
+        } else {
+            false
+        }
     }
 
     /// Check if a relationship between two symbol kinds is valid
@@ -272,6 +379,7 @@ pub struct GenericResolutionContext {
     file_id: FileId, // Kept for future use when we need file-specific resolution
     symbols: HashMap<ScopeLevel, HashMap<String, SymbolId>>,
     scope_stack: Vec<ScopeType>,
+    import_bindings: HashMap<String, ImportBinding>,
 }
 
 impl GenericResolutionContext {
@@ -287,6 +395,7 @@ impl GenericResolutionContext {
             file_id,
             symbols,
             scope_stack: vec![ScopeType::Global],
+            import_bindings: HashMap::new(),
         }
     }
 
@@ -351,6 +460,15 @@ impl ResolutionScope for GenericResolutionContext {
             }
         }
         result
+    }
+
+    fn register_import_binding(&mut self, binding: ImportBinding) {
+        self.import_bindings
+            .insert(binding.exposed_name.clone(), binding);
+    }
+
+    fn import_binding(&self, name: &str) -> Option<ImportBinding> {
+        self.import_bindings.get(name).cloned()
     }
 }
 

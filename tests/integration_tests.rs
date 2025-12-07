@@ -10,6 +10,9 @@ mod test_mcp_schema;
 #[path = "integration/embedding_model_comparison.rs"]
 mod embedding_model_comparison;
 
+#[path = "integration/reranking_comparison.rs"]
+mod reranking_comparison;
+
 #[path = "integration/test_resolution_persistence.rs"]
 mod test_resolution_persistence;
 
@@ -39,3 +42,15 @@ mod test_provider_initialization;
 
 #[path = "integration/test_typescript_alias_relationships.rs"]
 mod test_typescript_alias_relationships;
+
+#[path = "integration/test_typescript_object_property_call.rs"]
+mod test_typescript_object_property_call;
+
+#[path = "integration/test_external_import_resolution.rs"]
+mod test_external_import_resolution;
+
+#[path = "integration/test_gdscript_mcp.rs"]
+mod test_gdscript_mcp;
+
+#[path = "integration/test_kotlin_semantic_search.rs"]
+mod test_kotlin_semantic_search;

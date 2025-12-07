@@ -20,7 +20,7 @@ use figment::{
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -44,6 +44,10 @@ pub struct Settings {
     /// Indexing configuration
     #[serde(default)]
     pub indexing: IndexingConfig,
+
+    /// Cached canonicalized paths for fast lookups (not serialized)
+    #[serde(skip)]
+    pub indexed_paths_cache: Vec<PathBuf>,
 
     /// Language-specific settings
     #[serde(default)]
@@ -76,6 +80,16 @@ pub struct IndexingConfig {
     #[serde(default = "default_parallel_threads")]
     pub parallel_threads: usize,
 
+    /// Tantivy heap size in megabytes
+    /// Controls memory usage before flushing to disk
+    #[serde(default = "default_tantivy_heap_mb")]
+    pub tantivy_heap_mb: usize,
+
+    /// Maximum retry attempts for transient file system errors
+    /// Handles permission delays from antivirus, SELinux, etc.
+    #[serde(default = "default_max_retry_attempts")]
+    pub max_retry_attempts: u32,
+
     /// Project root directory (defaults to workspace root)
     /// Used for gitignore resolution and module path calculation
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -84,6 +98,11 @@ pub struct IndexingConfig {
     /// Patterns to ignore during indexing
     #[serde(default)]
     pub ignore_patterns: Vec<String>,
+
+    /// List of directories to index
+    /// This list is managed by the add-dir and remove-dir commands
+    #[serde(default)]
+    pub indexed_paths: Vec<PathBuf>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -214,6 +233,12 @@ fn default_index_path() -> PathBuf {
 fn default_parallel_threads() -> usize {
     num_cpus::get()
 }
+fn default_tantivy_heap_mb() -> usize {
+    50 // Universal default that balances performance and permissions
+}
+fn default_max_retry_attempts() -> u32 {
+    3 // Exponential backoff: 100ms, 200ms, 400ms
+}
 fn default_true() -> bool {
     true
 }
@@ -250,6 +275,7 @@ impl Default for Settings {
             workspace_root: None,
             debug: false,
             indexing: IndexingConfig::default(),
+            indexed_paths_cache: Vec::new(),
             languages: generate_language_defaults(), // Now uses registry
             mcp: McpConfig::default(),
             semantic_search: SemanticSearchConfig::default(),
@@ -264,6 +290,8 @@ impl Default for IndexingConfig {
     fn default() -> Self {
         Self {
             parallel_threads: default_parallel_threads(),
+            tantivy_heap_mb: default_tantivy_heap_mb(),
+            max_retry_attempts: default_max_retry_attempts(),
             project_root: None,
             ignore_patterns: vec![
                 "target/**".to_string(),
@@ -271,6 +299,7 @@ impl Default for IndexingConfig {
                 ".git/**".to_string(),
                 "*.generated.*".to_string(),
             ],
+            indexed_paths: Vec::new(),
         }
     }
 }
@@ -473,6 +502,10 @@ fn fallback_minimal_languages() -> HashMap<String, LanguageConfig> {
 }
 
 impl Settings {
+    fn sync_indexed_path_cache(&mut self) {
+        self.indexed_paths_cache = self.indexing.indexed_paths.clone();
+    }
+
     /// Create settings specifically for init_config_file
     /// This populates all dynamic fields based on the current environment
     pub fn for_init() -> Result<Self, Box<dyn std::error::Error>> {
@@ -515,13 +548,14 @@ impl Settings {
                 if settings.workspace_root.is_none() {
                     settings.workspace_root = Self::workspace_root();
                 }
+                settings.sync_indexed_path_cache();
                 settings
             })
     }
 
     /// Find the workspace root by looking for .codanna directory
     /// Searches from current directory up to root
-    fn find_workspace_config() -> Option<PathBuf> {
+    pub fn find_workspace_config() -> Option<PathBuf> {
         let current = std::env::current_dir().ok()?;
         let local_dir = crate::init::local_dir_name();
 
@@ -589,6 +623,10 @@ impl Settings {
             .merge(Toml::file(path))
             .merge(Env::prefixed("CI_").split("_"))
             .extract()
+            .map(|mut settings: Settings| {
+                settings.sync_indexed_path_cache();
+                settings
+            })
             .map_err(Box::new)
     }
 
@@ -646,7 +684,20 @@ impl Settings {
 
         // Initialize global directories and symlink
         crate::init::init_global_dirs()?;
-        crate::init::create_fastembed_symlink()?;
+
+        // Try to create symlink, but don't fail if it doesn't work (Windows privileges)
+        // The symlink is optional since we use with_cache_dir() API in fastembed 5.0+
+        if let Err(e) = crate::init::create_fastembed_symlink() {
+            eprintln!("Note: Could not create model cache symlink: {e}");
+            eprintln!("      This is normal on Windows without Developer Mode enabled.");
+            eprintln!("      Models will be managed via cache directory API instead.");
+        }
+
+        // Create index directory structure (including tantivy subdirectory)
+        let index_path = PathBuf::from(crate::init::local_dir_name()).join("index");
+        std::fs::create_dir_all(&index_path)?;
+        let tantivy_path = index_path.join("tantivy");
+        std::fs::create_dir_all(&tantivy_path)?;
 
         // Check if project is already registered (by path in registry or by local file)
         let local_dir = crate::init::local_dir_name();
@@ -710,8 +761,22 @@ impl Settings {
                 result.push_str(
                     "# Number of parallel threads for indexing (defaults to CPU count)\n",
                 );
+            } else if line.starts_with("tantivy_heap_mb = ") {
+                result.push_str("\n# Tantivy heap size in megabytes\n");
+                result.push_str("# Reduce to 15-25MB if you have permission issues (antivirus, SELinux, containers)\n");
+                result.push_str(
+                    "# Increase to 100-200MB if you have plenty of RAM and no restrictions\n",
+                );
+            } else if line.starts_with("max_retry_attempts = ") {
+                result.push_str("\n# Retry attempts for transient file system errors\n");
+                result.push_str("# Exponential backoff: 100ms, 200ms, 400ms delays\n");
             } else if line.starts_with("ignore_patterns = ") {
                 result.push_str("\n# Additional patterns to ignore during indexing\n");
+            } else if line.starts_with("indexed_paths = ") {
+                result.push_str("\n# List of directories to index\n");
+                result.push_str("# Add folders using: codanna add-dir <path>\n");
+                result.push_str("# Remove folders using: codanna remove-dir <path>\n");
+                result.push_str("# List all folders using: codanna list-dirs\n");
             } else if line == "[mcp]" {
                 result.push_str("\n[mcp]\n");
                 prev_line_was_section = true;
@@ -734,6 +799,19 @@ impl Settings {
                 // enabled field in semantic_search - comment already added above
             } else if line.starts_with("model = ") {
                 result.push_str("\n# Model to use for embeddings\n");
+                result.push_str(
+                    "# Note: Changing models requires re-indexing (codanna index --force)\n",
+                );
+                result.push_str("# - AllMiniLML6V2: English-only, 384 dimensions (default)\n");
+                result.push_str("# - MultilingualE5Small: 94 languages including, 384 dimensions (recommended for multilingual)\n");
+                result.push_str(
+                    "# - MultilingualE5Base: 94 languages, 768 dimensions (better quality)\n",
+                );
+                result.push_str(
+                    "# - MultilingualE5Large: 94 languages, 1024 dimensions (best quality)\n",
+                );
+                result.push_str("# - BGESmallZHV15: Chinese-specialized, 512 dimensions\n");
+                result.push_str("# - See documentation for full list of available models\n");
             } else if line.starts_with("threshold = ") {
                 result.push_str("\n# Similarity threshold for search results (0.0 to 1.0)\n");
             } else if line == "[file_watch]" {
@@ -766,7 +844,7 @@ impl Settings {
             } else if line.starts_with("[languages.") {
                 if !in_languages_section {
                     result.push_str("\n# Language-specific settings\n");
-                    result.push_str("# Currently supported: Rust, Python, PHP, Typescript, Go\n");
+                    result.push_str("# Currently supported: Rust, Python, PHP, TypeScript, Go, C, C++, CSharp, Gdscript\n");
                     in_languages_section = true;
                 }
                 result.push('\n');
@@ -869,6 +947,78 @@ __pycache__/
         }
 
         Ok(())
+    }
+
+    /// Add a folder to the list of indexed paths
+    pub fn add_indexed_path(&mut self, path: PathBuf) -> Result<(), String> {
+        // Canonicalize the path to avoid duplicates
+        let canonical_path = path
+            .canonicalize()
+            .map_err(|e| format!("Invalid path: {e}"))?;
+
+        // Track whether we should remove child paths that are covered by the new entry
+        let mut has_descendants = false;
+
+        // Check if path already exists or is covered by an existing parent
+        for existing in &self.indexed_paths_cache {
+            if *existing == canonical_path {
+                return Err(format!("Path already indexed: {}", path.display()));
+            }
+
+            // If an existing entry is an ancestor of the new path, treat as already indexed
+            if canonical_path.starts_with(existing) {
+                return Err(format!(
+                    "Path already indexed: {} (covered by {})",
+                    path.display(),
+                    existing.display()
+                ));
+            }
+
+            // Record descendant paths so we can prune them before inserting the parent
+            if existing.starts_with(&canonical_path) {
+                has_descendants = true;
+            }
+        }
+
+        if has_descendants {
+            // Remove any paths that are descendants of the new canonical path
+            self.indexing
+                .indexed_paths
+                .retain(|existing| !existing.starts_with(&canonical_path));
+            self.indexed_paths_cache
+                .retain(|existing| !existing.starts_with(&canonical_path));
+        }
+
+        // Add the path
+        self.indexing.indexed_paths.push(canonical_path.clone());
+        self.indexed_paths_cache.push(canonical_path);
+        Ok(())
+    }
+
+    /// Remove a folder from the list of indexed paths
+    pub fn remove_indexed_path(&mut self, path: &Path) -> Result<(), String> {
+        let canonical_path = path
+            .canonicalize()
+            .map_err(|e| format!("Invalid path: {e}"))?;
+
+        let original_len = self.indexing.indexed_paths.len();
+        self.indexing.indexed_paths.retain(|p| p != &canonical_path);
+        self.indexed_paths_cache.retain(|p| p != &canonical_path);
+
+        if self.indexing.indexed_paths.len() == original_len {
+            return Err(format!(
+                "Path not found in indexed paths: {}",
+                path.display()
+            ));
+        }
+
+        Ok(())
+    }
+
+    /// Get all indexed paths
+    /// Returns empty vector if none are configured (maintains backward compatibility)
+    pub fn get_indexed_paths(&self) -> Vec<PathBuf> {
+        self.indexing.indexed_paths.clone()
     }
 }
 
@@ -1097,5 +1247,212 @@ enabled = true
             settings.file_watch.enabled, settings.file_watch.debounce_ms
         );
         println!("=== TEST PASSED ===");
+    }
+
+    #[test]
+    fn test_add_indexed_path() {
+        let temp_dir = TempDir::new().unwrap();
+        let test_folder = temp_dir.path().join("test_folder");
+        fs::create_dir(&test_folder).unwrap();
+
+        let mut settings = Settings::default();
+
+        // Add a path
+        assert!(settings.add_indexed_path(test_folder.clone()).is_ok());
+        assert_eq!(settings.indexing.indexed_paths.len(), 1);
+
+        // Try to add the same path again - should fail
+        let result = settings.add_indexed_path(test_folder.clone());
+        assert!(result.is_err());
+        assert_eq!(settings.indexing.indexed_paths.len(), 1);
+    }
+
+    #[test]
+    fn test_remove_indexed_path() {
+        let temp_dir = TempDir::new().unwrap();
+        let test_folder = temp_dir.path().join("test_folder");
+        fs::create_dir(&test_folder).unwrap();
+
+        let mut settings = Settings::default();
+
+        // Add a path
+        settings.add_indexed_path(test_folder.clone()).unwrap();
+        assert_eq!(settings.indexing.indexed_paths.len(), 1);
+
+        // Remove the path
+        assert!(settings.remove_indexed_path(&test_folder).is_ok());
+        assert_eq!(settings.indexing.indexed_paths.len(), 0);
+
+        // Try to remove it again - should fail
+        let result = settings.remove_indexed_path(&test_folder);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_multiple_indexed_paths() {
+        let temp_dir = TempDir::new().unwrap();
+        let folder1 = temp_dir.path().join("folder1");
+        let folder2 = temp_dir.path().join("folder2");
+        let folder3 = temp_dir.path().join("folder3");
+
+        fs::create_dir(&folder1).unwrap();
+        fs::create_dir(&folder2).unwrap();
+        fs::create_dir(&folder3).unwrap();
+
+        let mut settings = Settings::default();
+
+        // Add multiple paths
+        settings.add_indexed_path(folder1.clone()).unwrap();
+        settings.add_indexed_path(folder2.clone()).unwrap();
+        settings.add_indexed_path(folder3.clone()).unwrap();
+
+        assert_eq!(settings.indexing.indexed_paths.len(), 3);
+
+        // Remove one path
+        settings.remove_indexed_path(&folder2).unwrap();
+        assert_eq!(settings.indexing.indexed_paths.len(), 2);
+
+        // Verify the right paths remain
+        let canonical_folder1 = folder1.canonicalize().unwrap();
+        let canonical_folder3 = folder3.canonicalize().unwrap();
+
+        let remaining_paths: Vec<_> = settings
+            .indexing
+            .indexed_paths
+            .iter()
+            .filter_map(|p| p.canonicalize().ok())
+            .collect();
+
+        assert!(remaining_paths.contains(&canonical_folder1));
+        assert!(remaining_paths.contains(&canonical_folder3));
+    }
+
+    #[test]
+    fn test_add_indexed_path_skips_child_when_parent_exists() {
+        let temp_dir = TempDir::new().unwrap();
+        let parent = temp_dir.path().join("parent");
+        let child = parent.join("child");
+
+        fs::create_dir_all(&child).unwrap();
+
+        let mut settings = Settings::default();
+        settings.add_indexed_path(parent.clone()).unwrap();
+        assert_eq!(settings.indexing.indexed_paths.len(), 1);
+
+        let result = settings.add_indexed_path(child.clone());
+        assert!(result.is_err());
+        assert_eq!(settings.indexing.indexed_paths.len(), 1);
+
+        let error_message = result.unwrap_err();
+        assert!(
+            error_message.contains("already indexed"),
+            "expected duplicate error, got: {error_message}"
+        );
+    }
+
+    #[test]
+    fn test_add_indexed_path_replaces_children_when_adding_parent() {
+        let temp_dir = TempDir::new().unwrap();
+        let parent = temp_dir.path().join("parent");
+        let child = parent.join("child");
+
+        fs::create_dir_all(&child).unwrap();
+
+        let mut settings = Settings::default();
+        settings.add_indexed_path(child.clone()).unwrap();
+        assert_eq!(settings.indexing.indexed_paths.len(), 1);
+
+        settings.add_indexed_path(parent.clone()).unwrap();
+        assert_eq!(settings.indexing.indexed_paths.len(), 1);
+
+        let stored = settings
+            .indexing
+            .indexed_paths
+            .first()
+            .expect("expected parent path");
+        assert_eq!(stored, &parent.canonicalize().unwrap());
+    }
+
+    #[test]
+    fn test_get_indexed_paths_with_default() {
+        let settings = Settings::default();
+
+        // Should return empty vector when no paths configured (backward compatible)
+        let paths = settings.get_indexed_paths();
+        assert_eq!(paths.len(), 0);
+    }
+
+    #[test]
+    fn test_get_indexed_paths_with_configured_paths() {
+        let temp_dir = TempDir::new().unwrap();
+        let test_folder = temp_dir.path().join("test_folder");
+        fs::create_dir(&test_folder).unwrap();
+
+        let mut settings = Settings::default();
+        settings.add_indexed_path(test_folder.clone()).unwrap();
+
+        // Should return the configured paths
+        let paths = settings.get_indexed_paths();
+        assert_eq!(paths.len(), 1);
+
+        let canonical_test = test_folder.canonicalize().unwrap();
+        let canonical_returned = paths[0].canonicalize().unwrap();
+        assert_eq!(canonical_returned, canonical_test);
+    }
+
+    #[test]
+    fn test_indexed_paths_from_toml() {
+        let temp_dir = TempDir::new().unwrap();
+        let config_path = temp_dir.path().join("settings.toml");
+        let test_folder1 = temp_dir.path().join("src");
+        let test_folder2 = temp_dir.path().join("lib");
+
+        fs::create_dir(&test_folder1).unwrap();
+        fs::create_dir(&test_folder2).unwrap();
+
+        // Convert paths to strings with forward slashes for TOML compatibility
+        let path1_str = test_folder1.display().to_string().replace('\\', "/");
+        let path2_str = test_folder2.display().to_string().replace('\\', "/");
+
+        let toml_content = format!(
+            r#"
+version = 1
+
+[indexing]
+indexed_paths = ["{path1_str}", "{path2_str}"]
+"#
+        );
+
+        fs::write(&config_path, toml_content).unwrap();
+
+        let settings = Settings::load_from(&config_path).unwrap();
+        assert_eq!(settings.indexing.indexed_paths.len(), 2);
+        assert_eq!(settings.indexing.indexed_paths[0], test_folder1);
+        assert_eq!(settings.indexing.indexed_paths[1], test_folder2);
+    }
+
+    #[test]
+    fn test_save_indexed_paths_to_toml() {
+        let temp_dir = TempDir::new().unwrap();
+        let config_path = temp_dir.path().join("settings.toml");
+        let test_folder = temp_dir.path().join("test_folder");
+
+        fs::create_dir(&test_folder).unwrap();
+
+        let mut settings = Settings::default();
+        settings.add_indexed_path(test_folder.clone()).unwrap();
+
+        // Save to file
+        settings.save(&config_path).unwrap();
+
+        // Load from file and verify
+        let loaded_settings = Settings::load_from(&config_path).unwrap();
+        assert_eq!(loaded_settings.indexing.indexed_paths.len(), 1);
+
+        let canonical_test = test_folder.canonicalize().unwrap();
+        let canonical_loaded = loaded_settings.indexing.indexed_paths[0]
+            .canonicalize()
+            .unwrap();
+        assert_eq!(canonical_loaded, canonical_test);
     }
 }

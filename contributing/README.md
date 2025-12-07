@@ -6,6 +6,7 @@ Thank you for your interest in contributing to Codanna! This guide focuses on th
 
 - **[Development Guidelines](./development/guidelines.md)** - Rust coding principles (MUST READ)
 - **[Adding Language Support](./development/language-support.md)** - Complete language implementation guide
+- **[CI Local/Remote Parity](./development/ci-local-remote-parity.md)** - Ensuring local and remote CI match
 - **[Development Setup](#development-setup)** - Local environment setup
 - **[Testing Workflow](#testing-your-changes)** - Pre-commit and CI/CD scripts
 
@@ -67,6 +68,27 @@ sudo dnf install pkgconfig openssl-devel
    # Run quick checks before committing
    ./contributing/scripts/quick-check.sh
    ```
+
+### Recommended: Codanna Plugin for Claude Code
+
+If you use Claude Code, install the Codanna plugin for better code navigation:
+
+```bash
+# Add the Codanna marketplace
+/plugin marketplace add bartolli/codanna-plugins
+
+# Install the plugin
+/plugin install codanna-cc@codanna-plugins
+
+# Navigate the codebase with /x-ray
+/codanna-cc:x-ray "How does symbol resolution work?"
+/codanna-cc:x-ray "Where is JSX component tracking implemented?"
+
+# Look up specific symbols
+/codanna-cc:symbol TypeScriptParser
+```
+
+The plugin indexes this codebase and provides semantic search, making it easier to understand the architecture and find implementation details.
 
 ## Project Structure
 
@@ -189,8 +211,6 @@ This replicates the complete GitHub Actions workflow.
 
 ## Development Guidelines
 
-### Mandatory Reading
-
 **IMPORTANT**: All code must follow our [Rust Development Guidelines](./development/guidelines.md). Key principles:
 
 1. **Zero-Cost Abstractions**: No unnecessary allocations
@@ -218,17 +238,17 @@ This replicates the complete GitHub Actions workflow.
 
 ### Language Support
 
-> **✅ Ready for New Languages (v0.5.0):** The language registry architecture is stable and production-ready. All four existing languages demonstrate the complete implementation pattern.
-
 See [Adding Language Support](./development/language-support.md) for the complete guide. Critical requirements:
 
-- [ ] **5 required files** in `src/parsing/{language}/` directory
+- [ ] **6 required files** in `src/parsing/{language}/` directory
 - [ ] **Complete signature extraction** for all symbol types
 - [ ] **Language-specific resolution logic** in resolution.rs
 - [ ] **Registry registration** and tree-sitter dependency
 - [ ] **Comprehensive test coverage** with ABI-15 exploration
 
 ### New Commands
+
+> You are free to add any command you find useful for your workflow. However, if you plan to make a PR, please open an Issue firs, outline the problem the feature aims to solve and let's discuss it.
 
 1. Add command to CLI enum in `src/main.rs`
 2. Implement handler function
@@ -310,15 +330,12 @@ Brief description of changes
 ## Code of Conduct
 
 - Be respectful and inclusive
-- Welcome newcomers and help them get started
 - Focus on constructive feedback
 - Assume good intentions
 
 ## Recognition
 
 Contributors are recognized in:
-- Release notes
-- CONTRIBUTORS.md file
 - GitHub contributors page
 
 We're in an era where AI agents are getting smarter and need scalable, fast, and precise context on demand. Context integration matters.

@@ -4,9 +4,12 @@
 //! Validates language enablement and provides discovery of supported languages.
 
 use super::{
-    CBehavior, CParser, CppBehavior, CppParser, GoBehavior, GoParser, Language, LanguageBehavior,
-    LanguageId, LanguageParser, NixBehavior, NixParser, PhpBehavior, PhpParser, PythonBehavior, 
-    PythonParser, RustBehavior, RustParser, TypeScriptBehavior, TypeScriptParser, get_registry,
+    CBehavior, CParser, CSharpBehavior, CSharpParser, CppBehavior, CppParser, GdscriptBehavior,
+    GdscriptParser, GoBehavior, GoParser, JavaBehavior, JavaParser, JavaScriptBehavior,
+    JavaScriptParser, KotlinBehavior, KotlinParser, Language, LanguageBehavior, LanguageId,
+    LanguageParser, NixBehavior, NixParser, PhpBehavior, PhpParser, PythonBehavior, PythonParser,
+    RustBehavior, RustParser, SwiftBehavior, SwiftParser, TypeScriptBehavior, TypeScriptParser,
+    get_registry,
 };
 use crate::{IndexError, IndexResult, Settings};
 use std::sync::Arc;
@@ -163,6 +166,26 @@ impl ParserFactory {
                 let parser = CppParser::new().map_err(|e| IndexError::General(e.to_string()))?;
                 Ok(Box::new(parser))
             }
+            Language::CSharp => {
+                let parser = CSharpParser::new().map_err(|e| IndexError::General(e.to_string()))?;
+                Ok(Box::new(parser))
+            }
+            Language::Gdscript => {
+                let parser = GdscriptParser::new().map_err(IndexError::General)?;
+                Ok(Box::new(parser))
+            }
+            Language::Java => {
+                let parser = JavaParser::new().map_err(|e| IndexError::General(e.to_string()))?;
+                Ok(Box::new(parser))
+            }
+            Language::Kotlin => {
+                let parser = KotlinParser::new().map_err(|e| IndexError::General(e.to_string()))?;
+                Ok(Box::new(parser))
+            }
+            Language::Swift => {
+                let parser = SwiftParser::new().map_err(|e| IndexError::General(e.to_string()))?;
+                Ok(Box::new(parser))
+            }
         }
     }
 
@@ -232,10 +255,12 @@ impl ParserFactory {
                 }
             }
             Language::JavaScript => {
-                return Err(IndexError::General(format!(
-                    "{} parser not yet implemented.",
-                    language.name()
-                )));
+                let parser =
+                    JavaScriptParser::new().map_err(|e| IndexError::General(e.to_string()))?;
+                ParserWithBehavior {
+                    parser: Box::new(parser),
+                    behavior: Box::new(JavaScriptBehavior::new()),
+                }
             }
             Language::Go => {
                 let parser = GoParser::new().map_err(|e| IndexError::General(e.to_string()))?;
@@ -263,6 +288,41 @@ impl ParserFactory {
                 ParserWithBehavior {
                     parser: Box::new(parser),
                     behavior: Box::new(CppBehavior::new()),
+                }
+            }
+            Language::CSharp => {
+                let parser = CSharpParser::new().map_err(|e| IndexError::General(e.to_string()))?;
+                ParserWithBehavior {
+                    parser: Box::new(parser),
+                    behavior: Box::new(CSharpBehavior::new()),
+                }
+            }
+            Language::Gdscript => {
+                let parser = GdscriptParser::new().map_err(IndexError::General)?;
+                ParserWithBehavior {
+                    parser: Box::new(parser),
+                    behavior: Box::new(GdscriptBehavior::new()),
+                }
+            }
+            Language::Java => {
+                let parser = JavaParser::new().map_err(|e| IndexError::General(e.to_string()))?;
+                ParserWithBehavior {
+                    parser: Box::new(parser),
+                    behavior: Box::new(JavaBehavior::new()),
+                }
+            }
+            Language::Kotlin => {
+                let parser = KotlinParser::new().map_err(|e| IndexError::General(e.to_string()))?;
+                ParserWithBehavior {
+                    parser: Box::new(parser),
+                    behavior: Box::new(KotlinBehavior::new()),
+                }
+            }
+            Language::Swift => {
+                let parser = SwiftParser::new().map_err(|e| IndexError::General(e.to_string()))?;
+                ParserWithBehavior {
+                    parser: Box::new(parser),
+                    behavior: Box::new(SwiftBehavior::new()),
                 }
             }
         };
@@ -301,6 +361,7 @@ impl ParserFactory {
             Language::Nix,
             Language::C,
             Language::Cpp,
+            Language::Gdscript,
         ]
         .into_iter()
         .filter(|&lang| self.is_language_enabled(lang))
@@ -451,6 +512,17 @@ mod tests {
             },
         );
 
+        // Enable GDScript
+        languages.insert(
+            "gdscript".to_string(),
+            LanguageConfig {
+                enabled: true,
+                extensions: vec!["gd".to_string()],
+                parser_options: HashMap::new(),
+                config_files: Vec::new(),
+            },
+        );
+
         settings.languages = languages;
         let factory = ParserFactory::new(Arc::new(settings));
 
@@ -474,6 +546,13 @@ mod tests {
         let php_pair = result.unwrap();
         assert_eq!(php_pair.parser.language(), Language::Php);
         assert_eq!(php_pair.behavior.module_separator(), "\\");
+
+        // Test GDScript
+        let result = factory.create_parser_with_behavior(Language::Gdscript);
+        assert!(result.is_ok());
+        let gd_pair = result.unwrap();
+        assert_eq!(gd_pair.parser.language(), Language::Gdscript);
+        assert_eq!(gd_pair.behavior.module_separator(), "/");
     }
 
     #[test]

@@ -16,7 +16,22 @@ pub fn retrieve_symbol(
     format: OutputFormat,
 ) -> ExitCode {
     let mut output = OutputManager::new(format);
-    let symbols = indexer.find_symbols_by_name(name, language);
+
+    // Check if name is a symbol_id (format: "symbol_id:123")
+    let symbols = if let Some(id_str) = name.strip_prefix("symbol_id:") {
+        // Direct symbol_id lookup
+        if let Ok(id) = id_str.parse::<u32>() {
+            match indexer.get_symbol(crate::SymbolId(id)) {
+                Some(sym) => vec![sym],
+                None => vec![],
+            }
+        } else {
+            vec![]
+        }
+    } else {
+        // Name-based lookup
+        indexer.find_symbols_by_name(name, language)
+    };
 
     if symbols.is_empty() {
         // Build not found output
@@ -88,75 +103,136 @@ pub fn retrieve_callers(
     format: OutputFormat,
 ) -> ExitCode {
     let mut output = OutputManager::new(format);
-    let symbols = indexer.find_symbols_by_name(function, language);
 
-    if symbols.is_empty() {
-        let unified = UnifiedOutput {
-            status: OutputStatus::NotFound,
-            entity_type: EntityType::Function,
-            count: 0,
-            data: OutputData::<SymbolContext>::Empty,
-            metadata: Some(OutputMetadata {
-                query: Some(Cow::Borrowed(function)),
-                tool: None,
-                timing_ms: None,
-                truncated: None,
-                extra: Default::default(),
-            }),
-            guidance: None,
-            exit_code: ExitCode::NotFound,
-        };
-
-        match output.unified(unified) {
-            Ok(code) => code,
-            Err(e) => {
-                eprintln!("Error writing output: {e}");
-                ExitCode::GeneralError
-            }
-        }
-    } else {
-        let mut all_callers = Vec::new();
-
-        // Check all symbols with this name
-        for symbol in &symbols {
-            let callers = indexer.get_calling_functions_with_metadata(symbol.id);
-            for (caller, _metadata) in callers {
-                if !all_callers.iter().any(|c: &Symbol| c.id == caller.id) {
-                    all_callers.push(caller);
+    // Check if function is a symbol_id (format: "symbol_id:123")
+    let (symbol, query_str) = if let Some(id_str) = function.strip_prefix("symbol_id:") {
+        // Direct symbol_id lookup
+        if let Ok(id) = id_str.parse::<u32>() {
+            match indexer.get_symbol(crate::SymbolId(id)) {
+                Some(sym) => (sym, format!("symbol_id:{id}")),
+                None => {
+                    let unified = UnifiedOutput {
+                        status: OutputStatus::NotFound,
+                        entity_type: EntityType::Function,
+                        count: 0,
+                        data: OutputData::<SymbolContext>::Empty,
+                        metadata: Some(OutputMetadata {
+                            query: Some(Cow::Owned(format!("symbol_id:{id}"))),
+                            tool: None,
+                            timing_ms: None,
+                            truncated: None,
+                            extra: Default::default(),
+                        }),
+                        guidance: None,
+                        exit_code: ExitCode::NotFound,
+                    };
+                    return match output.unified(unified) {
+                        Ok(code) => code,
+                        Err(e) => {
+                            eprintln!("Error writing output: {e}");
+                            ExitCode::GeneralError
+                        }
+                    };
                 }
             }
+        } else {
+            eprintln!("Invalid symbol_id format: {id_str}");
+            return ExitCode::GeneralError;
+        }
+    } else {
+        // Lookup by name
+        let symbols = indexer.find_symbols_by_name(function, language);
+
+        if symbols.is_empty() {
+            let unified = UnifiedOutput {
+                status: OutputStatus::NotFound,
+                entity_type: EntityType::Function,
+                count: 0,
+                data: OutputData::<SymbolContext>::Empty,
+                metadata: Some(OutputMetadata {
+                    query: Some(Cow::Borrowed(function)),
+                    tool: None,
+                    timing_ms: None,
+                    truncated: None,
+                    extra: Default::default(),
+                }),
+                guidance: None,
+                exit_code: ExitCode::NotFound,
+            };
+
+            return match output.unified(unified) {
+                Ok(code) => code,
+                Err(e) => {
+                    eprintln!("Error writing output: {e}");
+                    ExitCode::GeneralError
+                }
+            };
         }
 
-        // Transform to SymbolContext with relationships
-        use crate::symbol::context::ContextIncludes;
-
-        let callers_with_path: Vec<SymbolContext> = all_callers
-            .into_iter()
-            .filter_map(|symbol| {
-                // Get context for each caller symbol (what it calls and defines)
-                indexer.get_symbol_context(
-                    symbol.id,
-                    ContextIncludes::CALLS | ContextIncludes::DEFINITIONS,
-                )
-            })
-            .collect();
-
-        let unified = UnifiedOutputBuilder::items(callers_with_path, EntityType::Function)
-            .with_metadata(OutputMetadata {
-                query: Some(Cow::Borrowed(function)),
-                tool: None,
-                timing_ms: None,
-                truncated: None,
-                extra: Default::default(),
-            })
-            .build();
-
-        match output.unified(unified) {
-            Ok(code) => code,
-            Err(e) => {
-                eprintln!("Error writing output: {e}");
-                ExitCode::GeneralError
+        if symbols.len() > 1 {
+            // AMBIGUOUS - return error with list of symbol IDs
+            eprintln!(
+                "Ambiguous: found {} symbol(s) named '{}':",
+                symbols.len(),
+                function
+            );
+            for (i, sym) in symbols.iter().take(10).enumerate() {
+                eprintln!(
+                    "  {}. symbol_id:{} - {:?} at {}:{}",
+                    i + 1,
+                    sym.id.value(),
+                    sym.kind,
+                    sym.file_path,
+                    sym.range.start_line + 1
+                );
             }
+            if symbols.len() > 10 {
+                eprintln!("  ... and {} more", symbols.len() - 10);
+            }
+            eprintln!("\nUse: codanna retrieve callers symbol_id:<id>");
+            return ExitCode::GeneralError;
+        }
+
+        // Single match - use it
+        (symbols.into_iter().next().unwrap(), function.to_string())
+    };
+
+    // Get callers for THIS SPECIFIC symbol only (no aggregation)
+    let callers = indexer.get_calling_functions_with_metadata(symbol.id);
+    let all_callers: Vec<Symbol> = callers
+        .into_iter()
+        .map(|(caller, _metadata)| caller)
+        .collect();
+
+    // Transform to SymbolContext with relationships
+    use crate::symbol::context::ContextIncludes;
+
+    let callers_with_path: Vec<SymbolContext> = all_callers
+        .into_iter()
+        .filter_map(|symbol| {
+            // Get context for each caller symbol (what it calls and defines)
+            indexer.get_symbol_context(
+                symbol.id,
+                ContextIncludes::CALLS | ContextIncludes::DEFINITIONS,
+            )
+        })
+        .collect();
+
+    let unified = UnifiedOutputBuilder::items(callers_with_path, EntityType::Function)
+        .with_metadata(OutputMetadata {
+            query: Some(Cow::Owned(query_str)),
+            tool: None,
+            timing_ms: None,
+            truncated: None,
+            extra: Default::default(),
+        })
+        .build();
+
+    match output.unified(unified) {
+        Ok(code) => code,
+        Err(e) => {
+            eprintln!("Error writing output: {e}");
+            ExitCode::GeneralError
         }
     }
 }
@@ -169,75 +245,136 @@ pub fn retrieve_calls(
     format: OutputFormat,
 ) -> ExitCode {
     let mut output = OutputManager::new(format);
-    let symbols = indexer.find_symbols_by_name(function, language);
 
-    if symbols.is_empty() {
-        let unified = UnifiedOutput {
-            status: OutputStatus::NotFound,
-            entity_type: EntityType::Function,
-            count: 0,
-            data: OutputData::<SymbolContext>::Empty,
-            metadata: Some(OutputMetadata {
-                query: Some(Cow::Borrowed(function)),
-                tool: None,
-                timing_ms: None,
-                truncated: None,
-                extra: Default::default(),
-            }),
-            guidance: None,
-            exit_code: ExitCode::NotFound,
-        };
-
-        match output.unified(unified) {
-            Ok(code) => code,
-            Err(e) => {
-                eprintln!("Error writing output: {e}");
-                ExitCode::GeneralError
-            }
-        }
-    } else {
-        let mut all_calls = Vec::new();
-
-        // Collect all unique calls
-        for symbol in &symbols {
-            let calls = indexer.get_called_functions_with_metadata(symbol.id);
-            for (called, _metadata) in calls {
-                if !all_calls.iter().any(|c: &Symbol| c.id == called.id) {
-                    all_calls.push(called);
+    // Check if function is a symbol_id (format: "symbol_id:123" or just "123" if numeric)
+    let (symbol, query_str) = if let Some(id_str) = function.strip_prefix("symbol_id:") {
+        // Direct symbol_id lookup
+        if let Ok(id) = id_str.parse::<u32>() {
+            match indexer.get_symbol(crate::SymbolId(id)) {
+                Some(sym) => (sym, format!("symbol_id:{id}")),
+                None => {
+                    let unified = UnifiedOutput {
+                        status: OutputStatus::NotFound,
+                        entity_type: EntityType::Function,
+                        count: 0,
+                        data: OutputData::<SymbolContext>::Empty,
+                        metadata: Some(OutputMetadata {
+                            query: Some(Cow::Owned(format!("symbol_id:{id}"))),
+                            tool: None,
+                            timing_ms: None,
+                            truncated: None,
+                            extra: Default::default(),
+                        }),
+                        guidance: None,
+                        exit_code: ExitCode::NotFound,
+                    };
+                    return match output.unified(unified) {
+                        Ok(code) => code,
+                        Err(e) => {
+                            eprintln!("Error writing output: {e}");
+                            ExitCode::GeneralError
+                        }
+                    };
                 }
             }
+        } else {
+            eprintln!("Invalid symbol_id format: {id_str}");
+            return ExitCode::GeneralError;
+        }
+    } else {
+        // Lookup by name
+        let symbols = indexer.find_symbols_by_name(function, language);
+
+        if symbols.is_empty() {
+            let unified = UnifiedOutput {
+                status: OutputStatus::NotFound,
+                entity_type: EntityType::Function,
+                count: 0,
+                data: OutputData::<SymbolContext>::Empty,
+                metadata: Some(OutputMetadata {
+                    query: Some(Cow::Borrowed(function)),
+                    tool: None,
+                    timing_ms: None,
+                    truncated: None,
+                    extra: Default::default(),
+                }),
+                guidance: None,
+                exit_code: ExitCode::NotFound,
+            };
+
+            return match output.unified(unified) {
+                Ok(code) => code,
+                Err(e) => {
+                    eprintln!("Error writing output: {e}");
+                    ExitCode::GeneralError
+                }
+            };
         }
 
-        // Transform to SymbolContext with relationships
-        use crate::symbol::context::ContextIncludes;
-
-        let calls_with_path: Vec<SymbolContext> = all_calls
-            .into_iter()
-            .filter_map(|symbol| {
-                // Get context for each called function (who calls it, what it defines)
-                indexer.get_symbol_context(
-                    symbol.id,
-                    ContextIncludes::CALLERS | ContextIncludes::DEFINITIONS,
-                )
-            })
-            .collect();
-
-        let unified = UnifiedOutputBuilder::items(calls_with_path, EntityType::Function)
-            .with_metadata(OutputMetadata {
-                query: Some(Cow::Borrowed(function)),
-                tool: None,
-                timing_ms: None,
-                truncated: None,
-                extra: Default::default(),
-            })
-            .build();
-
-        match output.unified(unified) {
-            Ok(code) => code,
-            Err(e) => {
-                eprintln!("Error writing output: {e}");
-                ExitCode::GeneralError
+        if symbols.len() > 1 {
+            // AMBIGUOUS - return error with list of symbol IDs
+            eprintln!(
+                "Ambiguous: found {} symbol(s) named '{}':",
+                symbols.len(),
+                function
+            );
+            for (i, sym) in symbols.iter().take(10).enumerate() {
+                eprintln!(
+                    "  {}. symbol_id:{} - {:?} at {}:{}",
+                    i + 1,
+                    sym.id.value(),
+                    sym.kind,
+                    sym.file_path,
+                    sym.range.start_line + 1
+                );
             }
+            if symbols.len() > 10 {
+                eprintln!("  ... and {} more", symbols.len() - 10);
+            }
+            eprintln!("\nUse: codanna retrieve calls symbol_id:<id>");
+            return ExitCode::GeneralError;
+        }
+
+        // Single match - use it
+        (symbols.into_iter().next().unwrap(), function.to_string())
+    };
+
+    // Get calls for THIS SPECIFIC symbol only (no aggregation)
+    let calls = indexer.get_called_functions_with_metadata(symbol.id);
+    let all_calls: Vec<Symbol> = calls
+        .into_iter()
+        .map(|(called, _metadata)| called)
+        .collect();
+
+    // Transform to SymbolContext with relationships
+    use crate::symbol::context::ContextIncludes;
+
+    let calls_with_path: Vec<SymbolContext> = all_calls
+        .into_iter()
+        .filter_map(|symbol| {
+            // Get context for each called function (who calls it, what it defines)
+            indexer.get_symbol_context(
+                symbol.id,
+                ContextIncludes::CALLERS | ContextIncludes::DEFINITIONS,
+            )
+        })
+        .collect();
+
+    let unified = UnifiedOutputBuilder::items(calls_with_path, EntityType::Function)
+        .with_metadata(OutputMetadata {
+            query: Some(Cow::Owned(query_str)),
+            tool: None,
+            timing_ms: None,
+            truncated: None,
+            extra: Default::default(),
+        })
+        .build();
+
+    match output.unified(unified) {
+        Ok(code) => code,
+        Err(e) => {
+            eprintln!("Error writing output: {e}");
+            ExitCode::GeneralError
         }
     }
 }
@@ -451,135 +588,191 @@ pub fn retrieve_describe(
     format: OutputFormat,
 ) -> ExitCode {
     let mut output = OutputManager::new(format);
-    let symbols = indexer.find_symbols_by_name(symbol_name, language);
 
-    if symbols.is_empty() {
-        let unified = UnifiedOutput {
-            status: OutputStatus::NotFound,
-            entity_type: EntityType::Symbol,
-            count: 0,
-            data: OutputData::<SymbolContext>::Empty,
-            metadata: Some(OutputMetadata {
-                query: Some(Cow::Borrowed(symbol_name)),
-                tool: None,
-                timing_ms: None,
-                truncated: None,
-                extra: Default::default(),
-            }),
-            guidance: None,
-            exit_code: ExitCode::NotFound,
-        };
-
-        match output.unified(unified) {
-            Ok(code) => code,
-            Err(e) => {
-                eprintln!("Error writing output: {e}");
-                ExitCode::GeneralError
+    // Check if symbol_name is a symbol_id (format: "symbol_id:123")
+    let (symbol, query_str) = if let Some(id_str) = symbol_name.strip_prefix("symbol_id:") {
+        // Direct symbol_id lookup
+        if let Ok(id) = id_str.parse::<u32>() {
+            match indexer.get_symbol(crate::SymbolId(id)) {
+                Some(sym) => (sym, format!("symbol_id:{id}")),
+                None => {
+                    let unified = UnifiedOutput {
+                        status: OutputStatus::NotFound,
+                        entity_type: EntityType::Symbol,
+                        count: 0,
+                        data: OutputData::<SymbolContext>::Empty,
+                        metadata: Some(OutputMetadata {
+                            query: Some(Cow::Owned(format!("symbol_id:{id}"))),
+                            tool: None,
+                            timing_ms: None,
+                            truncated: None,
+                            extra: Default::default(),
+                        }),
+                        guidance: None,
+                        exit_code: ExitCode::NotFound,
+                    };
+                    return match output.unified(unified) {
+                        Ok(code) => code,
+                        Err(e) => {
+                            eprintln!("Error writing output: {e}");
+                            ExitCode::GeneralError
+                        }
+                    };
+                }
             }
+        } else {
+            eprintln!("Invalid symbol_id format: {id_str}");
+            return ExitCode::GeneralError;
         }
     } else {
-        // Get the first matching symbol for basic info, but aggregate relationships from ALL symbols
-        let symbol = symbols[0].clone();
-        let base_path = indexer
-            .get_file_path(symbol.file_id)
-            .unwrap_or_else(|| "unknown".to_string());
-        let file_path = format!("{}:{}", base_path, symbol.range.start_line + 1);
+        // Lookup by name
+        let symbols = indexer.find_symbols_by_name(symbol_name, language);
 
-        // Build context with relationships using the same working methods as retrieve calls/callers
-        let mut context = SymbolContext {
-            symbol: symbol.clone(),
-            file_path,
-            relationships: Default::default(),
-        };
+        if symbols.is_empty() {
+            let unified = UnifiedOutput {
+                status: OutputStatus::NotFound,
+                entity_type: EntityType::Symbol,
+                count: 0,
+                data: OutputData::<SymbolContext>::Empty,
+                metadata: Some(OutputMetadata {
+                    query: Some(Cow::Borrowed(symbol_name)),
+                    tool: None,
+                    timing_ms: None,
+                    truncated: None,
+                    extra: Default::default(),
+                }),
+                guidance: None,
+                exit_code: ExitCode::NotFound,
+            };
 
-        // Aggregate calls and callers from ALL symbols with this name (same as retrieve calls/callers)
-        let mut all_calls = Vec::new();
-        let mut all_callers = Vec::new();
-
-        for sym in &symbols {
-            // Collect calls from this symbol
-            let calls = indexer.get_called_functions_with_metadata(sym.id);
-            for (called, metadata) in calls {
-                if !all_calls
-                    .iter()
-                    .any(|(s, _): &(Symbol, Option<String>)| s.id == called.id)
-                {
-                    all_calls.push((called, metadata));
+            return match output.unified(unified) {
+                Ok(code) => code,
+                Err(e) => {
+                    eprintln!("Error writing output: {e}");
+                    ExitCode::GeneralError
                 }
+            };
+        }
+
+        if symbols.len() > 1 {
+            // AMBIGUOUS - return error with list of symbol IDs
+            eprintln!(
+                "Ambiguous: found {} symbol(s) named '{}':",
+                symbols.len(),
+                symbol_name
+            );
+            for (i, sym) in symbols.iter().take(10).enumerate() {
+                eprintln!(
+                    "  {}. symbol_id:{} - {:?} at {}:{}",
+                    i + 1,
+                    sym.id.value(),
+                    sym.kind,
+                    sym.file_path,
+                    sym.range.start_line + 1
+                );
+            }
+            if symbols.len() > 10 {
+                eprintln!("  ... and {} more", symbols.len() - 10);
+            }
+            eprintln!("\nUse: codanna retrieve describe symbol_id:<id>");
+            return ExitCode::GeneralError;
+        }
+
+        // Single match - use it
+        (symbols.into_iter().next().unwrap(), symbol_name.to_string())
+    };
+
+    // Get relationships for THIS SPECIFIC symbol only (no aggregation)
+    let file_path = SymbolContext::symbol_location(&symbol);
+
+    let mut context = SymbolContext {
+        symbol: symbol.clone(),
+        file_path,
+        relationships: Default::default(),
+    };
+
+    // Get calls for this specific symbol
+    let calls = indexer.get_called_functions_with_metadata(symbol.id);
+    if !calls.is_empty() {
+        context.relationships.calls = Some(calls);
+    }
+
+    // Get callers for this specific symbol
+    let callers = indexer.get_calling_functions_with_metadata(symbol.id);
+    if !callers.is_empty() {
+        context.relationships.called_by = Some(callers);
+    }
+
+    // Get defines for this specific symbol
+    let deps = indexer.get_dependencies(symbol.id);
+    if let Some(defines) = deps.get(&crate::RelationKind::Defines) {
+        context.relationships.defines = Some(defines.clone());
+    }
+
+    // Load implementations (for traits/interfaces)
+    use crate::SymbolKind;
+    match symbol.kind {
+        SymbolKind::Trait | SymbolKind::Interface => {
+            let implementations = indexer.get_implementations(symbol.id);
+            if !implementations.is_empty() {
+                context.relationships.implemented_by = Some(implementations);
+            }
+        }
+        _ => {}
+    }
+
+    // Load extends relationships (for classes)
+    match symbol.kind {
+        SymbolKind::Class | SymbolKind::Struct => {
+            // What does this class extend?
+            let extends = indexer.get_extends(symbol.id);
+            if !extends.is_empty() {
+                context.relationships.extends = Some(extends);
             }
 
-            // Collect callers of this symbol
-            let callers = indexer.get_calling_functions_with_metadata(sym.id);
-            for (caller, metadata) in callers {
-                if !all_callers
-                    .iter()
-                    .any(|(s, _): &(Symbol, Option<String>)| s.id == caller.id)
-                {
-                    all_callers.push((caller, metadata));
-                }
+            // What classes extend this class?
+            let extended_by = indexer.get_extended_by(symbol.id);
+            if !extended_by.is_empty() {
+                context.relationships.extended_by = Some(extended_by);
             }
         }
+        _ => {}
+    }
 
-        // Set aggregated relationships
-        if !all_calls.is_empty() {
-            context.relationships.calls = Some(all_calls);
-        }
-        if !all_callers.is_empty() {
-            context.relationships.called_by = Some(all_callers);
-        }
+    // Load uses relationships (for all symbols)
+    let uses = indexer.get_uses(symbol.id);
+    if !uses.is_empty() {
+        context.relationships.uses = Some(uses);
+    }
 
-        // Load defines relationships from ALL symbols
-        let mut all_defines = Vec::new();
-        for sym in &symbols {
-            let deps = indexer.get_dependencies(sym.id);
-            if let Some(defines) = deps.get(&crate::RelationKind::Defines) {
-                for defined in defines {
-                    if !all_defines.iter().any(|s: &Symbol| s.id == defined.id) {
-                        all_defines.push(defined.clone());
-                    }
-                }
-            }
-        }
-        if !all_defines.is_empty() {
-            context.relationships.defines = Some(all_defines);
-        }
+    let used_by = indexer.get_used_by(symbol.id);
+    if !used_by.is_empty() {
+        context.relationships.used_by = Some(used_by);
+    }
 
-        // Load implementations (for traits/interfaces)
-        use crate::SymbolKind;
-        match symbol.kind {
-            SymbolKind::Trait | SymbolKind::Interface => {
-                let implementations = indexer.get_implementations(symbol.id);
-                if !implementations.is_empty() {
-                    context.relationships.implemented_by = Some(implementations);
-                }
-            }
-            _ => {}
-        }
+    let unified = UnifiedOutput {
+        status: OutputStatus::Success,
+        entity_type: EntityType::Symbol,
+        count: 1,
+        data: OutputData::Single {
+            item: Box::new(context),
+        },
+        metadata: Some(OutputMetadata {
+            query: Some(Cow::Owned(query_str)),
+            tool: None,
+            timing_ms: None,
+            truncated: None,
+            extra: Default::default(),
+        }),
+        guidance: None,
+        exit_code: ExitCode::Success,
+    };
 
-        let unified = UnifiedOutput {
-            status: OutputStatus::Success,
-            entity_type: EntityType::Symbol,
-            count: 1,
-            data: OutputData::Single {
-                item: Box::new(context),
-            },
-            metadata: Some(OutputMetadata {
-                query: Some(Cow::Borrowed(symbol_name)),
-                tool: None,
-                timing_ms: None,
-                truncated: None,
-                extra: Default::default(),
-            }),
-            guidance: None,
-            exit_code: ExitCode::Success,
-        };
-
-        match output.unified(unified) {
-            Ok(code) => code,
-            Err(e) => {
-                eprintln!("Error writing output: {e}");
-                ExitCode::GeneralError
-            }
+    match output.unified(unified) {
+        Ok(code) => code,
+        Err(e) => {
+            eprintln!("Error writing output: {e}");
+            ExitCode::GeneralError
         }
     }
 }

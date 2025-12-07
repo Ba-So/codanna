@@ -5,6 +5,7 @@
 //! - src/indexing/resolver.rs → RustResolutionContext
 //! - src/indexing/resolution_context.rs → RustResolutionContext
 
+use crate::parsing::resolution::ImportBinding;
 use crate::parsing::{InheritanceResolver, ResolutionScope, ScopeLevel, ScopeType};
 use crate::{FileId, SymbolId};
 use std::collections::HashMap;
@@ -37,6 +38,9 @@ pub struct RustResolutionContext {
 
     /// Import tracking (path -> alias)
     imports: Vec<(String, Option<String>)>,
+
+    /// Binding info for imports keyed by exposed name
+    import_bindings: HashMap<String, ImportBinding>,
 }
 
 impl RustResolutionContext {
@@ -49,6 +53,7 @@ impl RustResolutionContext {
             crate_symbols: HashMap::new(),
             scope_stack: Vec::new(),
             imports: Vec::new(),
+            import_bindings: HashMap::new(),
         }
     }
 
@@ -251,6 +256,22 @@ impl ResolutionScope for RustResolutionContext {
                 self.resolve(to_name)
             }
         }
+    }
+
+    fn populate_imports(&mut self, imports: &[crate::parsing::Import]) {
+        // Convert Import records into our internal (path, alias) tuple format
+        for import in imports {
+            self.add_import(import.path.clone(), import.alias.clone());
+        }
+    }
+
+    fn register_import_binding(&mut self, binding: ImportBinding) {
+        self.import_bindings
+            .insert(binding.exposed_name.clone(), binding);
+    }
+
+    fn import_binding(&self, name: &str) -> Option<ImportBinding> {
+        self.import_bindings.get(name).cloned()
     }
 }
 

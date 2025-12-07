@@ -95,6 +95,18 @@ pub trait LanguageParser: Send + Sync {
         Vec::new()
     }
 
+    /// Optional: Extract variable types with complex generic substitution
+    ///
+    /// Returns owned strings to support type substitution like `List<T>` → `List<Int>`.
+    /// Languages with generics can override this for richer type inference.
+    /// Default returns None, causing indexer to fall back to zero-copy version.
+    fn find_variable_types_with_substitution(
+        &mut self,
+        _code: &str,
+    ) -> Option<Vec<(String, String, Range)>> {
+        None
+    }
+
     /// Find inherent methods (methods defined directly on types)
     /// Returns tuples of (type_name, method_name, range)
     ///
@@ -185,6 +197,74 @@ pub fn safe_truncate_str(s: &str, max_bytes: usize) -> &str {
     }
 
     &s[..boundary]
+}
+
+/// Maximum recursion depth for AST traversal to prevent stack overflow
+///
+/// This limit protects against deeply nested structures (e.g., large array initializers,
+/// deeply nested function calls). When the limit is reached, traversal stops and a
+/// warning is logged if debug mode is enabled.
+///
+/// Value chosen based on:
+/// - Default Rust stack size: 2MB
+/// - Average stack frame size: ~4KB per recursive call
+/// - Safety margin: 500 levels uses ~2MB, well within limits
+pub const MAX_AST_DEPTH: usize = 500;
+
+/// Check if recursion depth exceeds safe limits
+///
+/// This function provides centralized depth checking to prevent stack overflow
+/// when processing deeply nested AST structures. All language parsers should
+/// call this at the start of their recursive extract_symbols_from_node method.
+///
+/// # Arguments
+///
+/// * `depth` - Current recursion depth
+/// * `node` - The tree-sitter node being processed (for error reporting)
+///
+/// # Returns
+///
+/// `true` if depth is safe to continue, `false` if limit exceeded
+///
+/// # Example
+///
+/// ```rust,ignore
+/// fn extract_symbols_from_node(
+///     &mut self,
+///     node: Node,
+///     code: &str,
+///     file_id: FileId,
+///     symbols: &mut Vec<Symbol>,
+///     counter: &mut SymbolCounter,
+///     depth: usize,
+/// ) {
+///     // Guard against stack overflow at the start
+///     if !check_recursion_depth(depth, node) {
+///         return;
+///     }
+///
+///     // ... process node ...
+///
+///     // Recursive calls pass depth + 1
+///     for child in node.children(&mut node.walk()) {
+///         self.extract_symbols_from_node(child, code, file_id, symbols, counter, depth + 1);
+///     }
+/// }
+/// ```
+#[inline]
+pub fn check_recursion_depth(depth: usize, node: Node) -> bool {
+    if depth > MAX_AST_DEPTH {
+        if crate::config::is_global_debug_enabled() {
+            eprintln!(
+                "WARNING: Maximum AST depth ({}) exceeded at line {}:{}. Skipping subtree to prevent stack overflow.",
+                MAX_AST_DEPTH,
+                node.start_position().row + 1,
+                node.start_position().column + 1
+            );
+        }
+        return false;
+    }
+    true
 }
 
 /// Safely extract a substring window from source code, respecting UTF-8 boundaries.

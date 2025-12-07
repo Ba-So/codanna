@@ -76,44 +76,6 @@ impl IndexStats {
             }
         }
     }
-
-    /// Get a summary line for progress updates
-    pub fn progress_line(&self, current_files: usize, total_files: usize) -> String {
-        let percent = (current_files as f64 / total_files as f64 * 100.0) as u32;
-        let elapsed = self
-            .start_time
-            .map(|start| start.elapsed())
-            .unwrap_or(self.elapsed);
-
-        if current_files > 0 && elapsed.as_secs() > 0 {
-            let files_per_sec = current_files as f64 / elapsed.as_secs_f64();
-            let eta_secs = ((total_files - current_files) as f64 / files_per_sec) as u64;
-            let eta = Duration::from_secs(eta_secs);
-
-            format!(
-                "Indexing: {}/{} files ({}%) - {:.0} files/s - ETA: {}",
-                current_files,
-                total_files,
-                percent,
-                files_per_sec,
-                format_duration(eta)
-            )
-        } else {
-            format!("Indexing: {current_files}/{total_files} files ({percent}%)")
-        }
-    }
-}
-
-/// Format a duration in a human-readable way
-fn format_duration(duration: Duration) -> String {
-    let secs = duration.as_secs();
-    if secs < 60 {
-        format!("{secs}s")
-    } else if secs < 3600 {
-        format!("{}m {}s", secs / 60, secs % 60)
-    } else {
-        format!("{}h {}m", secs / 3600, (secs % 3600) / 60)
-    }
 }
 
 #[cfg(test)]
@@ -144,12 +106,5 @@ mod tests {
         // Should only keep first 100
         assert_eq!(stats.errors.len(), 100);
         assert_eq!(stats.files_failed, 150);
-    }
-
-    #[test]
-    fn test_format_duration() {
-        assert_eq!(format_duration(Duration::from_secs(45)), "45s");
-        assert_eq!(format_duration(Duration::from_secs(90)), "1m 30s");
-        assert_eq!(format_duration(Duration::from_secs(3665)), "1h 1m");
     }
 }

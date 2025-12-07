@@ -149,7 +149,7 @@ impl LanguageBehavior for NixBehavior {
                     matches!(symbol.kind, SymbolKind::Function | SymbolKind::Variable)
                 }
                 ScopeContext::Parameter => false, // Function parameters are not globally resolvable
-                ScopeContext::ClassMember => false, // Nix doesn't have classes
+                ScopeContext::ClassMember { .. } => false, // Nix doesn't have classes
             }
         } else {
             // Fallback to symbol kind for Nix-specific symbols

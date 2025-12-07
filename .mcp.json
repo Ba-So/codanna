@@ -1,15 +1,16 @@
 {
   "mcpServers": {
-    "codanna-stdio": {
-      "command": "codanna",
-      "args": ["serve", "--watch", "--watch-interval", "5"]
-    },
     "serena": {
       "type": "stdio",
-      "command": "serena-stdio",
+      "command": "serena",
       "args": [
-        "/home/baso/dev/codanna"
-      ]
+        "start-mcp-server",
+        "--transport",
+        "stdio",
+        "--project",
+        "."
+      ],
+      "env": {}
     },
     "cratedocs": {
       "type": "stdio",
@@ -27,16 +28,23 @@
       ],
       "env": {}
     },
-    "shrimp": {
-      "type": "stdio",
-      "command": "mcp-shrimp-task-manager",
+    "claude-task-master": {
       "args": [],
+      "command": "task-master-mcp",
       "env": {
-        "DATA_DIR": ".shrimp",
-        "TEMPLATES_USE": "en",
-        "ENABLE_GUI": "true",
-        "MCP_PROMPT_EXECUTE_TASK_APPEND": "Additional Validation Criteria: relevant tests must pass, pre-commit hooks must pass, commit the changes. Additional Implementation Guides: Add reference to the appropriate agent to use."
-      }
+        "TASKMASTER_DIR": ".taskmaster"
+      },
+      "type": "stdio"
+    },
+    "codanna": {
+      "args": [
+        "serve",
+        "--watch",
+        "--watch-interval",
+        "5"
+      ],
+      "command": "codanna",
+      "type": "stdio"
     }
   }
 }

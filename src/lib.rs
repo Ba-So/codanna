@@ -1,4 +1,9 @@
 /// The main library module for codanna
+// Alias for tree-sitter-kotlin dependency
+// When upstream publishes 0.3.9+, change Cargo.toml and update this line:
+// extern crate tree_sitter_kotlin;
+extern crate tree_sitter_kotlin_codanna as tree_sitter_kotlin;
+
 // Debug macro for consistent debug output
 #[macro_export]
 macro_rules! debug_print {
@@ -17,6 +22,8 @@ pub mod init;
 pub mod io;
 pub mod mcp;
 pub mod parsing;
+pub mod plugins;
+pub mod profiles;
 pub mod project_resolver;
 pub mod relationship;
 pub mod retrieve;

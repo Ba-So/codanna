@@ -1,12 +1,12 @@
 # C++ Grammar Analysis
 
-*Generated: 2025-09-30 23:32:49 UTC*
+*Generated: 2025-12-01 15:24:41 UTC*
 
 ## Statistics
 - Total nodes in grammar JSON: 223
-- Nodes found in comprehensive.cpp: 131
-- Nodes handled by parser: 131
-- Symbol kinds extracted: 2
+- Nodes found in comprehensive.cpp: 154
+- Nodes handled by parser: 154
+- Symbol kinds extracted: 5
 
 ## ✅ Successfully Handled Nodes
 These nodes are in examples and handled by parser:
@@ -41,6 +41,7 @@ These nodes are in examples and handled by parser:
 - abstract_function_declarator
 - abstract_reference_declarator
 - access_specifier
+- alias_declaration
 - argument_list
 - assignment_expression
 - auto
@@ -63,9 +64,14 @@ These nodes are in examples and handled by parser:
 - default
 - default_method_clause
 - delete
+- delete_expression
 - delete_method_clause
 - dependent_type
 - destructor_name
+- enum
+- enum_specifier
+- enumerator
+- enumerator_list
 - escape_sequence
 - explicit
 - explicit_function_specifier
@@ -80,6 +86,8 @@ These nodes are in examples and handled by parser:
 - for
 - for_range_loop
 - for_statement
+- friend
+- friend_declaration
 - function_declarator
 - function_definition
 - identifier
@@ -89,9 +97,12 @@ These nodes are in examples and handled by parser:
 - initializer_list
 - lambda_capture_specifier
 - lambda_expression
+- long
 - namespace
 - namespace_definition
 - namespace_identifier
+- new
+- new_expression
 - noexcept
 - number_literal
 - operator
@@ -111,8 +122,13 @@ These nodes are in examples and handled by parser:
 - reference_declarator
 - return
 - return_statement
+- sized_type_specifier
+- static
+- storage_class_specifier
 - string_content
 - string_literal
+- struct
+- struct_specifier
 - subscript_argument_list
 - subscript_expression
 - system_lib_string
@@ -130,12 +146,19 @@ These nodes are in examples and handled by parser:
 - true
 - try
 - try_statement
+- type_definition
 - type_descriptor
 - type_identifier
 - type_parameter_declaration
 - type_qualifier
+- typedef
 - typename
+- union
+- union_specifier
+- unsigned
 - update_expression
+- using
+- using_declaration
 - virtual
 - virtual_specifier
 - {
@@ -150,7 +173,6 @@ These grammar nodes aren't in comprehensive.cpp:
 - _type_declarator
 - abstract_parenthesized_declarator
 - abstract_pointer_declarator
-- alias_declaration
 - alignas_qualifier
 - alignof_expression
 - array_declarator
@@ -176,20 +198,15 @@ These grammar nodes aren't in comprehensive.cpp:
 - constraint_conjunction
 - constraint_disjunction
 - continue_statement
-- delete_expression
 - dependent_name
 - do_statement
 - else_clause
-- enum_specifier
-- enumerator
-- enumerator_list
 - explicit_object_parameter_declaration
 - export_declaration
 - expression
 - extension_expression
 - field_designator
 - fold_expression
-- friend_declaration
 - generic_expression
 - global_module_fragment_declaration
 - gnu_asm_clobber_list
@@ -225,7 +242,6 @@ These grammar nodes aren't in comprehensive.cpp:
 - namespace_alias_definition
 - nested_namespace_specifier
 - new_declarator
-- new_expression
 - null
 - offsetof_expression
 - operator_cast
@@ -260,13 +276,10 @@ These grammar nodes aren't in comprehensive.cpp:
 - seh_leave_statement
 - seh_try_statement
 - simple_requirement
-- sized_type_specifier
 - sizeof_expression
 - statement
 - statement_identifier
 - static_assert_declaration
-- storage_class_specifier
-- struct_specifier
 - structured_binding_declarator
 - subscript_designator
 - subscript_range_designator
@@ -275,13 +288,10 @@ These grammar nodes aren't in comprehensive.cpp:
 - template_method
 - template_template_parameter_declaration
 - throw_specifier
-- type_definition
 - type_requirement
 - type_specifier
 - unary_expression
-- union_specifier
 - user_defined_literal
-- using_declaration
 - variadic_declarator
 - variadic_parameter_declaration
 - variadic_type_parameter_declaration
@@ -289,5 +299,8 @@ These grammar nodes aren't in comprehensive.cpp:
 
 ## 🎯 Symbol Kinds Extracted
 - Class
+- Enum
 - Function
+- Method
+- Struct
 

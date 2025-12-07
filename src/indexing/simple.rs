@@ -4,6 +4,8 @@
 use crate::indexing::{
     FileWalker, IndexStats, IndexTransaction, calculate_hash, get_utc_timestamp,
 };
+use crate::io::status_line::StatusLine;
+use crate::io::{ProgressBar, ProgressBarOptions, ProgressBarStyle};
 use crate::parsing::resolution::ResolutionScope;
 use crate::parsing::{LanguageId, MethodCall, ParserFactory, get_registry};
 use crate::relationship::RelationshipMetadata;
@@ -17,7 +19,6 @@ use crate::{
 };
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// Debug print macro that respects the debug setting
@@ -52,12 +53,15 @@ impl TantivyTransaction {
 /// Unresolved relationship data
 #[derive(Debug, Clone)]
 struct UnresolvedRelationship {
+    from_id: Option<SymbolId>,
     from_name: Arc<str>,
     to_name: Arc<str>,
     file_id: FileId,
     kind: RelationKind,
     #[allow(dead_code)]
     metadata: Option<RelationshipMetadata>,
+    /// Range of the target symbol (for Defines relationships with overloads)
+    to_range: Option<crate::Range>,
 }
 
 /// The main indexer struct that handles parsing and indexing of source code
@@ -88,6 +92,8 @@ pub struct SimpleIndexer {
     file_languages: std::collections::HashMap<FileId, LanguageId>,
     /// Language behaviors with persistent state (imports, etc.)
     file_behaviors: std::collections::HashMap<FileId, Box<dyn crate::parsing::LanguageBehavior>>,
+    /// Indexed directory paths (canonicalized) to track which directories are currently indexed
+    indexed_paths: std::collections::HashSet<std::path::PathBuf>,
 }
 
 impl Default for SimpleIndexer {
@@ -116,7 +122,7 @@ impl SimpleIndexer {
         let tantivy_path = index_base.join("tantivy");
 
         let document_index =
-            DocumentIndex::new(tantivy_path).expect("Failed to create Tantivy index");
+            DocumentIndex::new(tantivy_path, &settings).expect("Failed to create Tantivy index");
 
         #[allow(unused_variables)]
         let debug = settings.debug;
@@ -139,6 +145,7 @@ impl SimpleIndexer {
             semantic_search: None,
             file_languages: std::collections::HashMap::new(),
             file_behaviors: std::collections::HashMap::new(),
+            indexed_paths: std::collections::HashSet::new(),
         };
 
         // Try to load symbol cache for fast lookups
@@ -162,7 +169,7 @@ impl SimpleIndexer {
         let tantivy_path = index_base.join("tantivy");
 
         let document_index =
-            DocumentIndex::new(tantivy_path).expect("Failed to create Tantivy index");
+            DocumentIndex::new(tantivy_path, &settings).expect("Failed to create Tantivy index");
 
         #[allow(unused_variables)]
         let debug = settings.debug;
@@ -182,6 +189,7 @@ impl SimpleIndexer {
             semantic_search: None,
             file_languages: std::collections::HashMap::new(),
             file_behaviors: std::collections::HashMap::new(),
+            indexed_paths: std::collections::HashSet::new(),
         };
 
         // Resolution system now handled through LanguageBehavior:
@@ -239,15 +247,19 @@ impl SimpleIndexer {
         self.vector_engine.is_some() && self.embedding_generator.is_some()
     }
 
-    /// Enable semantic search for documentation
+    /// Enable semantic search for documentation.
+    ///
+    /// Uses the model specified in settings (semantic_search.model).
     pub fn enable_semantic_search(&mut self) -> IndexResult<()> {
-        match SimpleSemanticSearch::new() {
+        let model_name = &self.settings.semantic_search.model;
+
+        match SimpleSemanticSearch::from_model_name(model_name) {
             Ok(search) => {
                 self.semantic_search = Some(Arc::new(Mutex::new(search)));
                 Ok(())
             }
             Err(e) => Err(IndexError::General(format!(
-                "Failed to initialize semantic search: {e}"
+                "Failed to initialize semantic search with model '{model_name}': {e}"
             ))),
         }
     }
@@ -552,12 +564,16 @@ impl SimpleIndexer {
     pub fn remove_file(&mut self, path: impl AsRef<Path>) -> IndexResult<()> {
         let path = path.as_ref();
         let path_display = path.display();
-        eprintln!("  remove_file called with path: {path_display}");
+        if self.settings.debug {
+            eprintln!("  remove_file called with path: {path_display}");
+        }
         let path_str = path.to_str().ok_or_else(|| IndexError::FileRead {
             path: path.to_path_buf(),
             source: std::io::Error::new(std::io::ErrorKind::InvalidInput, "Invalid UTF-8 in path"),
         })?;
-        eprintln!("  Querying index for path: '{path_str}'");
+        if self.settings.debug {
+            eprintln!("  Querying index for path: '{path_str}'");
+        }
 
         // Get the FileId for this file path
         let file_info =
@@ -568,19 +584,45 @@ impl SimpleIndexer {
                     cause: e.to_string(),
                 })?;
 
-        eprintln!("  get_file_info result: {file_info:?}");
+        if self.settings.debug {
+            eprintln!("  get_file_info result: {file_info:?}");
+        }
 
         let symbols_to_remove = if let Some(info) = file_info {
+            let file_id = info.0;
+
             // Get all symbols for this file before removing
-            self.document_index
-                .find_symbols_by_file(info.0)
+            let symbols = self
+                .document_index
+                .find_symbols_by_file(file_id)
                 .map_err(|e| IndexError::TantivyError {
                     operation: "find_symbols_by_file".to_string(),
                     cause: e.to_string(),
-                })?
+                })?;
+
+            // Start batch for write operations
+            self.document_index
+                .start_batch()
+                .map_err(|e| IndexError::TantivyError {
+                    operation: "start_batch".to_string(),
+                    cause: e.to_string(),
+                })?;
+
+            // CRITICAL: Delete imports for this file to maintain consistency
+            // This prevents stale import metadata from being used after file deletion
+            self.document_index
+                .delete_imports_for_file(file_id)
+                .map_err(|e| IndexError::TantivyError {
+                    operation: "delete_imports_for_file".to_string(),
+                    cause: e.to_string(),
+                })?;
+
+            symbols
         } else {
             // File not in index, nothing to remove
-            eprintln!("  File not found in index: {path_str}");
+            if self.settings.debug {
+                eprintln!("  File not found in index: {path_str}");
+            }
             return Ok(());
         };
 
@@ -600,8 +642,10 @@ impl SimpleIndexer {
             }
         }
 
-        let symbol_count = symbols_to_remove.len();
-        eprintln!("  Removed {symbol_count} symbols from {path_str}");
+        if self.settings.debug {
+            let symbol_count = symbols_to_remove.len();
+            eprintln!("  Removed {symbol_count} symbols from {path_str}");
+        }
 
         // Commit the changes to persist them
         self.document_index
@@ -610,7 +654,9 @@ impl SimpleIndexer {
                 operation: "commit after removal".to_string(),
                 cause: e.to_string(),
             })?;
-        eprintln!("  Changes committed to index");
+        if self.settings.debug {
+            eprintln!("  Changes committed to index");
+        }
 
         // Rebuild symbol cache after file removal to remove stale entries
         if let Err(e) = self.build_symbol_cache() {
@@ -621,11 +667,15 @@ impl SimpleIndexer {
     }
 
     /// Read file content and calculate its hash
+    /// Uses lossy UTF-8 conversion to handle files with invalid encoding
     fn read_file_with_hash(&self, path: &Path) -> IndexResult<(String, String)> {
-        let content = fs::read_to_string(path).map_err(|e| IndexError::FileRead {
+        // Read as bytes first, then convert with lossy UTF-8
+        // This handles BOM, Windows-1252, and other non-UTF-8 encodings
+        let bytes = fs::read(path).map_err(|e| IndexError::FileRead {
             path: path.to_path_buf(),
             source: e,
         })?;
+        let content = String::from_utf8_lossy(&bytes).into_owned();
 
         let hash = calculate_hash(&content);
         Ok((content, hash))
@@ -645,6 +695,8 @@ impl SimpleIndexer {
         let file_id = FileId::new(file_counter).ok_or(IndexError::FileIdExhausted)?;
 
         // Update the file counter for next use
+        // Note: file_counter is already the next ID from get_next_file_id()
+        // It handles incrementing via pending_file_counter during batches
         self.document_index
             .store_metadata(
                 crate::storage::MetadataKey::FileCounter,
@@ -708,7 +760,7 @@ impl SimpleIndexer {
         }
 
         let mut symbol_counter = self.get_next_symbol_counter()?;
-        self.extract_and_store_symbols(
+        let symbol_map = self.extract_and_store_symbols(
             &mut parser,
             content,
             file_id,
@@ -718,7 +770,13 @@ impl SimpleIndexer {
             &mut symbol_counter,
             language_id,
         )?;
-        self.extract_and_store_relationships(&mut parser, content, file_id, behavior.as_ref())?;
+        self.extract_and_store_relationships(
+            &mut parser,
+            content,
+            file_id,
+            behavior.as_ref(),
+            &symbol_map,
+        )?;
         self.update_symbol_counter(&symbol_counter)?;
 
         // Store behavior for persistent state (imports, etc.) - AFTER it's been configured
@@ -744,6 +802,41 @@ impl SimpleIndexer {
                 path: path.to_path_buf(),
                 extension: extension.to_string(),
             })
+    }
+
+    fn normalize_expression_key(expr: &str) -> String {
+        let mut normalized = String::with_capacity(expr.len());
+        let mut in_double = false;
+        let mut in_single = false;
+        let mut escape = false;
+        for ch in expr.chars() {
+            if escape {
+                normalized.push(ch);
+                escape = false;
+                continue;
+            }
+            match ch {
+                '\\' if in_double || in_single => {
+                    normalized.push(ch);
+                    escape = true;
+                }
+                '"' if !in_single => {
+                    in_double = !in_double;
+                    normalized.push(ch);
+                }
+                '\'' if !in_double => {
+                    in_single = !in_single;
+                    normalized.push(ch);
+                }
+                _ => {
+                    if !in_double && !in_single && ch.is_whitespace() {
+                        continue;
+                    }
+                    normalized.push(ch);
+                }
+            }
+        }
+        normalized
     }
 
     /// Create a parser with its language-specific behavior
@@ -830,6 +923,46 @@ impl SimpleIndexer {
         Ok(SymbolCounter::from_value(start_value))
     }
 
+    /// Resolve a symbol from the symbol map based on relationship semantics
+    ///
+    /// When multiple symbols share the same name (e.g., Java class + constructor),
+    /// this function selects the appropriate symbol based on the relationship type.
+    fn resolve_symbol_for_relationship(
+        name: &str,
+        rel_kind: RelationKind,
+        symbol_map: &std::collections::HashMap<String, Vec<(SymbolId, crate::SymbolKind)>>,
+    ) -> Option<SymbolId> {
+        let candidates = symbol_map.get(name)?;
+
+        // Define valid symbol kinds for each relationship type
+        let valid_kinds: &[crate::SymbolKind] = match rel_kind {
+            // Extends: Classes, interfaces, structs, enums, and traits can extend/conform
+            // In Swift: structs and enums can conform to protocols
+            // In Rust: traits can have supertraits
+            RelationKind::Extends => &[
+                crate::SymbolKind::Class,
+                crate::SymbolKind::Interface,
+                crate::SymbolKind::Struct,
+                crate::SymbolKind::Enum,
+                crate::SymbolKind::Trait,
+            ],
+            // Implements: Only classes can implement interfaces
+            RelationKind::Implements => &[crate::SymbolKind::Class],
+            // Calls: Functions and methods
+            RelationKind::Calls => &[crate::SymbolKind::Function, crate::SymbolKind::Method],
+            // For other relationship types, accept first match
+            _ => {
+                return candidates.first().map(|(id, _)| *id);
+            }
+        };
+
+        // Find first symbol matching valid kinds
+        candidates
+            .iter()
+            .find(|(_, kind)| valid_kinds.contains(kind))
+            .map(|(id, _)| *id)
+    }
+
     /// Extract symbols from content and store them in Tantivy
     fn extract_and_store_symbols(
         &mut self,
@@ -841,7 +974,7 @@ impl SimpleIndexer {
         behavior: &dyn crate::parsing::LanguageBehavior,
         symbol_counter: &mut SymbolCounter,
         language_id: LanguageId,
-    ) -> IndexResult<()> {
+    ) -> IndexResult<std::collections::HashMap<String, Vec<(SymbolId, crate::SymbolKind)>>> {
         let symbols = parser.parse(content, file_id, symbol_counter);
 
         // Extract and register imports
@@ -868,12 +1001,22 @@ impl SimpleIndexer {
             // The behavior stores imports in its internal state and uses them during
             // symbol resolution via ResolutionContext::resolve()
             // Track import for resolution
-            behavior.add_import(import);
+            behavior.add_import(import.clone());
+
+            // CRITICAL: Persist import to Tantivy for cross-session persistence
+            // This ensures imports are available after index reload, fixing the bug where
+            // external symbols (e.g., indicatif::ProgressBar) incorrectly resolve to local symbols
+            if let Err(e) = self.document_index.store_import(&import) {
+                debug_print!(self, "Warning: Failed to store import: {}", e);
+            }
         }
 
         // Track traits for later use in relationship extraction
         let mut trait_symbols: std::collections::HashMap<String, crate::SymbolKind> =
             std::collections::HashMap::new();
+
+        // Build symbol map for relationship resolution
+        let mut symbol_map = std::collections::HashMap::new();
 
         for mut symbol in symbols {
             // Track trait symbols
@@ -882,14 +1025,26 @@ impl SimpleIndexer {
             // Set the language_id on the symbol
             symbol.language_id = Some(language_id);
 
+            // Capture name, ID, and kind before configuring
+            let name = symbol.name.to_string();
+            let id = symbol.id;
+            let kind = symbol.kind;
+
             self.configure_symbol(&mut symbol, module_path, behavior);
             self.store_symbol(symbol, path_str)?;
+
+            // Map name to (ID, kind) for relationship resolution
+            // Multiple symbols can share the same name (e.g., Java class + constructor)
+            symbol_map
+                .entry(name)
+                .or_insert_with(Vec::new)
+                .push((id, kind));
         }
 
         // Store trait symbols for this file
         self.trait_symbols_by_file.insert(file_id, trait_symbols);
 
-        Ok(())
+        Ok(symbol_map)
     }
 
     /// Configure a symbol with module path and visibility
@@ -974,10 +1129,14 @@ impl SimpleIndexer {
         content: &str,
         file_id: FileId,
         behavior: &dyn crate::parsing::LanguageBehavior,
+        symbol_map: &std::collections::HashMap<String, Vec<(SymbolId, crate::SymbolKind)>>,
     ) -> IndexResult<()> {
         use std::collections::HashSet;
         // Track relationships added in this file to avoid duplicates
-        let mut added: HashSet<(String, String, RelationKind)> = HashSet::new();
+        let mut method_call_entries: HashSet<(String, String, RelationKind, u32, u16)> =
+            HashSet::new();
+        let mut function_call_entries: HashSet<(String, String, RelationKind, u32, u16)> =
+            HashSet::new();
         // 1. Function/method calls
         let method_calls: Vec<MethodCall> = parser.find_method_calls(content);
         debug_print!(
@@ -1046,21 +1205,30 @@ impl SimpleIndexer {
 
             // Create metadata to store receiver information
             let metadata = method_call.receiver.as_ref().map(|receiver| {
+                let mut parts = Vec::with_capacity(3);
+                parts.push(format!("receiver:{receiver}"));
+                parts.push(format!(
+                    "receiver_norm:{}",
+                    Self::normalize_expression_key(receiver)
+                ));
+                parts.push(format!("static:{}", method_call.is_static));
                 RelationshipMetadata::new()
                     .at_position(method_call.range.start_line, method_call.range.start_column)
-                    .with_context(format!(
-                        "receiver:{},static:{}",
-                        receiver, method_call.is_static
-                    ))
+                    .with_context(parts.join(","))
             });
 
             let kind = behavior.map_relationship("calls");
-            if added.insert((
+            if method_call_entries.insert((
                 method_call.caller.clone(),
                 method_call.method_name.clone(),
                 kind,
+                method_call.range.start_line,
+                method_call.range.start_column,
             )) {
+                let from_id =
+                    Self::resolve_symbol_for_relationship(&method_call.caller, kind, symbol_map);
                 self.add_relationships_by_name(
+                    from_id,
                     &method_call.caller,
                     &method_call.method_name,
                     file_id,
@@ -1103,8 +1271,22 @@ impl SimpleIndexer {
             );
 
             let kind = behavior.map_relationship("calls");
-            if added.insert((caller.to_string(), called_function.to_string(), kind)) {
-                self.add_relationships_by_name(caller, called_function, file_id, kind, metadata)?;
+            if function_call_entries.insert((
+                caller.to_string(),
+                called_function.to_string(),
+                kind,
+                range.start_line,
+                range.start_column,
+            )) {
+                let from_id = Self::resolve_symbol_for_relationship(caller, kind, symbol_map);
+                self.add_relationships_by_name(
+                    from_id,
+                    caller,
+                    called_function,
+                    file_id,
+                    kind,
+                    metadata,
+                )?;
             } else {
                 debug_print!(
                     self,
@@ -1130,12 +1312,10 @@ impl SimpleIndexer {
             // For TypeScript: TypeScriptBehavior tracks interface implementations
             // This replaces the old TraitResolver.add_trait_impl() functionality
             behavior.add_trait_impl(type_name.to_string(), trait_name.to_string(), file_id);
+            let rel_kind = behavior.map_relationship("implements");
+            let from_id = Self::resolve_symbol_for_relationship(type_name, rel_kind, symbol_map);
             self.add_relationships_by_name(
-                type_name,
-                trait_name,
-                file_id,
-                behavior.map_relationship("implements"),
-                None,
+                from_id, type_name, trait_name, file_id, rel_kind, None,
             )?;
         }
 
@@ -1148,11 +1328,14 @@ impl SimpleIndexer {
                 derived_type,
                 base_type
             );
+            let rel_kind = behavior.map_relationship("extends");
+            let from_id = Self::resolve_symbol_for_relationship(derived_type, rel_kind, symbol_map);
             self.add_relationships_by_name(
+                from_id,
                 derived_type,
                 base_type,
                 file_id,
-                behavior.map_relationship("extends"),
+                rel_kind,
                 None,
             )?;
         }
@@ -1192,11 +1375,14 @@ impl SimpleIndexer {
         // 3. Type usage (in fields, parameters, returns)
         let uses = parser.find_uses(content);
         for (context_name, used_type, _range) in uses {
+            let rel_kind = behavior.map_relationship("uses");
+            let from_id = Self::resolve_symbol_for_relationship(context_name, rel_kind, symbol_map);
             self.add_relationships_by_name(
+                from_id,
                 context_name,
                 used_type,
                 file_id,
-                behavior.map_relationship("uses"),
+                rel_kind,
                 None,
             )?;
         }
@@ -1209,12 +1395,13 @@ impl SimpleIndexer {
             defines.len(),
             file_id
         );
-        for (definer_name, method_name, _range) in defines {
+        for (definer_name, method_name, range) in defines {
             debug_print!(
                 self,
-                "Processing define: {} defines {}",
+                "Processing define: {} defines {} at {:?}",
                 definer_name,
-                method_name
+                method_name,
+                range
             );
             // Check if definer is a trait using our cached symbol kinds
             if let Some(symbol_kinds) = self.trait_symbols_by_file.get(&file_id) {
@@ -1237,36 +1424,76 @@ impl SimpleIndexer {
                     }
                 }
             }
-            self.add_relationships_by_name(
+            let rel_kind = behavior.map_relationship("defines");
+            let from_id = Self::resolve_symbol_for_relationship(definer_name, rel_kind, symbol_map);
+            // Pass range for Defines to disambiguate overloaded methods
+            self.add_relationships_by_name_with_range(
+                from_id,
                 definer_name,
                 method_name,
                 file_id,
-                behavior.map_relationship("defines"),
+                rel_kind,
                 None,
+                Some(range),
             )?;
         }
 
         // Variable type tracking for method resolution
-        let var_types = parser.find_variable_types(content);
-        for (var_name, type_name, _range) in var_types {
+        // Prefer complex substitution if available (for generics like List<T> → List<Int>)
+        let owned_var_types: Vec<(String, String, crate::Range)> =
+            if let Some(complex_types) = parser.find_variable_types_with_substitution(content) {
+                complex_types
+            } else {
+                // Fall back to zero-copy version and convert to owned
+                parser
+                    .find_variable_types(content)
+                    .into_iter()
+                    .map(|(var, ty, range)| (var.to_string(), ty.to_string(), range))
+                    .collect()
+            };
+
+        let mut normalized_pairs = Vec::with_capacity(owned_var_types.len());
+        for (var_name, type_name, _range) in owned_var_types {
+            let normalized_expr = Self::normalize_expression_key(&var_name);
             self.variable_types
-                .insert((file_id, var_name.to_string()), type_name.to_string());
+                .insert((file_id, normalized_expr.clone()), type_name.clone());
+            normalized_pairs.push((normalized_expr, type_name));
+        }
+
+        if !normalized_pairs.is_empty() {
+            if let Ok(language_behavior) = self.get_behavior_for_file(file_id) {
+                language_behavior.register_expression_types(file_id, &normalized_pairs);
+            }
         }
 
         Ok(())
     }
 
-    /// Update the symbol counter in Tantivy metadata
+    /// Update the symbol counter in Tantivy metadata AND pending counter
     fn update_symbol_counter(&mut self, symbol_counter: &SymbolCounter) -> IndexResult<()> {
+        let current_count = symbol_counter.current_count();
+
+        // Update the metadata (for persistence after commit)
         self.document_index
             .store_metadata(
                 crate::storage::MetadataKey::SymbolCounter,
-                symbol_counter.current_count() as u64,
+                current_count as u64,
             )
             .map_err(|e| IndexError::TantivyError {
                 operation: "store_metadata".to_string(),
                 cause: e.to_string(),
-            })
+            })?;
+
+        // CRITICAL: Also update the pending_symbol_counter so next file gets correct starting ID
+        // This fixes the bug where symbol IDs were reused across files in the same batch
+        self.document_index
+            .update_pending_symbol_counter(current_count + 1)
+            .map_err(|e| IndexError::TantivyError {
+                operation: "update_pending_symbol_counter".to_string(),
+                cause: e.to_string(),
+            })?;
+
+        Ok(())
     }
 
     /// Check if two symbols are in the same module
@@ -1348,31 +1575,187 @@ impl SimpleIndexer {
         }
     }
 
-    /// Check if a relationship between two symbol kinds is valid.
-    /// This is designed to be language-agnostic and permissive.
+    /// Check if a relationship between two symbol kinds is valid
+    /// This is designed to be language-agnostic and permissive
+    fn is_compatible_relationship(
+        from_kind: crate::SymbolKind,
+        to_kind: crate::SymbolKind,
+        rel_kind: crate::RelationKind,
+    ) -> bool {
+        use crate::RelationKind::*;
+        use crate::SymbolKind::*;
+
+        match rel_kind {
+            Calls | CalledBy => {
+                // Executable code can call other executable code
+                // Extend to support module-level execution (e.g., Python module top-level)
+                // and class instantiation as a call target in dynamic languages.
+                // In JavaScript/TypeScript, constants and variables can hold function references
+                // (e.g., React components: const Button = () => {...})
+                // and object properties can contain functions that make calls
+                // (e.g., const actions = { submitForm: () => submitForm() })
+                let caller_can_call = |k: &crate::SymbolKind| {
+                    matches!(k, Function | Method | Macro | Module | Constant | Variable)
+                };
+                let callee_can_be_called = |k: &crate::SymbolKind| {
+                    matches!(k, Function | Method | Macro | Class | Constant | Variable)
+                };
+
+                caller_can_call(&from_kind) && callee_can_be_called(&to_kind)
+            }
+            Implements | ImplementedBy => {
+                // Types can implement interfaces/traits
+                let implementor = |k: &crate::SymbolKind| matches!(k, Struct | Enum | Class);
+                let interface = |k: &crate::SymbolKind| matches!(k, Trait | Interface);
+
+                match rel_kind {
+                    Implements => implementor(&from_kind) && interface(&to_kind),
+                    ImplementedBy => interface(&from_kind) && implementor(&to_kind),
+                    _ => unreachable!(),
+                }
+            }
+            Uses | UsedBy => {
+                // Most symbols can use/reference types and values
+                // Be permissive here as different languages have different rules
+                let can_use = |k: &crate::SymbolKind| {
+                    matches!(
+                        k,
+                        Function | Method | Struct | Class | Trait | Interface | Module | Enum
+                    )
+                };
+                let can_be_used = |k: &crate::SymbolKind| {
+                    matches!(
+                        k,
+                        Struct
+                            | Enum
+                            | Class
+                            | Trait
+                            | Interface
+                            | TypeAlias
+                            | Constant
+                            | Variable
+                            | Function
+                            | Method
+                    )
+                };
+
+                match rel_kind {
+                    Uses => can_use(&from_kind) && can_be_used(&to_kind),
+                    UsedBy => can_be_used(&from_kind) && can_use(&to_kind),
+                    _ => unreachable!(),
+                }
+            }
+            Defines | DefinedIn => {
+                // Containers can define members
+                let container = |k: &crate::SymbolKind| {
+                    matches!(k, Trait | Interface | Module | Struct | Enum | Class)
+                };
+                let member = |k: &crate::SymbolKind| {
+                    matches!(k, Method | Function | Constant | Field | Variable)
+                };
+
+                match rel_kind {
+                    Defines => container(&from_kind) && member(&to_kind),
+                    DefinedIn => member(&from_kind) && container(&to_kind),
+                    _ => unreachable!(),
+                }
+            }
+            Extends | ExtendedBy => {
+                // Types can extend other types (inheritance)
+                // In TypeScript: classes can extend classes, interfaces can extend interfaces
+                // In Rust: traits can extend traits (via supertraits)
+                let extendable =
+                    |k: &crate::SymbolKind| matches!(k, Class | Interface | Trait | Struct | Enum);
+                extendable(&from_kind) && extendable(&to_kind)
+            }
+            References | ReferencedBy => {
+                // Very permissive - almost anything can reference anything
+                // This is a catch-all for general references
+                true
+            }
+        }
+    }
+
+    /// Add a relationship to Tantivy
+    /// Automatically creates the reverse relationship as well (e.g., Implements → ImplementedBy)
     fn add_relationship_internal(
         &mut self,
         from: SymbolId,
         to: SymbolId,
         rel: Relationship,
     ) -> IndexResult<()> {
+        // Store the forward relationship
         self.document_index
             .store_relationship(from, to, &rel)
             .map_err(|e| IndexError::TantivyError {
                 operation: "store_relationship".to_string(),
                 cause: e.to_string(),
-            })
+            })?;
+
+        // Automatically create the reverse relationship
+        // This ensures bidirectional navigation (e.g., Class → Interface and Interface → Classes)
+        let reverse_kind = match rel.kind {
+            RelationKind::Implements => Some(RelationKind::ImplementedBy),
+            RelationKind::Extends => Some(RelationKind::ExtendedBy),
+            RelationKind::Calls => Some(RelationKind::CalledBy),
+            RelationKind::Uses => Some(RelationKind::UsedBy),
+            RelationKind::Defines => Some(RelationKind::DefinedIn),
+            RelationKind::References => Some(RelationKind::ReferencedBy),
+            // Don't create reverse for already-reverse relationships
+            RelationKind::ImplementedBy
+            | RelationKind::ExtendedBy
+            | RelationKind::CalledBy
+            | RelationKind::UsedBy
+            | RelationKind::DefinedIn
+            | RelationKind::ReferencedBy => None,
+        };
+
+        if let Some(reverse_kind) = reverse_kind {
+            let mut reverse_rel = Relationship::new(reverse_kind).with_weight(rel.weight);
+
+            // Copy metadata if present
+            if let Some(ref metadata) = rel.metadata {
+                reverse_rel = reverse_rel.with_metadata(metadata.clone());
+            }
+
+            self.document_index
+                .store_relationship(to, from, &reverse_rel)
+                .map_err(|e| IndexError::TantivyError {
+                    operation: "store_reverse_relationship".to_string(),
+                    cause: e.to_string(),
+                })?;
+        }
+
+        Ok(())
     }
 
     /// Helper method to add relationships by symbol names
     /// Stores them as unresolved for later processing with import context
     fn add_relationships_by_name(
         &mut self,
+        from_id: Option<SymbolId>,
         from_name: &str,
         to_name: &str,
         file_id: FileId,
         kind: RelationKind,
         metadata: Option<RelationshipMetadata>,
+    ) -> IndexResult<()> {
+        self.add_relationships_by_name_with_range(
+            from_id, from_name, to_name, file_id, kind, metadata, None,
+        )
+    }
+
+    /// Helper method to add relationships by symbol names with optional target range
+    /// The range is used for Defines relationships to disambiguate overloaded methods
+    fn add_relationships_by_name_with_range(
+        &mut self,
+        from_id: Option<SymbolId>,
+        from_name: &str,
+        to_name: &str,
+        file_id: FileId,
+        kind: RelationKind,
+        metadata: Option<RelationshipMetadata>,
+        to_range: Option<crate::Range>,
     ) -> IndexResult<()> {
         // Store as unresolved for later resolution when all symbols are committed
         // This allows us to:
@@ -1380,17 +1763,21 @@ impl SimpleIndexer {
         // 2. Use import context for accurate resolution
         debug_print!(
             self,
-            "Adding unresolved relationship: {} -> {} (kind: {:?})",
+            "Adding unresolved relationship: {} -> {} (kind: {:?}, from_id: {:?}, range: {:?})",
             from_name,
             to_name,
-            kind
+            kind,
+            from_id,
+            to_range
         );
         self.unresolved_relationships.push(UnresolvedRelationship {
+            from_id,
             from_name: from_name.into(),
             to_name: to_name.into(),
             file_id,
             kind,
             metadata,
+            to_range,
         });
 
         Ok(())
@@ -1470,25 +1857,18 @@ impl SimpleIndexer {
 
     /// Returns called functions with receiver metadata for enhanced method call analysis.
     ///
-    /// Provides receiver information (instance/static) from stored relationship metadata.
+    /// Provides full relationship metadata including call site line/column and receiver info.
     pub fn get_called_functions_with_metadata(
         &self,
         symbol_id: SymbolId,
-    ) -> Vec<(Symbol, Option<String>)> {
+    ) -> Vec<(Symbol, Option<RelationshipMetadata>)> {
         self.document_index
             .get_relationships_from(symbol_id, RelationKind::Calls)
             .ok()
             .unwrap_or_default()
             .into_iter()
             .filter_map(|(_, to_id, rel)| {
-                self.get_symbol(to_id).map(|symbol| {
-                    // Extract receiver info from metadata context
-                    let receiver_info = rel
-                        .metadata
-                        .and_then(|m| m.context)
-                        .map(|ctx| ctx.to_string());
-                    (symbol, receiver_info)
-                })
+                self.get_symbol(to_id).map(|symbol| (symbol, rel.metadata))
             })
             .collect()
     }
@@ -1504,27 +1884,21 @@ impl SimpleIndexer {
             .collect()
     }
 
-    /// Returns calling functions with receiver metadata for enhanced method call analysis.
+    /// Returns calling functions with full relationship metadata.
     ///
-    /// Provides receiver information (instance/static) from stored relationship metadata.
+    /// Provides call site line/column and receiver information from stored relationship metadata.
     pub fn get_calling_functions_with_metadata(
         &self,
         symbol_id: SymbolId,
-    ) -> Vec<(Symbol, Option<String>)> {
+    ) -> Vec<(Symbol, Option<RelationshipMetadata>)> {
         self.document_index
             .get_relationships_to(symbol_id, RelationKind::Calls)
             .ok()
             .unwrap_or_default()
             .into_iter()
             .filter_map(|(from_id, _, rel)| {
-                self.get_symbol(from_id).map(|symbol| {
-                    // Extract receiver info from metadata context
-                    let receiver_info = rel
-                        .metadata
-                        .and_then(|m| m.context)
-                        .map(|ctx| ctx.to_string());
-                    (symbol, receiver_info)
-                })
+                self.get_symbol(from_id)
+                    .map(|symbol| (symbol, rel.metadata))
             })
             .collect()
     }
@@ -1540,11 +1914,7 @@ impl SimpleIndexer {
         use crate::symbol::context::{SymbolContext, SymbolRelationships};
 
         let symbol = self.get_symbol(symbol_id)?;
-        let base_path = self
-            .get_file_path(symbol.file_id)
-            .unwrap_or_else(|| "<unknown>".to_string());
-        // Include line number for actionable paths
-        let file_path = format!("{}:{}", base_path, symbol.range.start_line + 1);
+        let file_path = SymbolContext::symbol_location(&symbol);
 
         let mut relationships = SymbolRelationships::default();
 
@@ -1593,6 +1963,39 @@ impl SimpleIndexer {
             }
         }
 
+        if include.contains(crate::symbol::context::ContextIncludes::EXTENDS) {
+            match symbol.kind {
+                SymbolKind::Class | SymbolKind::Struct => {
+                    // What does this class extend?
+                    let extends = self.get_extends(symbol_id);
+                    if !extends.is_empty() {
+                        relationships.extends = Some(extends);
+                    }
+
+                    // What classes extend this class?
+                    let extended_by = self.get_extended_by(symbol_id);
+                    if !extended_by.is_empty() {
+                        relationships.extended_by = Some(extended_by);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        if include.contains(crate::symbol::context::ContextIncludes::USES) {
+            // What types does this symbol use?
+            let uses = self.get_uses(symbol_id);
+            if !uses.is_empty() {
+                relationships.uses = Some(uses);
+            }
+
+            // What symbols use this type?
+            let used_by = self.get_used_by(symbol_id);
+            if !used_by.is_empty() {
+                relationships.used_by = Some(used_by);
+            }
+        }
+
         Some(SymbolContext {
             symbol,
             file_path,
@@ -1604,6 +2007,65 @@ impl SimpleIndexer {
         // Query relationships where to_symbol_id = trait_id and kind = Implements
         self.document_index
             .get_relationships_to(trait_id, RelationKind::Implements)
+            .ok()
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|(from_id, _, _)| self.get_symbol(from_id))
+            .collect()
+    }
+
+    /// Get what base class(es) this class extends
+    ///
+    /// Returns the parent class(es) in an inheritance hierarchy.
+    /// For Java/Kotlin: typically one base class
+    /// For C++: potentially multiple base classes
+    pub fn get_extends(&self, class_id: SymbolId) -> Vec<Symbol> {
+        // Query relationships where from_symbol_id = class_id and kind = Extends
+        self.document_index
+            .get_relationships_from(class_id, RelationKind::Extends)
+            .ok()
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|(_, to_id, _)| self.get_symbol(to_id))
+            .collect()
+    }
+
+    /// Get what classes extend this base class
+    ///
+    /// Returns all derived classes that inherit from this base class.
+    pub fn get_extended_by(&self, base_class_id: SymbolId) -> Vec<Symbol> {
+        // Query relationships where to_symbol_id = base_class_id and kind = Extends
+        self.document_index
+            .get_relationships_to(base_class_id, RelationKind::Extends)
+            .ok()
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|(from_id, _, _)| self.get_symbol(from_id))
+            .collect()
+    }
+
+    /// Get what types this symbol uses
+    ///
+    /// Returns types used by this symbol (e.g., function parameters, variable types, generic constraints).
+    /// Important for TypeScript/Java where type usage creates dependencies.
+    pub fn get_uses(&self, symbol_id: SymbolId) -> Vec<Symbol> {
+        // Query relationships where from_symbol_id = symbol_id and kind = Uses
+        self.document_index
+            .get_relationships_from(symbol_id, RelationKind::Uses)
+            .ok()
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|(_, to_id, _)| self.get_symbol(to_id))
+            .collect()
+    }
+
+    /// Get what symbols use this type
+    ///
+    /// Returns all symbols that depend on this type.
+    pub fn get_used_by(&self, type_id: SymbolId) -> Vec<Symbol> {
+        // Query relationships where to_symbol_id = type_id and kind = Uses
+        self.document_index
+            .get_relationships_to(type_id, RelationKind::Uses)
             .ok()
             .unwrap_or_default()
             .into_iter()
@@ -1717,6 +2179,7 @@ impl SimpleIndexer {
                 RelationKind::Calls,
                 RelationKind::Uses,
                 RelationKind::Implements,
+                RelationKind::Extends,
             ] {
                 if let Ok(relationships) =
                     self.document_index.get_relationships_to(current_id, *kind)
@@ -1764,6 +2227,199 @@ impl SimpleIndexer {
                 eprintln!("Warning: Failed to get indexed paths: {e}");
                 Vec::new()
             })
+    }
+
+    /// Track a directory as indexed (stores canonicalized path)
+    pub fn add_indexed_path(&mut self, dir_path: &Path) -> IndexResult<()> {
+        let canonical = dir_path.canonicalize().map_err(|e| IndexError::FileRead {
+            path: dir_path.to_path_buf(),
+            source: e,
+        })?;
+
+        // Skip if this path is already covered by an existing indexed directory
+        if self
+            .indexed_paths
+            .iter()
+            .any(|existing| canonical.starts_with(existing))
+        {
+            return Ok(());
+        }
+
+        // Remove any tracked paths that are descendants of the new canonical path
+        self.indexed_paths
+            .retain(|existing| !existing.starts_with(canonical.as_path()));
+
+        self.indexed_paths.insert(canonical);
+        Ok(())
+    }
+
+    /// Get all currently tracked indexed directories
+    pub fn get_indexed_paths(&self) -> &std::collections::HashSet<PathBuf> {
+        &self.indexed_paths
+    }
+
+    /// Sync indexed paths with config (settings.toml is source of truth)
+    ///
+    /// Compares stored indexed_paths with current config.
+    /// - Indexes new directories in config
+    /// - Removes symbols from directories not in config
+    ///
+    /// Returns (added_count, removed_count, files_indexed, symbols_found)
+    pub fn sync_with_config(
+        &mut self,
+        stored_paths: Option<Vec<PathBuf>>,
+        config_paths: &[PathBuf],
+        progress: bool,
+    ) -> IndexResult<(usize, usize, usize, usize)> {
+        // Convert to sets for comparison (canonicalized)
+        let stored_set: std::collections::HashSet<PathBuf> = stored_paths
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|p| p.canonicalize().ok())
+            .collect();
+
+        let config_set: std::collections::HashSet<PathBuf> = config_paths
+            .iter()
+            .filter_map(|p| p.canonicalize().ok())
+            .collect();
+
+        // Find new paths in config that aren't in stored state
+        let new_paths: Vec<PathBuf> = config_set.difference(&stored_set).cloned().collect();
+
+        // Find removed paths (in stored but not in config)
+        let removed_paths: Vec<PathBuf> = stored_set.difference(&config_set).cloned().collect();
+
+        if new_paths.is_empty() && removed_paths.is_empty() {
+            return Ok((0, 0, 0, 0));
+        }
+
+        eprintln!("Sync: Found {} new directories to index", new_paths.len());
+        for path in &new_paths {
+            eprintln!("  + {}", path.display());
+        }
+
+        // Index new directories
+        let mut total_files = 0;
+        let mut total_symbols = 0;
+
+        for path in &new_paths {
+            eprintln!("Indexing new directory: {}", path.display());
+            match self.index_directory(path, progress, false) {
+                Ok(stats) => {
+                    eprintln!(
+                        "  ✓ Indexed {} files, {} symbols",
+                        stats.files_indexed, stats.symbols_found
+                    );
+                    total_files += stats.files_indexed;
+                    total_symbols += stats.symbols_found;
+
+                    // Track this directory as indexed
+                    if self.settings.debug {
+                        eprintln!("DEBUG: Tracking indexed path: {}", path.display());
+                    }
+                    match self.add_indexed_path(path) {
+                        Ok(_) => {
+                            if self.settings.debug {
+                                eprintln!(
+                                    "DEBUG: Successfully tracked path (total: {})",
+                                    self.indexed_paths.len()
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("  ✗ Failed to track indexed path: {e}");
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("  ✗ Failed to index {}: {e}", path.display());
+                }
+            }
+        }
+
+        // Clean up removed directories
+        let mut removed_file_count = 0;
+        if !removed_paths.is_empty() {
+            eprintln!("Sync: Found {} directories to remove", removed_paths.len());
+            for path in &removed_paths {
+                eprintln!("  - {}", path.display());
+            }
+
+            // Collect all files to remove first
+            let all_files = self.get_all_indexed_paths();
+            let mut files_to_remove = Vec::new();
+
+            for file_path in all_files {
+                if let Ok(file_canonical) = file_path.canonicalize() {
+                    for removed_path in &removed_paths {
+                        if file_canonical.starts_with(removed_path) {
+                            files_to_remove.push(file_path.clone());
+                            break;
+                        }
+                    }
+                }
+            }
+
+            // Remove each file (each manages its own batch/commit)
+            if !files_to_remove.is_empty() {
+                let progress_view = if files_to_remove.len() > 1 {
+                    let options = ProgressBarOptions::default()
+                        .with_style(ProgressBarStyle::VerticalSolid)
+                        .with_width(28);
+                    let bar = Arc::new(ProgressBar::with_options(
+                        files_to_remove.len() as u64,
+                        "files",
+                        "removed",
+                        "failed",
+                        options,
+                    ));
+                    let status = StatusLine::new(Arc::clone(&bar));
+                    Some((bar, status))
+                } else {
+                    None
+                };
+
+                for file_path in &files_to_remove {
+                    let mut success = false;
+                    if let Err(e) = self.remove_file(file_path) {
+                        eprintln!("  ✗ Failed to remove {}: {e}", file_path.display());
+                    } else {
+                        removed_file_count += 1;
+                        success = true;
+                    }
+
+                    if let Some((bar, _)) = &progress_view {
+                        bar.inc();
+                        if success {
+                            bar.add_extra1(1);
+                        } else {
+                            bar.add_extra2(1);
+                        }
+                    }
+                }
+
+                if let Some((bar, status)) = progress_view {
+                    drop(status);
+                    eprintln!("{bar}");
+                }
+
+                if removed_file_count > 0 {
+                    eprintln!("  ✓ Removed {removed_file_count} files from index");
+                }
+            }
+
+            // Remove paths from tracked set after successful removal
+            for path in &removed_paths {
+                self.indexed_paths.remove(path);
+            }
+        }
+
+        Ok((
+            new_paths.len(),
+            removed_paths.len(),
+            total_files,
+            total_symbols,
+        ))
     }
 
     /// Search documentation using natural language query
@@ -1961,35 +2617,57 @@ impl SimpleIndexer {
 
         let mut stats = IndexStats::new();
 
-        // Process files one at a time with individual batches
-        let processed = Arc::new(AtomicUsize::new(0));
+        // Process files one at a time with batched commits
+        let progress_view = if progress && total_files > 0 {
+            let options = ProgressBarOptions::default()
+                .with_style(ProgressBarStyle::VerticalSolid)
+                .with_width(28);
+            let bar = Arc::new(ProgressBar::with_options(
+                total_files as u64,
+                "files",
+                "indexed",
+                "failed",
+                options,
+            ));
+            let status = StatusLine::new(Arc::clone(&bar));
+            Some((bar, status))
+        } else {
+            None
+        };
+
+        // Start batch once before the loop
+        self.start_tantivy_batch()?;
+        const COMMIT_BATCH_SIZE: usize = 100; // Commit every 100 files to reduce I/O
+        let mut files_in_batch = 0;
 
         for file_path in files {
-            // Track files as they are processed
+            let mut file_success = false;
 
             {
-                // Start a new batch for this file
-                self.start_tantivy_batch()?;
-
                 match self.index_file_internal(&file_path, force) {
                     Ok(result) => {
-                        // Commit this file's symbols so they're searchable
-                        self.commit_tantivy_batch()?;
+                        files_in_batch += 1;
+
+                        // Commit batch periodically to avoid excessive memory usage
+                        if files_in_batch >= COMMIT_BATCH_SIZE {
+                            self.commit_tantivy_batch()?;
+                            self.start_tantivy_batch()?;
+                            files_in_batch = 0;
+                        }
 
                         let file_id = result.file_id();
 
-                        // Only count as indexed if it wasn't from cache
-                        if !result.is_cached() {
-                            stats.files_indexed += 1;
+                        // Count all processed files (cached + newly indexed)
+                        stats.files_indexed += 1;
+                        file_success = true;
 
-                            // Update symbol count only for actually indexed files
-                            let new_symbols = self
-                                .document_index
-                                .find_symbols_by_file(file_id)
-                                .map(|symbols| symbols.len())
-                                .unwrap_or(0);
-                            stats.symbols_found += new_symbols;
-                        }
+                        // Count symbols from all files
+                        let new_symbols = self
+                            .document_index
+                            .find_symbols_by_file(file_id)
+                            .map(|symbols| symbols.len())
+                            .unwrap_or(0);
+                        stats.symbols_found += new_symbols;
                     }
                     Err(e) => {
                         eprintln!("Failed to index {}: {}", file_path.display(), e);
@@ -1999,20 +2677,34 @@ impl SimpleIndexer {
                 }
             }
 
-            if progress {
-                let current = processed.fetch_add(1, Ordering::SeqCst) + 1;
-                eprint!("\r{}", stats.progress_line(current, total_files));
+            if let Some((bar, _)) = progress_view.as_ref() {
+                bar.inc();
+                if file_success {
+                    bar.add_extra1(1);
+                } else {
+                    bar.add_extra2(1);
+                }
             }
         }
 
-        if progress {
-            eprintln!(); // New line after progress
+        if let Some((bar, status)) = progress_view {
+            drop(status);
+            eprintln!("{bar}");
+        }
+
+        // Commit any remaining files in the batch
+        if files_in_batch > 0 {
+            self.commit_tantivy_batch()?;
         }
 
         // Resolve cross-file relationships after all files are indexed
         if !dry_run {
             self.resolve_cross_file_relationships()?;
         }
+
+        // Stop timing and update final stats before returning
+        stats.stop_timing();
+        stats.symbols_found = self.symbol_count();
 
         Ok(stats)
     }
@@ -2055,42 +2747,64 @@ impl SimpleIndexer {
         caller_name: &str,
         file_id: FileId,
         context: &dyn ResolutionScope,
+        metadata: Option<&RelationshipMetadata>,
     ) -> Option<SymbolId> {
-        // Try to find corresponding MethodCall object for enhanced resolution
         if let Some(method_calls) = self.method_calls_by_file.get(&file_id) {
-            // Normalize caller for language-specific matching (e.g., Python "<module>")
-            if let Ok(behavior) = self.get_behavior_for_file(file_id) {
-                let caller_normalized = behavior.normalize_caller_name(caller_name, file_id);
-                for method_call in method_calls {
-                    let mc_caller_norm =
-                        behavior.normalize_caller_name(&method_call.caller, file_id);
-                    if mc_caller_norm == caller_normalized && method_call.method_name == call_target
-                    {
-                        debug_print!(
-                            self,
-                            "Found MethodCall object for {}->{}! Using enhanced resolution",
-                            caller_name,
-                            call_target
-                        );
-                        return self.resolve_method_call(method_call, file_id, context);
-                    }
-                }
+            let caller_normalized = if let Ok(behavior) = self.get_behavior_for_file(file_id) {
+                behavior.normalize_caller_name(caller_name, file_id)
             } else {
-                for method_call in method_calls {
-                    if method_call.caller == caller_name && method_call.method_name == call_target {
-                        debug_print!(
-                            self,
-                            "Found MethodCall object for {}->{}! Using enhanced resolution",
-                            caller_name,
-                            call_target
-                        );
-                        return self.resolve_method_call(method_call, file_id, context);
-                    }
+                caller_name.to_string()
+            };
+
+            let (receiver_hint, receiver_norm_hint, static_hint, line_hint) =
+                self.extract_metadata_hints(metadata);
+
+            let mut candidates: Vec<_> = method_calls
+                .iter()
+                .filter(|mc| mc.caller == caller_normalized && mc.method_name == call_target)
+                .collect();
+
+            if candidates.len() > 1 {
+                if let Some(ref receiver) = receiver_hint {
+                    candidates.retain(|mc| mc.receiver.as_deref() == Some(receiver.as_str()));
                 }
+            }
+
+            if candidates.len() > 1 {
+                if let Some(ref receiver_norm) = receiver_norm_hint {
+                    candidates.retain(|mc| {
+                        mc.receiver
+                            .as_ref()
+                            .map(|r| Self::normalize_expression_key(r))
+                            .as_ref()
+                            == Some(receiver_norm)
+                    });
+                }
+            }
+
+            if candidates.len() > 1 {
+                if let Some(line) = line_hint {
+                    candidates.retain(|mc| mc.range.start_line == line);
+                }
+            }
+
+            if candidates.len() > 1 {
+                if let Some(is_static) = static_hint {
+                    candidates.retain(|mc| mc.is_static == is_static);
+                }
+            }
+
+            if let Some(method_call) = candidates.first() {
+                debug_print!(
+                    self,
+                    "Found MethodCall object for {}->{}! Using enhanced resolution",
+                    caller_name,
+                    call_target
+                );
+                return self.resolve_method_call(method_call, file_id, context);
             }
         }
 
-        // No MethodCall object found - treat as regular function call
         debug_print!(
             self,
             "No MethodCall object found for {}->{}. Resolving as regular function",
@@ -2098,6 +2812,32 @@ impl SimpleIndexer {
             call_target
         );
         context.resolve(call_target)
+    }
+
+    fn extract_metadata_hints(
+        &self,
+        metadata: Option<&RelationshipMetadata>,
+    ) -> (Option<String>, Option<String>, Option<bool>, Option<u32>) {
+        if let Some(meta) = metadata {
+            let mut receiver = None;
+            let mut receiver_norm = None;
+            let mut static_hint = None;
+            if let Some(ctx) = meta.context.as_deref() {
+                for part in ctx.split(',') {
+                    let trimmed = part.trim();
+                    if let Some(value) = trimmed.strip_prefix("receiver:") {
+                        receiver = Some(value.to_string());
+                    } else if let Some(value) = trimmed.strip_prefix("receiver_norm:") {
+                        receiver_norm = Some(value.to_string());
+                    } else if let Some(value) = trimmed.strip_prefix("static:") {
+                        static_hint = value.parse::<bool>().ok();
+                    }
+                }
+            }
+            (receiver, receiver_norm, static_hint, meta.line)
+        } else {
+            (None, None, None, None)
+        }
     }
 
     /// Resolve a method call using MethodCall struct with rich receiver information
@@ -2138,14 +2878,40 @@ impl SimpleIndexer {
                 receiver,
                 method_call.method_name
             );
+
+            // CRITICAL: Check if receiver is from an external import FIRST
+            // This must happen BEFORE we try to resolve, otherwise we might
+            // incorrectly resolve external symbols (e.g., indicatif::ProgressBar)
+            // to local symbols with the same name
+            if context.is_external_import(receiver) {
+                debug_print!(
+                    self,
+                    "Receiver '{}' is from external import, not resolving static method '{}'",
+                    receiver,
+                    method_call.method_name
+                );
+                return None; // External library - don't resolve
+            }
+
             // For static calls, receiver is the type name, try Type::method format
             let static_method = format!("{}::{}", receiver, method_call.method_name);
-            let result = context
-                .resolve(&static_method)
-                .or_else(|| context.resolve(&method_call.method_name));
+
+            // Try qualified resolution
+            if let Some(id) = context.resolve(&static_method) {
+                debug_print!(
+                    self,
+                    "Resolved static method {} to symbol_id: {:?}",
+                    static_method,
+                    id
+                );
+                return Some(id);
+            }
+
+            // Fall back to method name only (receiver was already checked as non-external above)
+            let result = context.resolve(&method_call.method_name);
             debug_print!(
                 self,
-                "Static method resolution result for {}: {:?}",
+                "Static method fallback resolution for {}: {:?}",
                 method_call.method_name,
                 result
             );
@@ -2153,13 +2919,40 @@ impl SimpleIndexer {
         }
 
         // For instance methods, look up receiver's type
-        let type_name = self.variable_types.get(&(file_id, receiver.to_string()))?;
+        let receiver_key = Self::normalize_expression_key(receiver);
+        let type_name = self
+            .variable_types
+            .get(&(file_id, receiver_key.clone()))
+            .cloned()
+            .or_else(|| {
+                if crate::config::is_global_debug_enabled() {
+                    eprintln!(
+                        "[EXT-RESOLVE] Missing direct type entry for receiver '{receiver}' (key '{receiver_key}') in file {file_id:?}"
+                    );
+                }
+                let resolved = context.resolve_expression_type(receiver);
+                if let Some(ref ty) = resolved {
+                    if crate::config::is_global_debug_enabled() {
+                        eprintln!(
+                            "[EXT-RESOLVE] Context provided type '{ty}' for receiver '{receiver}'"
+                        );
+                    }
+                }
+                resolved
+            })?;
 
-        debug_print!(self, "Found type for {}: {}", receiver, type_name);
+        if crate::config::is_global_debug_enabled() {
+            eprintln!("[EXT-RESOLVE] Found type for receiver '{receiver}': {type_name}");
+        }
 
-        // Check if method comes from a trait
-        // Without legacy resolution, just try direct resolution
-        context.resolve(&method_call.method_name)
+        // Qualify method name with receiver type for extension function resolution
+        // E.g., receiver="42" type="Int" method="double" → "Int.double"
+        let qualified_method = format!("{}.{}", type_name, method_call.method_name);
+        if crate::config::is_global_debug_enabled() {
+            eprintln!("[EXT-RESOLVE] Resolving qualified: {qualified_method}");
+        }
+
+        context.resolve(&qualified_method)
     }
 
     /// Build resolution context for a file with all available symbols
@@ -2182,6 +2975,10 @@ impl SimpleIndexer {
         // Process all unresolved relationships
         let unresolved = std::mem::take(&mut self.unresolved_relationships);
 
+        eprintln!(
+            "Resolving cross-file relationships: {} unresolved entries",
+            unresolved.len()
+        );
         debug_print!(
             self,
             "resolve_cross_file_relationships: {} unresolved relationships",
@@ -2189,110 +2986,33 @@ impl SimpleIndexer {
         );
 
         if unresolved.is_empty() {
+            debug_print!(self, "No unresolved relationships to process");
             return Ok(());
         }
 
         // Start a batch for relationship updates
         self.start_tantivy_batch()?;
 
-        // Pre-create external symbols before resolution
-        // This ensures they're available in Tantivy when we look them up
-        debug_print!(
-            self,
-            "Pre-creating external symbols for {} relationships",
-            unresolved.len()
-        );
-
-        // No longer tracking external symbols since we don't create them anymore
-
-        // Track the symbol counter to ensure unique IDs
-        let symbol_counter = self.get_next_symbol_counter()?;
-
-        for rel in &unresolved {
-            debug_print!(
-                self,
-                "Checking relationship: {} -> {} (kind: {:?}, file: {:?})",
-                rel.from_name,
-                rel.to_name,
-                rel.kind,
-                rel.file_id
-            );
-            if rel.kind == RelationKind::Calls {
-                // Check if this is an external call that needs symbol creation
-                if let Some(behavior) = self.file_behaviors.get(&rel.file_id) {
-                    debug_print!(self, "Found behavior for file {:?}", rel.file_id);
-                    // First try with method call enhanced resolution
-                    if let Some(method_calls) = self.method_calls_by_file.get(&rel.file_id) {
-                        // Look for matching method call to get receiver
-                        for mc in method_calls {
-                            if mc.method_name == rel.to_name.as_ref() {
-                                let target = if let Some(recv) = &mc.receiver {
-                                    format!("{}.{}", recv, mc.method_name)
-                                } else {
-                                    mc.method_name.clone()
-                                };
-
-                                debug_print!(
-                                    self,
-                                    "Calling resolve_external_call_target for '{}' in file {:?}",
-                                    target,
-                                    rel.file_id
-                                );
-                                if let Some((module_path, symbol_name)) =
-                                    behavior.resolve_external_call_target(&target, rel.file_id)
-                                {
-                                    // Skip external symbol creation - we don't want to pollute the index
-                                    // with stub files for unresolved imports
-                                    debug_print!(
-                                        self,
-                                        "Skipping external symbol creation for: {}::{}",
-                                        module_path,
-                                        symbol_name
-                                    );
-                                }
-                                break;
-                            }
-                        }
-                    }
-
-                    // Also try direct resolution
-                    debug_print!(
-                        self,
-                        "Trying direct resolution for '{}' in file {:?}",
-                        rel.to_name,
-                        rel.file_id
-                    );
-                    if let Some((module_path, symbol_name)) =
-                        behavior.resolve_external_call_target(&rel.to_name, rel.file_id)
-                    {
-                        // Skip external symbol creation - we don't want to pollute the index
-                        // with stub files for unresolved imports
-                        debug_print!(
-                            self,
-                            "Skipping external symbol pre-creation for: {}::{}",
-                            module_path,
-                            symbol_name
-                        );
-                    }
-                }
-            }
-        }
-
-        // Update the symbol counter metadata with the final value
-        if symbol_counter.current_count() > 0 {
-            self.update_symbol_counter(&symbol_counter)?;
-        }
-
-        // No longer creating external symbols, so skip the external symbol commit
-        // External symbols are a wrong design decision - we don't want to pollute
-        // the index with stub files for unresolved imports
-
-        // Start a new batch for relationship updates
-        self.start_tantivy_batch()?;
-
         let mut resolved_count = 0;
         let mut skipped_count = 0;
-        let _total_unresolved = unresolved.len();
+        let total_unresolved = unresolved.len();
+
+        let progress = if total_unresolved > 0 {
+            let options = ProgressBarOptions::default()
+                .with_style(ProgressBarStyle::VerticalSolid)
+                .with_width(28);
+            let bar = Arc::new(ProgressBar::with_options(
+                total_unresolved as u64,
+                "relationships",
+                "resolved",
+                "skipped",
+                options,
+            ));
+            let status = StatusLine::new(Arc::clone(&bar));
+            Some((bar, status))
+        } else {
+            None
+        };
 
         // Group relationships by file for efficient context building
         let mut relationships_by_file: std::collections::HashMap<
@@ -2306,12 +3026,21 @@ impl SimpleIndexer {
                 .push(rel);
         }
 
+        // Symbol lookup cache to avoid millions of duplicate Tantivy queries
+        // Maps symbol_name -> Vec<Symbol>
+        let mut symbol_lookup_cache: std::collections::HashMap<String, Vec<Symbol>> =
+            std::collections::HashMap::new();
+
         // Process each file's relationships with its resolution context
         for (file_id, file_relationships) in relationships_by_file {
             // Build resolution context for this file
             let context = self.build_resolution_context(file_id)?;
 
             for rel in file_relationships {
+                if let Some((bar, _)) = &progress {
+                    bar.inc();
+                }
+
                 debug_print!(
                     self,
                     "Processing relationship: {} -> {} (kind: {:?}, file: {:?})",
@@ -2321,59 +3050,142 @@ impl SimpleIndexer {
                     rel.file_id
                 );
 
-                // Find 'from' symbols - these should be in the current file
-                // Normalize caller name via language behavior (handles synthetic names like "<module>")
-                let behavior_for_file = self.get_behavior_for_file(file_id)?;
-                let from_query_name =
-                    behavior_for_file.normalize_caller_name(&rel.from_name, file_id);
-                let all_from_symbols = self
-                    .document_index
-                    .find_symbols_by_name(&from_query_name, None)
-                    .map_err(|e| IndexError::TantivyError {
-                        operation: "find_symbols_by_name".to_string(),
-                        cause: e.to_string(),
-                    })?;
-
-                debug_print!(
-                    self,
-                    "Looking for '{}' symbols, found {} total",
-                    from_query_name,
-                    all_from_symbols.len()
-                );
-                for s in &all_from_symbols {
+                // Find 'from' symbols - use from_id when available to skip lookup
+                let from_symbols: Vec<_> = if let Some(from_id) = rel.from_id {
+                    // We already have the from_id, just fetch the symbol
                     debug_print!(
                         self,
-                        "  - Symbol '{}' in file_id {:?} (looking for {:?})",
-                        s.name,
-                        s.file_id,
-                        file_id
+                        "Using cached from_id: {:?} for '{}'",
+                        from_id,
+                        rel.from_name
                     );
-                }
-
-                // Filter to only symbols from the current file
-                let from_symbols: Vec<_> = all_from_symbols
-                    .into_iter()
-                    .filter(|s| s.file_id == file_id)
-                    .collect();
-
-                debug_print!(
-                    self,
-                    "Found {} from_symbols in current file",
-                    from_symbols.len()
-                );
-
-                if from_symbols.is_empty() && rel.kind == RelationKind::Calls {
+                    match self.document_index.find_symbol_by_id(from_id) {
+                        Ok(Some(symbol)) => vec![symbol],
+                        Ok(None) => {
+                            debug_print!(
+                                self,
+                                "WARNING: from_id {:?} not found for '{}'",
+                                from_id,
+                                rel.from_name
+                            );
+                            Vec::new()
+                        }
+                        Err(e) => {
+                            debug_print!(
+                                self,
+                                "ERROR: Failed to fetch symbol {:?}: {}",
+                                from_id,
+                                e
+                            );
+                            Vec::new()
+                        }
+                    }
+                } else {
+                    // Fallback to name-based lookup
                     debug_print!(
                         self,
-                        "WARNING: No '{}' symbol found in file {:?} for Calls relationship to '{}'",
+                        "No from_id available, falling back to name lookup for '{}'",
+                        rel.from_name
+                    );
+                    let behavior_for_file = self.get_behavior_for_file(file_id)?;
+                    let from_query_name =
+                        behavior_for_file.normalize_caller_name(&rel.from_name, file_id);
+
+                    // Check cache first to avoid duplicate Tantivy queries
+                    let all_from_symbols =
+                        if let Some(cached) = symbol_lookup_cache.get(&from_query_name) {
+                            cached.clone()
+                        } else {
+                            // Cache miss - query Tantivy and cache the result
+                            let symbols = self
+                                .document_index
+                                .find_symbols_by_name(&from_query_name, None)
+                                .map_err(|e| IndexError::TantivyError {
+                                    operation: "find_symbols_by_name".to_string(),
+                                    cause: e.to_string(),
+                                })?;
+                            symbol_lookup_cache.insert(from_query_name.clone(), symbols.clone());
+                            symbols
+                        };
+
+                    debug_print!(
+                        self,
+                        "Looking for '{}' symbols, found {} total",
                         from_query_name,
-                        file_id,
-                        rel.to_name
+                        all_from_symbols.len()
                     );
-                }
+
+                    // Filter to only symbols from the current file
+                    let from_symbols: Vec<_> = all_from_symbols
+                        .into_iter()
+                        .filter(|s| s.file_id == file_id)
+                        .collect();
+
+                    debug_print!(
+                        self,
+                        "Found {} from_symbols in current file",
+                        from_symbols.len()
+                    );
+
+                    if from_symbols.is_empty() && rel.kind == RelationKind::Extends {
+                        println!(
+                            "[SKIP-EMPTY-FROM] No '{}' symbol found in file {:?} for Extends -> '{}'",
+                            from_query_name, file_id, rel.to_name
+                        );
+                    }
+
+                    if from_symbols.is_empty() && rel.kind == RelationKind::Calls {
+                        debug_print!(
+                            self,
+                            "WARNING: No '{}' symbol found in file {:?} for Calls relationship to '{}'",
+                            from_query_name,
+                            file_id,
+                            rel.to_name
+                        );
+                    }
+
+                    from_symbols
+                };
 
                 // Use the clean resolution API that delegates to language-specific logic
-                let to_symbol_id = if rel.kind == RelationKind::Calls && from_symbols.len() == 1 {
+                let to_symbol_id = if rel.kind == RelationKind::Defines && rel.to_range.is_some() {
+                    // Range-based resolution for Defines - disambiguates overloaded methods
+                    let range = rel.to_range.as_ref().unwrap();
+                    debug_print!(
+                        self,
+                        "Resolving Defines by range: {} at {:?}",
+                        rel.to_name,
+                        range
+                    );
+                    match self.document_index.find_symbol_by_name_and_range(
+                        &rel.to_name,
+                        file_id,
+                        range,
+                    ) {
+                        Ok(Some(symbol)) => {
+                            debug_print!(
+                                self,
+                                "Found symbol by range: {} (id: {:?})",
+                                symbol.name,
+                                symbol.id
+                            );
+                            Some(symbol.id)
+                        }
+                        Ok(None) => {
+                            debug_print!(
+                                self,
+                                "No symbol found at range {:?} for {}",
+                                range,
+                                rel.to_name
+                            );
+                            None
+                        }
+                        Err(e) => {
+                            debug_print!(self, "Error finding symbol by range: {}", e);
+                            None
+                        }
+                    }
+                } else if rel.kind == RelationKind::Calls && from_symbols.len() == 1 {
                     // Special handling for method calls with enhanced resolution
                     debug_print!(self, "Resolving as method call: '{}'", rel.to_name);
                     let res = self.resolve_method_call_enhanced(
@@ -2381,6 +3193,7 @@ impl SimpleIndexer {
                         &rel.from_name,
                         file_id,
                         context.as_ref(),
+                        rel.metadata.as_ref(),
                     );
                     debug_print!(
                         self,
@@ -2400,12 +3213,11 @@ impl SimpleIndexer {
                             let to_key = if let Some(method_calls) =
                                 self.method_calls_by_file.get(&file_id)
                             {
-                                // Try to find the matching MethodCall by caller and method name
                                 let caller_name =
                                     from_symbols.first().map(|s| s.name.as_ref()).unwrap_or("");
+                                let target_name = rel.to_name.as_ref();
                                 if let Some(mc) = method_calls.iter().find(|mc| {
-                                    mc.caller == caller_name
-                                        && mc.method_name == rel.to_name.as_ref()
+                                    mc.caller == caller_name && mc.method_name == target_name
                                 }) {
                                     if let Some(recv) = &mc.receiver {
                                         format!("{recv}.{}", mc.method_name)
@@ -2502,11 +3314,17 @@ impl SimpleIndexer {
                     None => {
                         debug_print!(
                             self,
-                            "Failed to resolve target symbol '{}' - skipping",
-                            rel.to_name
+                            "[SKIP-RESOLUTION] Failed to resolve '{}' from '{}' in file {:?} (kind: {:?})",
+                            rel.to_name,
+                            rel.from_name,
+                            rel.file_id,
+                            rel.kind
                         );
                         // Symbol not in scope - skip this relationship
                         skipped_count += 1;
+                        if let Some((bar, _)) = &progress {
+                            bar.add_extra2(1);
+                        }
                         continue;
                     }
                 };
@@ -2525,8 +3343,16 @@ impl SimpleIndexer {
                         symbol
                     }
                     None => {
-                        debug_print!(self, "Target symbol not found in index - skipping");
+                        debug_print!(
+                            self,
+                            "[SKIP-NOT-FOUND] Symbol ID {:?} not found in index for '{}'",
+                            to_symbol_id,
+                            rel.to_name
+                        );
                         skipped_count += 1;
+                        if let Some((bar, _)) = &progress {
+                            bar.add_extra2(1);
+                        }
                         continue;
                     }
                 };
@@ -2541,17 +3367,22 @@ impl SimpleIndexer {
                         to_symbol.name
                     );
 
-                    // Check symbol kind compatibility using language behavior
-                    let behavior = self.get_behavior_for_file(file_id)?;
-                    if !behavior.is_compatible_relationship(
-                        from_symbol.kind,
-                        to_symbol.kind,
-                        rel.kind,
-                        file_id,
-                    ) {
+                    // Check symbol kind compatibility
+                    if !Self::is_compatible_relationship(from_symbol.kind, to_symbol.kind, rel.kind)
+                    {
+                        if rel.kind == RelationKind::Extends {
+                            println!(
+                                "[SKIP-INCOMPATIBLE] {} ({:?}) -> {} ({:?}) for {:?}",
+                                from_symbol.name,
+                                from_symbol.kind,
+                                to_symbol.name,
+                                to_symbol.kind,
+                                rel.kind
+                            );
+                        }
                         debug_print!(
                             self,
-                            "Incompatible relationship: {} ({:?}) -> {} ({:?}) for {:?}",
+                            "[SKIP-INCOMPATIBLE] {} ({:?}) -> {} ({:?}) for {:?}",
                             from_symbol.name,
                             from_symbol.kind,
                             to_symbol.name,
@@ -2559,6 +3390,9 @@ impl SimpleIndexer {
                             rel.kind
                         );
                         skipped_count += 1;
+                        if let Some((bar, _)) = &progress {
+                            bar.add_extra2(1);
+                        }
                         continue;
                     }
 
@@ -2576,11 +3410,17 @@ impl SimpleIndexer {
                         if !Self::is_symbol_visible_from(&to_symbol, from_symbol) {
                             debug_print!(
                                 self,
-                                "Symbol not visible: {} not visible from {}",
+                                "[SKIP-VISIBILITY] {} not visible from {} (to_vis: {:?}, to_module: {:?}, from_module: {:?})",
                                 to_symbol.name,
-                                from_symbol.name
+                                from_symbol.name,
+                                to_symbol.visibility,
+                                to_symbol.module_path,
+                                from_symbol.module_path
                             );
                             skipped_count += 1;
+                            if let Some((bar, _)) = &progress {
+                                bar.add_extra2(1);
+                            }
                             continue;
                         }
                     }
@@ -2588,18 +3428,12 @@ impl SimpleIndexer {
                     // Add the relationship with preserved metadata
                     debug_print!(
                         self,
-                        "Adding relationship: {} -> {} (kind: {:?})",
-                        from_symbol.name,
-                        to_symbol.name,
-                        rel.kind
-                    );
-                    debug_print!(
-                        self,
-                        "Adding relationship: {} ({:?}) -> {} ({:?})",
+                        "[SUCCESS] Adding relationship: {} ({:?}) -> {} ({:?}) kind: {:?}",
                         from_symbol.name,
                         from_symbol.id,
                         to_symbol.name,
-                        to_symbol.id
+                        to_symbol.id,
+                        rel.kind
                     );
                     let mut relationship = Relationship::new(rel.kind);
                     if let Some(ref metadata) = rel.metadata {
@@ -2607,6 +3441,9 @@ impl SimpleIndexer {
                     }
                     self.add_relationship_internal(from_symbol.id, to_symbol.id, relationship)?;
                     resolved_count += 1;
+                    if let Some((bar, _)) = &progress {
+                        bar.add_extra1(1);
+                    }
                 }
             }
         }
@@ -2614,12 +3451,17 @@ impl SimpleIndexer {
         // Commit the batch with all the relationships
         self.commit_tantivy_batch()?;
 
+        if let Some((bar, status)) = progress {
+            drop(status);
+            eprintln!("{bar}");
+        }
+
         debug_print!(
             self,
             "Relationship resolution complete - resolved: {}, skipped: {}, total: {}",
             resolved_count,
             skipped_count,
-            _total_unresolved
+            total_unresolved
         );
 
         Ok(())
@@ -2684,6 +3526,9 @@ impl SimpleIndexer {
     pub fn build_symbol_cache(&mut self) -> IndexResult<()> {
         let cache_path = self.get_cache_path();
 
+        // Clear any existing cache first to release memory-mapped views (Windows fix)
+        self.clear_symbol_cache(false)?;
+
         // Get all symbols from the index (use the existing public method)
         let all_symbols = self.get_all_symbols();
         debug_print!(
@@ -2729,6 +3574,24 @@ impl SimpleIndexer {
         Ok(())
     }
 
+    /// Clear symbol cache (drop memory-mapped view and optionally delete file)
+    pub fn clear_symbol_cache(&mut self, delete_file: bool) -> IndexResult<()> {
+        // Drop the existing cache to release any memory-mapped views
+        self.symbol_cache = None;
+
+        if delete_file {
+            let cache_path = self.get_cache_path();
+            if cache_path.exists() {
+                std::fs::remove_file(&cache_path).map_err(|e| {
+                    IndexError::General(format!("Failed to delete symbol cache file: {e}"))
+                })?;
+                debug_print!(self, "Deleted symbol cache file: {}", cache_path.display());
+            }
+        }
+
+        Ok(())
+    }
+
     /// Load symbol cache if it exists
     pub fn load_symbol_cache(&mut self) -> IndexResult<()> {
         let cache_path = self.get_cache_path();
@@ -2769,10 +3632,60 @@ impl SimpleIndexer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
     use std::path::PathBuf;
+    use tempfile::TempDir;
 
     use crate::types::SymbolCounter;
     use crate::{FileId, RelationKind, Symbol, SymbolKind, Visibility};
+
+    #[test]
+    fn test_indexer_skips_child_path_when_parent_tracked() {
+        let temp_dir = TempDir::new().unwrap();
+        let parent = temp_dir.path().join("parent");
+        let child = parent.join("child");
+        fs::create_dir_all(&child).unwrap();
+
+        let settings = Arc::new(Settings {
+            index_path: temp_dir.path().join("index"),
+            ..Settings::default()
+        });
+        let mut indexer = SimpleIndexer::with_settings(settings);
+
+        indexer.add_indexed_path(&parent).unwrap();
+        let tracked_after_parent = indexer.get_indexed_paths().len();
+
+        // Adding child should be a no-op because parent already covers it
+        indexer.add_indexed_path(&child).unwrap();
+        assert_eq!(
+            indexer.get_indexed_paths().len(),
+            tracked_after_parent,
+            "child directory should not be tracked when parent already exists"
+        );
+    }
+
+    #[test]
+    fn test_indexer_replaces_children_when_parent_added() {
+        let temp_dir = TempDir::new().unwrap();
+        let parent = temp_dir.path().join("parent");
+        let child = parent.join("child");
+        fs::create_dir_all(&child).unwrap();
+
+        let settings = Arc::new(Settings {
+            index_path: temp_dir.path().join("index"),
+            ..Settings::default()
+        });
+        let mut indexer = SimpleIndexer::with_settings(settings);
+
+        indexer.add_indexed_path(&child).unwrap();
+        assert_eq!(indexer.get_indexed_paths().len(), 1);
+
+        indexer.add_indexed_path(&parent).unwrap();
+        assert_eq!(indexer.get_indexed_paths().len(), 1);
+
+        let stored_paths: Vec<_> = indexer.get_indexed_paths().iter().cloned().collect();
+        assert_eq!(stored_paths[0], parent.canonicalize().unwrap());
+    }
 
     #[test]
     fn test_trait_implementations_resolution() {
@@ -2818,6 +3731,7 @@ mod tests {
             kind: SymbolKind::Trait,
             range: crate::Range::new(0, 0, 0, 0),
             file_id,
+            file_path: "<unknown>".into(),
             visibility: Visibility::Public,
             doc_comment: None,
             signature: None,
@@ -2832,6 +3746,7 @@ mod tests {
             kind: SymbolKind::Struct,
             range: crate::Range::new(1, 0, 1, 0),
             file_id,
+            file_path: "<unknown>".into(),
             visibility: Visibility::Public,
             doc_comment: None,
             signature: None,
@@ -2851,6 +3766,7 @@ mod tests {
         // Register the implementation relationship
         indexer
             .add_relationships_by_name(
+                None,
                 "MyStruct",
                 "MyTrait",
                 file_id,
@@ -3296,9 +4212,211 @@ pub struct Another {
         assert_eq!(SimpleIndexer::module_proximity(None, None), 4);
     }
 
+    #[test]
+    fn test_is_compatible_relationship_calls() {
+        // Valid call relationships - executable code calling executable code
+        assert!(SimpleIndexer::is_compatible_relationship(
+            SymbolKind::Function,
+            SymbolKind::Function,
+            RelationKind::Calls
+        ));
+        assert!(SimpleIndexer::is_compatible_relationship(
+            SymbolKind::Method,
+            SymbolKind::Function,
+            RelationKind::Calls
+        ));
+        assert!(SimpleIndexer::is_compatible_relationship(
+            SymbolKind::Function,
+            SymbolKind::Method,
+            RelationKind::Calls
+        ));
+        assert!(SimpleIndexer::is_compatible_relationship(
+            SymbolKind::Macro,
+            SymbolKind::Function,
+            RelationKind::Calls
+        ));
+
+        // Constants and Variables can hold functions in dynamic languages
+        // This supports patterns like: const actions = { submit: () => {...} }
+        assert!(SimpleIndexer::is_compatible_relationship(
+            SymbolKind::Constant,
+            SymbolKind::Function,
+            RelationKind::Calls
+        ));
+        assert!(SimpleIndexer::is_compatible_relationship(
+            SymbolKind::Variable,
+            SymbolKind::Function,
+            RelationKind::Calls
+        ));
+
+        // Invalid call relationships - non-executable code
+        assert!(!SimpleIndexer::is_compatible_relationship(
+            SymbolKind::Struct,
+            SymbolKind::Function,
+            RelationKind::Calls
+        ));
+        assert!(!SimpleIndexer::is_compatible_relationship(
+            SymbolKind::Trait,
+            SymbolKind::Method,
+            RelationKind::Calls
+        ));
+        assert!(!SimpleIndexer::is_compatible_relationship(
+            SymbolKind::Function,
+            SymbolKind::Struct,
+            RelationKind::Calls
+        ));
+    }
+
+    #[test]
+    fn test_is_compatible_relationship_implements() {
+        // Valid implements relationships - types implementing interfaces
+        assert!(SimpleIndexer::is_compatible_relationship(
+            SymbolKind::Struct,
+            SymbolKind::Trait,
+            RelationKind::Implements
+        ));
+        assert!(SimpleIndexer::is_compatible_relationship(
+            SymbolKind::Enum,
+            SymbolKind::Trait,
+            RelationKind::Implements
+        ));
+        assert!(SimpleIndexer::is_compatible_relationship(
+            SymbolKind::Class,
+            SymbolKind::Interface,
+            RelationKind::Implements
+        ));
+        assert!(SimpleIndexer::is_compatible_relationship(
+            SymbolKind::Class,
+            SymbolKind::Trait,
+            RelationKind::Implements
+        ));
+
+        // Invalid implements relationships
+        assert!(!SimpleIndexer::is_compatible_relationship(
+            SymbolKind::Function,
+            SymbolKind::Trait,
+            RelationKind::Implements
+        ));
+        assert!(!SimpleIndexer::is_compatible_relationship(
+            SymbolKind::Struct,
+            SymbolKind::Function,
+            RelationKind::Implements
+        ));
+        assert!(!SimpleIndexer::is_compatible_relationship(
+            SymbolKind::Trait,
+            SymbolKind::Struct,
+            RelationKind::Implements
+        ));
+    }
+
+    #[test]
+    fn test_is_compatible_relationship_uses() {
+        // Valid uses relationships - language agnostic
+        assert!(SimpleIndexer::is_compatible_relationship(
+            SymbolKind::Function,
+            SymbolKind::Struct,
+            RelationKind::Uses
+        ));
+        assert!(SimpleIndexer::is_compatible_relationship(
+            SymbolKind::Method,
+            SymbolKind::Enum,
+            RelationKind::Uses
+        ));
+        assert!(SimpleIndexer::is_compatible_relationship(
+            SymbolKind::Class,
+            SymbolKind::Interface,
+            RelationKind::Uses
+        ));
+        assert!(SimpleIndexer::is_compatible_relationship(
+            SymbolKind::Module,
+            SymbolKind::TypeAlias,
+            RelationKind::Uses
+        ));
+        assert!(SimpleIndexer::is_compatible_relationship(
+            SymbolKind::Function,
+            SymbolKind::Constant,
+            RelationKind::Uses
+        ));
+        assert!(SimpleIndexer::is_compatible_relationship(
+            SymbolKind::Method,
+            SymbolKind::Variable,
+            RelationKind::Uses
+        ));
+
+        // Invalid uses relationships - what can't use things
+        assert!(!SimpleIndexer::is_compatible_relationship(
+            SymbolKind::Constant,
+            SymbolKind::Struct,
+            RelationKind::Uses
+        ));
+        assert!(!SimpleIndexer::is_compatible_relationship(
+            SymbolKind::Variable,
+            SymbolKind::Class,
+            RelationKind::Uses
+        ));
+        assert!(!SimpleIndexer::is_compatible_relationship(
+            SymbolKind::Field,
+            SymbolKind::Function,
+            RelationKind::Uses
+        ));
+    }
+
+    #[test]
+    fn test_is_compatible_relationship_defines() {
+        // Valid defines relationships - containers defining members
+        assert!(SimpleIndexer::is_compatible_relationship(
+            SymbolKind::Trait,
+            SymbolKind::Method,
+            RelationKind::Defines
+        ));
+        assert!(SimpleIndexer::is_compatible_relationship(
+            SymbolKind::Module,
+            SymbolKind::Function,
+            RelationKind::Defines
+        ));
+        assert!(SimpleIndexer::is_compatible_relationship(
+            SymbolKind::Struct,
+            SymbolKind::Field,
+            RelationKind::Defines
+        ));
+        assert!(SimpleIndexer::is_compatible_relationship(
+            SymbolKind::Class,
+            SymbolKind::Method,
+            RelationKind::Defines
+        ));
+        assert!(SimpleIndexer::is_compatible_relationship(
+            SymbolKind::Interface,
+            SymbolKind::Method,
+            RelationKind::Defines
+        ));
+        assert!(SimpleIndexer::is_compatible_relationship(
+            SymbolKind::Enum,
+            SymbolKind::Constant,
+            RelationKind::Defines
+        ));
+
+        // Invalid defines relationships - non-containers
+        assert!(!SimpleIndexer::is_compatible_relationship(
+            SymbolKind::Function,
+            SymbolKind::Method,
+            RelationKind::Defines
+        ));
+        assert!(!SimpleIndexer::is_compatible_relationship(
+            SymbolKind::Method,
+            SymbolKind::Function,
+            RelationKind::Defines
+        ));
+        assert!(!SimpleIndexer::is_compatible_relationship(
+            SymbolKind::Variable,
+            SymbolKind::Field,
+            RelationKind::Defines
+        ));
+    }
+
     // ===== Stage 3 Baseline Tests =====
     // These tests capture the CURRENT behavior of configure_symbol
     // to ensure refactoring doesn't change functionality
+
     #[test]
     fn test_configure_symbol_baseline_rust() {
         use crate::parsing::RustBehavior;
@@ -3324,6 +4442,7 @@ pub struct Another {
             module_path: None,
             file_id: FileId(1),
             range: crate::Range::new(0, 10, 0, 20),
+            file_path: "<unknown>".into(),
             visibility: Visibility::Private,
             doc_comment: None,
             scope_context: None,
@@ -3367,6 +4486,7 @@ pub struct Another {
             module_path: None,
             file_id: FileId(1),
             range: crate::Range::new(0, 10, 0, 20),
+            file_path: "<unknown>".into(),
             visibility: Visibility::Public,
             doc_comment: None,
             scope_context: None,
@@ -3407,6 +4527,7 @@ pub struct Another {
             module_path: None,
             file_id: FileId(1),
             range: crate::Range::new(0, 10, 0, 20),
+            file_path: "<unknown>".into(),
             visibility: Visibility::Public,
             doc_comment: None,
             scope_context: None,
@@ -3454,6 +4575,7 @@ pub struct Another {
             module_path: None,
             file_id: FileId(1),
             range: crate::Range::new(0, 10, 0, 20),
+            file_path: "<unknown>".into(),
             visibility: Visibility::Private,
             doc_comment: None,
             scope_context: None,
@@ -3468,6 +4590,7 @@ pub struct Another {
             module_path: None,
             file_id: FileId(2),
             range: crate::Range::new(0, 10, 0, 20),
+            file_path: "<unknown>".into(),
             visibility: Visibility::Private,
             doc_comment: None,
             scope_context: None,
@@ -3482,6 +4605,7 @@ pub struct Another {
             module_path: None,
             file_id: FileId(3),
             range: crate::Range::new(0, 10, 0, 20),
+            file_path: "<unknown>".into(),
             visibility: Visibility::Private,
             doc_comment: None,
             scope_context: None,
@@ -4155,10 +5279,10 @@ def main():
         }
         assert!(!logger_symbols.is_empty(), "Should find Logger class");
 
-        // Find the log method
+        // Find the log method (Python methods use qualified names: "Logger.log")
         let log_symbols = indexer
             .document_index
-            .find_symbols_by_name("log", None)
+            .find_symbols_by_name("Logger.log", None)
             .expect("Failed to find log method");
         println!("Found log symbols: {}", log_symbols.len());
         for symbol in &log_symbols {
@@ -4181,7 +5305,7 @@ def main():
         for (_from_id, to_id, _relationship) in &defines_relationships {
             if let Ok(Some(target_symbol)) = indexer.document_index.find_symbol_by_id(*to_id) {
                 println!("  Logger defines: {} (id: {:?})", target_symbol.name, to_id);
-                if target_symbol.name.as_ref() == "log" {
+                if target_symbol.name.as_ref() == "Logger.log" {
                     println!("  ✓ PASS: Logger correctly defines log method");
                 }
             }
@@ -4190,7 +5314,7 @@ def main():
         // Verify that Logger defines log was resolved correctly
         let log_defined_by_logger = defines_relationships.iter().any(|(_, to_id, _)| {
             if let Ok(Some(target)) = indexer.document_index.find_symbol_by_id(*to_id) {
-                target.name.as_ref() == "log"
+                target.name.as_ref() == "Logger.log"
             } else {
                 false
             }

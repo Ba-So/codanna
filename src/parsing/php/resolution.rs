@@ -6,6 +6,7 @@
 //! - Interface implementation (multiple interfaces)
 //! - Trait usage with precedence rules
 
+use crate::parsing::resolution::ImportBinding;
 use crate::parsing::{InheritanceResolver, ResolutionScope, ScopeLevel, ScopeType};
 use crate::{FileId, SymbolId};
 use std::collections::HashMap;
@@ -49,6 +50,9 @@ pub struct PhpResolutionContext {
 
     /// Current class for method resolution
     current_class: Option<String>,
+
+    /// Binding info for imports keyed by visible name
+    import_bindings: HashMap<String, ImportBinding>,
 }
 
 impl PhpResolutionContext {
@@ -63,6 +67,7 @@ impl PhpResolutionContext {
             use_statements: HashMap::new(),
             scope_stack: Vec::new(),
             current_class: None,
+            import_bindings: HashMap::new(),
         }
     }
 
@@ -258,6 +263,22 @@ impl ResolutionScope for PhpResolutionContext {
         }
 
         symbols
+    }
+
+    fn populate_imports(&mut self, imports: &[crate::parsing::Import]) {
+        // Convert Import records into use statements
+        for import in imports {
+            self.add_use_statement(import.alias.clone(), import.path.clone());
+        }
+    }
+
+    fn register_import_binding(&mut self, binding: ImportBinding) {
+        self.import_bindings
+            .insert(binding.exposed_name.clone(), binding);
+    }
+
+    fn import_binding(&self, name: &str) -> Option<ImportBinding> {
+        self.import_bindings.get(name).cloned()
     }
 }
 

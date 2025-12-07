@@ -12,6 +12,7 @@
 //! verify compatibility with node type names used in this implementation.
 
 use crate::parsing::Import;
+use crate::parsing::parser::check_recursion_depth;
 use crate::parsing::{
     HandledNode, Language, LanguageParser, MethodCall, NodeTracker, NodeTrackingState,
     ParserContext, ScopeType,
@@ -102,6 +103,7 @@ impl PythonParser {
             &mut symbols,
             symbol_counter,
             &mut context,
+            0,
         );
 
         symbols
@@ -131,7 +133,11 @@ impl PythonParser {
         symbols: &mut Vec<Symbol>,
         counter: &mut SymbolCounter,
         context: &mut ParserContext,
+        depth: usize,
     ) {
+        if !check_recursion_depth(depth, node) {
+            return;
+        }
         match node.kind() {
             "function_definition" => {
                 self.register_handled_node(node.kind(), node.kind_id());
@@ -155,7 +161,7 @@ impl PythonParser {
                 }
 
                 // Process children to find nested functions
-                self.process_children(node, code, file_id, symbols, counter, context);
+                self.process_children(node, code, file_id, symbols, counter, context, depth);
 
                 // CRITICAL: Exit scope first (this clears the current context)
                 context.exit_scope();
@@ -192,7 +198,7 @@ impl PythonParser {
                 }
 
                 // Continue processing children to find methods inside the class
-                self.process_children(node, code, file_id, symbols, counter, context);
+                self.process_children(node, code, file_id, symbols, counter, context, depth);
 
                 // CRITICAL: Exit scope first (this clears the current context)
                 context.exit_scope();
@@ -203,13 +209,13 @@ impl PythonParser {
             }
             "expression_statement" => {
                 // Process children (including assignments handled by direct "assignment" case)
-                self.process_children(node, code, file_id, symbols, counter, context);
+                self.process_children(node, code, file_id, symbols, counter, context, depth);
             }
             "decorated_definition" => {
                 self.register_handled_node(node.kind(), node.kind_id());
                 // Handle decorated functions and classes (@property, @staticmethod, etc.)
                 // Process ALL children to ensure decorators are tracked
-                self.process_children(node, code, file_id, symbols, counter, context);
+                self.process_children(node, code, file_id, symbols, counter, context, depth);
             }
             "assignment" => {
                 self.register_handled_node(node.kind(), node.kind_id());
@@ -219,7 +225,7 @@ impl PythonParser {
                     symbols.push(symbol);
                 }
                 // Also process children to track lambda, comprehensions, etc. on the right side
-                self.process_children(node, code, file_id, symbols, counter, context);
+                self.process_children(node, code, file_id, symbols, counter, context, depth);
             }
             "type_alias_statement" => {
                 self.register_handled_node(node.kind(), node.kind_id());
@@ -233,12 +239,12 @@ impl PythonParser {
                 self.register_handled_node(node.kind(), node.kind_id());
                 // For now, just process children to find any nested symbols
                 // TODO: Consider creating import symbols for better cross-file resolution
-                self.process_children(node, code, file_id, symbols, counter, context);
+                self.process_children(node, code, file_id, symbols, counter, context, depth);
             }
             "lambda" => {
                 self.register_handled_node(node.kind(), node.kind_id());
                 // Lambda expressions - process children for nested symbols
-                self.process_children(node, code, file_id, symbols, counter, context);
+                self.process_children(node, code, file_id, symbols, counter, context, depth);
             }
             "list_comprehension"
             | "dictionary_comprehension"
@@ -246,28 +252,28 @@ impl PythonParser {
             | "generator_expression" => {
                 self.register_handled_node(node.kind(), node.kind_id());
                 // Comprehensions - process children for nested symbols
-                self.process_children(node, code, file_id, symbols, counter, context);
+                self.process_children(node, code, file_id, symbols, counter, context, depth);
             }
             "decorator" => {
                 self.register_handled_node(node.kind(), node.kind_id());
                 // Decorators - process children
-                self.process_children(node, code, file_id, symbols, counter, context);
+                self.process_children(node, code, file_id, symbols, counter, context, depth);
             }
             "for_statement" => {
                 self.register_handled_node(node.kind(), node.kind_id());
                 // For loops - process children for nested symbols
-                self.process_children(node, code, file_id, symbols, counter, context);
+                self.process_children(node, code, file_id, symbols, counter, context, depth);
             }
             "type" => {
                 self.register_handled_node(node.kind(), node.kind_id());
                 // Type annotations - process children
-                self.process_children(node, code, file_id, symbols, counter, context);
+                self.process_children(node, code, file_id, symbols, counter, context, depth);
             }
             _ => {
                 // Track any other nodes we encounter
                 self.register_handled_node(node.kind(), node.kind_id());
                 // Recursively process children
-                self.process_children(node, code, file_id, symbols, counter, context);
+                self.process_children(node, code, file_id, symbols, counter, context, depth);
             }
         }
     }
@@ -370,9 +376,18 @@ impl PythonParser {
         symbols: &mut Vec<Symbol>,
         counter: &mut SymbolCounter,
         context: &mut ParserContext,
+        depth: usize,
     ) {
         for child in node.children(&mut node.walk()) {
-            self.extract_symbols_from_node(child, code, file_id, symbols, counter, context);
+            self.extract_symbols_from_node(
+                child,
+                code,
+                file_id,
+                symbols,
+                counter,
+                context,
+                depth + 1,
+            );
         }
     }
 

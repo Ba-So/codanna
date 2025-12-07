@@ -380,6 +380,203 @@ int main() {
         std::cout << num << " ";
     }
     std::cout << std::endl;
-    
+
     return 0;
+}
+
+/**
+ * @brief Color enumeration for testing enum extraction
+ */
+enum Color {
+    RED,
+    GREEN,
+    BLUE
+};
+
+/**
+ * @brief Point structure for testing struct extraction
+ */
+struct Point {
+    int x;
+    int y;
+};
+
+/**
+ * @brief Status enum class for scoped enums
+ */
+enum class Status {
+    SUCCESS,
+    FAILURE,
+    PENDING
+};
+
+/**
+ * @brief Union for testing union_specifier
+ */
+union Data {
+    int integer;
+    float floating;
+    char character;
+};
+
+/**
+ * @brief Type alias using typedef
+ */
+typedef unsigned long ulong;
+typedef Point* PointPtr;
+
+/**
+ * @brief Using declarations to bring symbols into scope
+ */
+using std::cout;
+using std::endl;
+using std::vector;
+
+/**
+ * @brief Modern type alias using alias declaration
+ */
+using StringVector = std::vector<std::string>;
+using IntPtr = std::unique_ptr<int>;
+
+/**
+ * @class OperatorExample
+ * @brief Demonstrates operator overloading
+ */
+class OperatorExample {
+private:
+    int value_;
+
+public:
+    /**
+     * @brief Constructor with parameter
+     */
+    explicit OperatorExample(int val) : value_(val) {}
+
+    /**
+     * @brief Copy constructor
+     */
+    OperatorExample(const OperatorExample& other) : value_(other.value_) {}
+
+    /**
+     * @brief Destructor
+     */
+    ~OperatorExample() {
+        // Cleanup
+    }
+
+    /**
+     * @brief Operator overload: addition
+     */
+    OperatorExample operator+(const OperatorExample& other) const {
+        return OperatorExample(value_ + other.value_);
+    }
+
+    /**
+     * @brief Operator overload: assignment
+     */
+    OperatorExample& operator=(const OperatorExample& other) {
+        if (this != &other) {
+            value_ = other.value_;
+        }
+        return *this;
+    }
+
+    /**
+     * @brief Operator overload: equality
+     */
+    bool operator==(const OperatorExample& other) const {
+        return value_ == other.value_;
+    }
+
+    /**
+     * @brief Operator overload: stream output
+     */
+    friend std::ostream& operator<<(std::ostream& os, const OperatorExample& obj) {
+        os << obj.value_;
+        return os;
+    }
+
+    int getValue() const { return value_; }
+};
+
+/**
+ * @brief Template instantiation examples
+ */
+void template_instantiation_examples() {
+    // Explicit template instantiation
+    std::vector<int> int_vector;
+    std::vector<std::string> string_vector;
+
+    // Template class instantiation
+    std::unique_ptr<geometry::Circle> circle_ptr = std::make_unique<geometry::Circle>(10.0);
+    std::unique_ptr<geometry::Rectangle> rect_ptr = std::make_unique<geometry::Rectangle>(5.0, 10.0);
+
+    // Template function instantiation
+    auto max_int = utils::max<int>(10, 20);
+    auto max_double = utils::max<double>(3.14, 2.71);
+}
+
+/**
+ * @brief Call expression examples for parser testing
+ */
+void call_expression_examples() {
+    // Simple call_expression
+    demonstrate_lambdas();
+    demonstrate_exceptions(true);
+
+    // Member function calls (field_expression)
+    geometry::Circle circle(5.0);
+    double area = circle.area();
+    double perimeter = circle.perimeter();
+    circle.display();
+
+    // Pointer member calls (field_expression with ->)
+    geometry::Circle* circle_ptr = new geometry::Circle(3.0);
+    double ptr_area = circle_ptr->area();
+    circle_ptr->display();
+    delete circle_ptr;
+
+    // Scoped function calls (scoped_identifier)
+    int max_val = utils::max(10, 20);
+    int specialized = utils::max<int>(30, 40);
+
+    // More scoped_identifier examples
+    std::string str = "test";
+    std::vector<int> vec;
+    std::cout << "Using scoped_identifier" << std::endl;
+    std::make_unique<int>(42);
+    geometry::Circle::radius();  // scoped static member access
+
+    // Nested member calls (multiple field_expressions)
+    std::unique_ptr<geometry::Shape> shape = std::make_unique<geometry::Circle>(7.0);
+    shape->display();
+
+    // Static member function calls (qualified_identifier in call context)
+    std::cout << "Test output" << std::endl;
+}
+
+/**
+ * @class TestClass
+ * @brief Class with external method definitions for qualified_identifier testing
+ */
+class TestClass {
+public:
+    void methodA();
+    void methodB() const;
+    static void staticMethod();
+};
+
+// Method implementation with qualified_identifier
+void TestClass::methodA() {
+    std::cout << "TestClass::methodA implementation" << std::endl;
+}
+
+// Const method with qualified_identifier
+void TestClass::methodB() const {
+    std::cout << "TestClass::methodB const implementation" << std::endl;
+}
+
+// Static method with qualified_identifier
+void TestClass::staticMethod() {
+    std::cout << "TestClass::staticMethod implementation" << std::endl;
 }

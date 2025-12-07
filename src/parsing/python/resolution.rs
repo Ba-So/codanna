@@ -5,6 +5,7 @@
 //! - Class inheritance with Method Resolution Order (MRO)
 //! - Module imports with aliasing
 
+use crate::parsing::resolution::ImportBinding;
 use crate::parsing::{InheritanceResolver, ResolutionScope, ScopeLevel, ScopeType};
 use crate::{FileId, SymbolId};
 use std::collections::HashMap;
@@ -49,6 +50,9 @@ pub struct PythonResolutionContext {
 
     /// Track current class for method resolution
     current_class: Option<String>,
+
+    /// Binding info for imports keyed by visible name
+    import_bindings: HashMap<String, ImportBinding>,
 }
 
 impl PythonResolutionContext {
@@ -63,6 +67,7 @@ impl PythonResolutionContext {
             scope_stack: Vec::new(),
             imports: Vec::new(),
             current_class: None,
+            import_bindings: HashMap::new(),
         }
     }
 
@@ -272,6 +277,31 @@ impl ResolutionScope for PythonResolutionContext {
                 self.resolve(to_name)
             }
         }
+    }
+
+    fn populate_imports(&mut self, imports: &[crate::parsing::Import]) {
+        // Convert Import records into our internal format: (module_path, vec[(name, alias)])
+        for import in imports {
+            // Extract module and name from the import path
+            // For "from myapp.utils import helper", we store module="myapp.utils", name="helper"
+            if let Some(last_dot) = import.path.rfind('.') {
+                let module = import.path[..last_dot].to_string();
+                let name = import.path[last_dot + 1..].to_string();
+                self.add_import(module, name, import.alias.clone());
+            } else {
+                // Simple import like "import os" - module is the path, name is empty
+                self.add_import(import.path.clone(), String::new(), import.alias.clone());
+            }
+        }
+    }
+
+    fn register_import_binding(&mut self, binding: ImportBinding) {
+        self.import_bindings
+            .insert(binding.exposed_name.clone(), binding);
+    }
+
+    fn import_binding(&self, name: &str) -> Option<ImportBinding> {
+        self.import_bindings.get(name).cloned()
     }
 }
 

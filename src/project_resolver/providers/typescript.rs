@@ -10,7 +10,7 @@ use crate::config::Settings;
 use crate::project_resolver::{
     ResolutionResult, Sha256Hash,
     memo::ResolutionMemo,
-    persist::{ResolutionPersistence, ResolutionRules},
+    persist::{ResolutionIndex, ResolutionPersistence, ResolutionRules},
     provider::ProjectResolutionProvider,
     sha::compute_file_sha,
 };
@@ -134,11 +134,13 @@ impl ProjectResolutionProvider for TypeScriptProvider {
         let config_paths = self.config_paths(settings);
 
         // Create persistence manager
-        let codanna_dir = std::path::Path::new(".codanna");
+        let codanna_dir = std::path::Path::new(crate::init::local_dir_name());
         let persistence = ResolutionPersistence::new(codanna_dir);
 
-        // Load or create resolution index
-        let mut index = persistence.load("typescript")?;
+        // Load or create resolution index (graceful fallback if cache doesn't exist yet)
+        let mut index = persistence
+            .load("typescript")
+            .unwrap_or_else(|_| ResolutionIndex::new());
 
         // Process each config file
         for config_path in &config_paths {
@@ -345,6 +347,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "Requires local filesystem write permissions - run with: cargo test -- --ignored"]
     fn rebuild_cache_succeeds_without_actual_files() {
         let provider = TypeScriptProvider::new();
         let settings = create_test_settings_with_ts_config(vec![PathBuf::from("tsconfig.json")]);

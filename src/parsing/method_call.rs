@@ -524,7 +524,7 @@ mod tests {
 
         // Method chains require tracking intermediate types
         // This demonstrates the foundation for chain support
-        let chain_components = vec![
+        let chain_components = [
             // foo().bar().baz() - broken into components
             ("main", "foo", None, Range::new(10, 12, 10, 17)),
             (

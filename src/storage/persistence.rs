@@ -34,6 +34,19 @@ impl IndexPersistence {
 
         metadata.update_counts(indexer.symbol_count() as u32, indexer.file_count());
 
+        // Update indexed paths for sync detection on next load
+        let indexed_paths: Vec<PathBuf> = indexer.get_indexed_paths().iter().cloned().collect();
+        if indexer.settings().debug {
+            eprintln!(
+                "DEBUG: Saving {} indexed paths to metadata",
+                indexed_paths.len()
+            );
+            for path in &indexed_paths {
+                eprintln!("  - {}", path.display());
+            }
+        }
+        metadata.update_indexed_paths(indexed_paths);
+
         // Update metadata to reflect Tantivy
         metadata.data_source = DataSource::Tantivy {
             path: self.base_path.join("tantivy"),
@@ -44,7 +57,11 @@ impl IndexPersistence {
         metadata.save(&self.base_path)?;
 
         // Update project registry with latest metadata
-        self.update_project_registry(&metadata)?;
+        if let Err(err) = self.update_project_registry(&metadata) {
+            eprintln!(
+                "Note: Skipped project registry update ({err}). The index itself was saved successfully; registry metadata will refresh once permissions allow writing to ~/.codanna."
+            );
+        }
 
         // Save semantic search if enabled
         if indexer.has_semantic_search() {
@@ -103,7 +120,7 @@ impl IndexPersistence {
             };
 
             // Display source info with fresh counts
-            if let Some(meta) = metadata {
+            if let Some(ref meta) = metadata {
                 // Get fresh counts from the actual index
                 let fresh_symbol_count = indexer.symbol_count();
                 let fresh_file_count = indexer.file_count();
@@ -156,6 +173,29 @@ impl IndexPersistence {
                 }
             }
 
+            // Restore indexed_paths from metadata to the indexer
+            if let Some(ref meta) = metadata {
+                if let Some(ref stored_paths) = meta.indexed_paths {
+                    for path in stored_paths {
+                        if let Err(e) = indexer.add_indexed_path(path) {
+                            if debug {
+                                eprintln!(
+                                    "DEBUG: Failed to restore indexed path {}: {}",
+                                    path.display(),
+                                    e
+                                );
+                            }
+                        }
+                    }
+                    if info || debug {
+                        eprintln!(
+                            "DEBUG: Restored {} indexed paths from metadata",
+                            stored_paths.len()
+                        );
+                    }
+                }
+            }
+
             Ok(indexer)
         } else {
             Err(IndexError::FileRead {
@@ -179,7 +219,52 @@ impl IndexPersistence {
     pub fn clear(&self) -> Result<(), std::io::Error> {
         let tantivy_path = self.base_path.join("tantivy");
         if tantivy_path.exists() {
-            std::fs::remove_dir_all(tantivy_path)?;
+            // On Windows, we may need multiple attempts due to file locking
+            let mut attempts = 0;
+            const MAX_ATTEMPTS: u32 = 3;
+
+            loop {
+                match std::fs::remove_dir_all(&tantivy_path) {
+                    Ok(()) => break,
+                    Err(e) if attempts < MAX_ATTEMPTS => {
+                        attempts += 1;
+
+                        // Retry logic for file locking issues
+                        #[cfg(windows)]
+                        {
+                            // Windows-specific: Check for permission denied (code 5)
+                            if e.kind() == std::io::ErrorKind::PermissionDenied {
+                                eprintln!(
+                                    "Attempt {attempts}/{MAX_ATTEMPTS}: Windows permission denied ({e}), retrying after delay..."
+                                );
+
+                                // Force garbage collection to release any handles
+                                std::hint::black_box(());
+
+                                // Brief delay to allow file handles to close
+                                std::thread::sleep(std::time::Duration::from_millis(200));
+                                continue;
+                            }
+                        }
+
+                        // On non-Windows or non-permission errors, log and retry with delay
+                        eprintln!(
+                            "Attempt {attempts}/{MAX_ATTEMPTS}: Failed to remove directory ({e}), retrying..."
+                        );
+                        std::thread::sleep(std::time::Duration::from_millis(100));
+                        continue;
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+            // Recreate the empty tantivy directory after clearing
+            std::fs::create_dir_all(&tantivy_path)?;
+
+            // On Windows, add extra delay after recreating directory to ensure filesystem is ready
+            #[cfg(windows)]
+            {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
         }
         Ok(())
     }

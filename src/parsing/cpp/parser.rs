@@ -1,14 +1,17 @@
 //! C++ language parser implementation
 
+use crate::parsing::context::ParserContext;
 use crate::parsing::method_call::MethodCall;
+use crate::parsing::parser::check_recursion_depth;
 use crate::parsing::{Import, Language, LanguageParser, NodeTracker, NodeTrackingState};
 use crate::types::{Range, SymbolCounter};
-use crate::{FileId, Symbol, SymbolKind};
+use crate::{FileId, Symbol, SymbolKind, Visibility};
 use std::any::Any;
 use tree_sitter::{Node, Parser};
 
 pub struct CppParser {
     parser: Parser,
+    context: ParserContext,
     node_tracker: NodeTrackingState,
 }
 
@@ -29,8 +32,41 @@ impl CppParser {
 
         Ok(Self {
             parser,
+            context: ParserContext::new(),
             node_tracker: NodeTrackingState::new(),
         })
+    }
+
+    /// Helper to create a symbol with all optional fields
+    fn create_symbol(
+        &self,
+        id: crate::types::SymbolId,
+        name: String,
+        kind: SymbolKind,
+        file_id: FileId,
+        range: Range,
+        signature: Option<String>,
+        doc_comment: Option<String>,
+        module_path: &str,
+        visibility: Visibility,
+    ) -> Symbol {
+        let mut symbol = Symbol::new(id, name, kind, file_id, range);
+
+        if let Some(sig) = signature {
+            symbol = symbol.with_signature(sig);
+        }
+        if let Some(doc) = doc_comment {
+            symbol = symbol.with_doc(doc);
+        }
+        if !module_path.is_empty() {
+            symbol = symbol.with_module_path(module_path);
+        }
+        symbol = symbol.with_visibility(visibility);
+
+        // Set scope context based on parser's current scope
+        symbol.scope_context = Some(self.context.current_scope_context());
+
+        symbol
     }
 
     /// Parse C++ code and extract symbols
@@ -83,52 +119,140 @@ impl CppParser {
         file_id: FileId,
         symbols: &mut Vec<Symbol>,
         counter: &mut SymbolCounter,
+        depth: usize,
     ) {
+        // Guard against stack overflow
+        if !check_recursion_depth(depth, node) {
+            return;
+        }
+
         match node.kind() {
             "function_definition" => {
                 self.register_handled_node(node.kind(), node.kind_id());
                 if let Some(declarator) = node.child_by_field_name("declarator") {
-                    if let Some(name_node) = declarator.child_by_field_name("declarator") {
-                        let name = &code[name_node.byte_range()];
+                    // Check for qualified_identifier (ClassName::methodName)
+                    let mut is_method = self.context.current_class().is_some();
+                    let mut method_name = String::new();
+
+                    for i in 0..declarator.child_count() {
+                        if let Some(child) = declarator.child(i) {
+                            if child.kind() == "qualified_identifier" {
+                                // This is a method implementation (Class::method)
+                                is_method = true;
+                                // Extract method name from qualified_identifier
+                                for j in 0..child.child_count() {
+                                    if let Some(id_node) = child.child(j) {
+                                        if id_node.kind() == "identifier" {
+                                            method_name = code[id_node.byte_range()].to_string();
+                                            break;
+                                        }
+                                    }
+                                }
+                                break;
+                            }
+                        }
+                    }
+
+                    // Fallback: try to get declarator field
+                    if method_name.is_empty() {
+                        if let Some(name_node) = declarator.child_by_field_name("declarator") {
+                            method_name = code[name_node.byte_range()].to_string();
+                        }
+                    }
+
+                    if !method_name.is_empty() {
                         let symbol_id = counter.next_id();
-                        symbols.push(
-                            Symbol::new(
-                                symbol_id,
-                                name.to_string(),
-                                SymbolKind::Function,
-                                file_id,
-                                Range::new(
-                                    node.start_position().row as u32,
-                                    node.start_position().column as u16,
-                                    node.end_position().row as u32,
-                                    node.end_position().column as u16,
-                                ),
-                            )
-                            .with_visibility(crate::Visibility::Public),
+                        let doc_comment = self.extract_doc_comment(&node, code);
+                        let range = Range::new(
+                            node.start_position().row as u32,
+                            node.start_position().column as u16,
+                            node.end_position().row as u32,
+                            node.end_position().column as u16,
                         );
+
+                        let kind = if is_method {
+                            SymbolKind::Method
+                        } else {
+                            SymbolKind::Function
+                        };
+
+                        let symbol = self.create_symbol(
+                            symbol_id,
+                            method_name,
+                            kind,
+                            file_id,
+                            range,
+                            None, // signature
+                            doc_comment,
+                            "", // module_path
+                            Visibility::Public,
+                        );
+
+                        symbols.push(symbol);
                     }
                 }
             }
             "class_specifier" => {
                 self.register_handled_node(node.kind(), node.kind_id());
                 if let Some(name_node) = node.child_by_field_name("name") {
-                    let name = &code[name_node.byte_range()];
+                    let class_name = &code[name_node.byte_range()];
                     let symbol_id = counter.next_id();
-                    symbols.push(
-                        Symbol::new(
-                            symbol_id,
-                            name.to_string(),
-                            SymbolKind::Class,
-                            file_id,
-                            Range::new(
-                                node.start_position().row as u32,
-                                node.start_position().column as u16,
-                                node.end_position().row as u32,
-                                node.end_position().column as u16,
-                            ),
-                        )
-                        .with_visibility(crate::Visibility::Public),
+                    let doc_comment = self.extract_doc_comment(&node, code);
+                    let range = Range::new(
+                        node.start_position().row as u32,
+                        node.start_position().column as u16,
+                        node.end_position().row as u32,
+                        node.end_position().column as u16,
                     );
+
+                    let symbol = self.create_symbol(
+                        symbol_id,
+                        class_name.to_string(),
+                        SymbolKind::Class,
+                        file_id,
+                        range,
+                        None, // signature
+                        doc_comment,
+                        "", // module_path
+                        Visibility::Public,
+                    );
+
+                    symbols.push(symbol);
+
+                    // Enter class scope to track methods
+                    self.context
+                        .enter_scope(crate::parsing::context::ScopeType::Class);
+
+                    // Save current context
+                    let saved_function = self.context.current_function().map(|s| s.to_string());
+                    let saved_class = self.context.current_class().map(|s| s.to_string());
+
+                    // Set current class for method tracking
+                    self.context.set_current_class(Some(class_name.to_string()));
+
+                    // Process children to extract methods
+                    for i in 0..node.child_count() {
+                        if let Some(child) = node.child(i) {
+                            self.extract_symbols_from_node(
+                                child,
+                                code,
+                                file_id,
+                                symbols,
+                                counter,
+                                depth + 1,
+                            );
+                        }
+                    }
+
+                    // Exit scope first
+                    self.context.exit_scope();
+
+                    // Restore previous context
+                    self.context.set_current_function(saved_function);
+                    self.context.set_current_class(saved_class);
+
+                    // Return early since we already processed children
+                    return;
                 }
             }
             "struct_specifier" => {
@@ -136,21 +260,27 @@ impl CppParser {
                 if let Some(name_node) = node.child_by_field_name("name") {
                     let name = &code[name_node.byte_range()];
                     let symbol_id = counter.next_id();
-                    symbols.push(
-                        Symbol::new(
-                            symbol_id,
-                            name.to_string(),
-                            SymbolKind::Struct,
-                            file_id,
-                            Range::new(
-                                node.start_position().row as u32,
-                                node.start_position().column as u16,
-                                node.end_position().row as u32,
-                                node.end_position().column as u16,
-                            ),
-                        )
-                        .with_visibility(crate::Visibility::Public),
+                    let doc_comment = self.extract_doc_comment(&node, code);
+                    let range = Range::new(
+                        node.start_position().row as u32,
+                        node.start_position().column as u16,
+                        node.end_position().row as u32,
+                        node.end_position().column as u16,
                     );
+
+                    let symbol = self.create_symbol(
+                        symbol_id,
+                        name.to_string(),
+                        SymbolKind::Struct,
+                        file_id,
+                        range,
+                        None, // signature
+                        doc_comment,
+                        "", // module_path
+                        Visibility::Public,
+                    );
+
+                    symbols.push(symbol);
                 }
             }
             "enum_specifier" => {
@@ -158,21 +288,72 @@ impl CppParser {
                 if let Some(name_node) = node.child_by_field_name("name") {
                     let name = &code[name_node.byte_range()];
                     let symbol_id = counter.next_id();
-                    symbols.push(
-                        Symbol::new(
-                            symbol_id,
-                            name.to_string(),
-                            SymbolKind::Enum,
-                            file_id,
-                            Range::new(
-                                node.start_position().row as u32,
-                                node.start_position().column as u16,
-                                node.end_position().row as u32,
-                                node.end_position().column as u16,
-                            ),
-                        )
-                        .with_visibility(crate::Visibility::Public),
+                    let doc_comment = self.extract_doc_comment(&node, code);
+                    let range = Range::new(
+                        node.start_position().row as u32,
+                        node.start_position().column as u16,
+                        node.end_position().row as u32,
+                        node.end_position().column as u16,
                     );
+
+                    let symbol = self.create_symbol(
+                        symbol_id,
+                        name.to_string(),
+                        SymbolKind::Enum,
+                        file_id,
+                        range,
+                        None, // signature
+                        doc_comment,
+                        "", // module_path
+                        Visibility::Public,
+                    );
+
+                    symbols.push(symbol);
+                }
+            }
+            "field_declaration" => {
+                self.register_handled_node(node.kind(), node.kind_id());
+                // Check if this is a method declaration (has function_declarator child)
+                if self.context.current_class().is_some() {
+                    for i in 0..node.child_count() {
+                        if let Some(child) = node.child(i) {
+                            if child.kind() == "function_declarator" {
+                                // This is a method declaration
+                                // Look for field_identifier child
+                                for j in 0..child.child_count() {
+                                    if let Some(name_node) = child.child(j) {
+                                        if name_node.kind() == "field_identifier" {
+                                            let method_name = &code[name_node.byte_range()];
+                                            let symbol_id = counter.next_id();
+                                            let doc_comment = self.extract_doc_comment(&node, code);
+                                            let range = Range::new(
+                                                node.start_position().row as u32,
+                                                node.start_position().column as u16,
+                                                node.end_position().row as u32,
+                                                node.end_position().column as u16,
+                                            );
+
+                                            let symbol = self.create_symbol(
+                                                symbol_id,
+                                                method_name.to_string(),
+                                                SymbolKind::Method,
+                                                file_id,
+                                                range,
+                                                None, // signature
+                                                doc_comment,
+                                                "", // module_path
+                                                Visibility::Public,
+                                            );
+
+                                            symbols.push(symbol);
+                                            break;
+                                        }
+                                    }
+                                }
+                                break;
+                            }
+                        }
+                    }
                 }
             }
             _ => {
@@ -184,7 +365,7 @@ impl CppParser {
         // Process children
         for i in 0..node.child_count() {
             if let Some(child) = node.child(i) {
-                self.extract_symbols_from_node(child, code, file_id, symbols, counter);
+                self.extract_symbols_from_node(child, code, file_id, symbols, counter, depth + 1);
             }
         }
     }
@@ -192,7 +373,21 @@ impl CppParser {
     fn extract_calls_from_node(node: Node, code: &str, calls: &mut Vec<MethodCall>) {
         if node.kind() == "call_expression" {
             if let Some(function_node) = node.child_by_field_name("function") {
-                let function_name = &code[function_node.byte_range()];
+                // Extract the actual function name from different call patterns
+                let function_name = match function_node.kind() {
+                    // Member function call: obj->method() or obj.method()
+                    "field_expression" => {
+                        // Get the field identifier (the actual method name)
+                        if let Some(field_node) = function_node.child_by_field_name("field") {
+                            &code[field_node.byte_range()]
+                        } else {
+                            &code[function_node.byte_range()]
+                        }
+                    }
+                    // Simple function call: function()
+                    _ => &code[function_node.byte_range()],
+                };
+
                 calls.push(MethodCall::new(
                     "", // caller will be set by the indexer
                     function_name,
@@ -539,7 +734,7 @@ impl LanguageParser for CppParser {
         let root_node = tree.root_node();
         let mut symbols = Vec::new();
 
-        self.extract_symbols_from_node(root_node, code, file_id, &mut symbols, symbol_counter);
+        self.extract_symbols_from_node(root_node, code, file_id, &mut symbols, symbol_counter, 0);
 
         symbols
     }
@@ -548,8 +743,45 @@ impl LanguageParser for CppParser {
         self
     }
 
-    fn extract_doc_comment(&self, _node: &Node, _code: &str) -> Option<String> {
-        // C++ doesn't have standardized doc comments
+    fn extract_doc_comment(&self, node: &Node, code: &str) -> Option<String> {
+        // Look for Doxygen/JavaDoc style comments (/** ... */ or ///)
+        // Check previous sibling for doc comment
+        let prev = node.prev_sibling()?;
+
+        if prev.kind() == "comment" {
+            let comment = &code[prev.byte_range()];
+
+            // Handle block comments (/** ... */)
+            if comment.starts_with("/**") {
+                let cleaned = comment
+                    .trim_start_matches("/**")
+                    .trim_end_matches("*/")
+                    .lines()
+                    .map(|line| {
+                        // Remove leading " * " or " *" from each line
+                        line.trim_start_matches(" * ")
+                            .trim_start_matches(" *")
+                            .trim_start_matches("     * ") // Handle extra indentation
+                            .trim_start_matches("     *")
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+                    .trim()
+                    .to_string();
+
+                if !cleaned.is_empty() {
+                    return Some(cleaned);
+                }
+            }
+            // Handle line comments (///)
+            else if comment.starts_with("///") {
+                let cleaned = comment.trim_start_matches("///").trim().to_string();
+                if !cleaned.is_empty() {
+                    return Some(cleaned);
+                }
+            }
+        }
+
         None
     }
 
@@ -562,9 +794,8 @@ impl LanguageParser for CppParser {
         let root_node = tree.root_node();
         let mut calls = Vec::new();
 
-        // Simple implementation that doesn't track containing functions
-        // In a more sophisticated implementation, we would track the containing function
-        Self::find_calls_in_node(root_node, code, &mut calls);
+        // Use recursive method with context tracking
+        Self::extract_calls_recursive(root_node, code, None, &mut calls);
         calls
     }
 
@@ -680,33 +911,88 @@ impl LanguageParser for CppParser {
 }
 
 impl CppParser {
-    /// Find function calls in AST node recursively
-    fn find_calls_in_node<'a>(
+    /// Recursively extract function calls with context tracking
+    fn extract_calls_recursive<'a>(
         node: Node,
         code: &'a str,
+        current_function: Option<&'a str>,
         calls: &mut Vec<(&'a str, &'a str, Range)>,
     ) {
-        // Simple implementation that doesn't track containing functions
+        // Determine function context - track which function we're inside
+        let function_context = if node.kind() == "function_definition" {
+            // Extract function name
+            if let Some(declarator) = node.child_by_field_name("declarator") {
+                // Handle function_declarator (for both regular functions and methods)
+                if declarator.kind() == "function_declarator" {
+                    if let Some(inner_declarator) = declarator.child_by_field_name("declarator") {
+                        match inner_declarator.kind() {
+                            // Method: QWindow::setX
+                            "qualified_identifier" => {
+                                // Extract just the method name (after ::)
+                                if let Some(name_node) =
+                                    inner_declarator.child_by_field_name("name")
+                                {
+                                    Some(&code[name_node.byte_range()])
+                                } else {
+                                    Some(&code[inner_declarator.byte_range()])
+                                }
+                            }
+                            // Regular function or simple identifier
+                            _ => Some(&code[inner_declarator.byte_range()]),
+                        }
+                    } else {
+                        current_function
+                    }
+                } else if let Some(name_node) = declarator.child_by_field_name("declarator") {
+                    // Fallback for other declarator types
+                    Some(&code[name_node.byte_range()])
+                } else {
+                    current_function
+                }
+            } else {
+                current_function
+            }
+        } else {
+            // Not a function - inherit current context
+            current_function
+        };
+
+        // Check if this is a call expression
         if node.kind() == "call_expression" {
             if let Some(function_node) = node.child_by_field_name("function") {
-                let target_name = &code[function_node.byte_range()];
-                // We don't have caller information in this simple implementation
+                // Extract the actual function name from different call patterns
+                let target_name = match function_node.kind() {
+                    // Member function call: obj->method() or obj.method()
+                    "field_expression" => {
+                        // Get the field identifier (the actual method name)
+                        if let Some(field_node) = function_node.child_by_field_name("field") {
+                            &code[field_node.byte_range()]
+                        } else {
+                            &code[function_node.byte_range()]
+                        }
+                    }
+                    // Simple function call: function()
+                    _ => &code[function_node.byte_range()],
+                };
+
                 let range = Range::new(
                     node.start_position().row as u32,
                     node.start_position().column as u16,
                     node.end_position().row as u32,
                     node.end_position().column as u16,
                 );
-                // Use empty string for caller as we don't track it in this simple implementation
-                calls.push(("", target_name, range));
+
+                // Only record call if we have a function context
+                if let Some(context) = function_context {
+                    calls.push((context, target_name, range));
+                }
             }
         }
 
-        // Process children
-        for i in 0..node.child_count() {
-            if let Some(child) = node.child(i) {
-                Self::find_calls_in_node(child, code, calls);
-            }
+        // Recurse to children with current context
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            Self::extract_calls_recursive(child, code, function_context, calls);
         }
     }
 }

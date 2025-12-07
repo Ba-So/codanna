@@ -10,6 +10,7 @@
 //! version, verify compatibility with node type names used in this implementation.
 
 use crate::parsing::Import;
+use crate::parsing::parser::check_recursion_depth;
 use crate::parsing::{
     Language, LanguageParser, MethodCall, NodeTracker, NodeTrackingState, ParserContext, ScopeType,
 };
@@ -81,6 +82,7 @@ impl PhpParser {
             file_id,
             &mut symbols,
             symbol_counter,
+            0,
         );
         symbols
     }
@@ -190,7 +192,11 @@ impl PhpParser {
         file_id: FileId,
         symbols: &mut Vec<Symbol>,
         counter: &mut SymbolCounter,
+        depth: usize,
     ) {
+        if !check_recursion_depth(depth, node) {
+            return;
+        }
         match node.kind() {
             "function_definition" => {
                 self.register_handled_node(node.kind(), node.kind_id());
@@ -215,7 +221,7 @@ impl PhpParser {
                 }
 
                 // Process children to find nested functions
-                self.process_children(node, code, file_id, symbols, counter);
+                self.process_children(node, code, file_id, symbols, counter, depth);
 
                 // CRITICAL: Exit scope first (this clears the current context)
                 self.context.exit_scope();
@@ -247,7 +253,7 @@ impl PhpParser {
                 }
 
                 // Process children for nested elements
-                self.process_children(node, code, file_id, symbols, counter);
+                self.process_children(node, code, file_id, symbols, counter, depth);
 
                 // CRITICAL: Exit scope first (this clears the current context)
                 self.context.exit_scope();
@@ -278,7 +284,7 @@ impl PhpParser {
                 }
 
                 // Continue processing children to find methods inside the class
-                self.process_children(node, code, file_id, symbols, counter);
+                self.process_children(node, code, file_id, symbols, counter, depth);
 
                 // CRITICAL: Exit scope first (this clears the current context)
                 self.context.exit_scope();
@@ -295,7 +301,7 @@ impl PhpParser {
                 // Enter interface scope (like class)
                 self.context.enter_scope(ScopeType::Class);
                 // Process children for interface methods
-                self.process_children(node, code, file_id, symbols, counter);
+                self.process_children(node, code, file_id, symbols, counter, depth);
                 self.context.exit_scope();
             }
             "trait_declaration" => {
@@ -320,7 +326,7 @@ impl PhpParser {
                 }
 
                 // Process children for trait methods
-                self.process_children(node, code, file_id, symbols, counter);
+                self.process_children(node, code, file_id, symbols, counter, depth);
 
                 // CRITICAL: Exit scope first (this clears the current context)
                 self.context.exit_scope();
@@ -339,7 +345,7 @@ impl PhpParser {
                 self.register_handled_node(node.kind(), node.kind_id());
                 // Process const declarations - they contain const_element children
                 // Process children to extract the const_elements
-                self.process_children(node, code, file_id, symbols, counter);
+                self.process_children(node, code, file_id, symbols, counter, depth);
             }
             "const_element" => {
                 self.register_handled_node(node.kind(), node.kind_id());
@@ -413,13 +419,13 @@ impl PhpParser {
                     }
                 }
                 // Continue processing children
-                self.process_children(node, code, file_id, symbols, counter);
+                self.process_children(node, code, file_id, symbols, counter, depth);
             }
             _ => {
                 // Track all nodes we encounter, even if not extracting symbols
                 self.register_handled_node(node.kind(), node.kind_id());
                 // Recursively process children
-                self.process_children(node, code, file_id, symbols, counter);
+                self.process_children(node, code, file_id, symbols, counter, depth);
             }
         }
     }
@@ -722,10 +728,11 @@ impl PhpParser {
         file_id: FileId,
         symbols: &mut Vec<Symbol>,
         counter: &mut SymbolCounter,
+        depth: usize,
     ) {
         let mut cursor = node.walk();
         for child in node.children(&mut cursor) {
-            self.extract_symbols_from_node(child, code, file_id, symbols, counter);
+            self.extract_symbols_from_node(child, code, file_id, symbols, counter, depth + 1);
         }
     }
 

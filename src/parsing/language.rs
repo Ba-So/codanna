@@ -17,6 +17,11 @@ pub enum Language {
     Nix,
     C,
     Cpp,
+    CSharp,
+    Gdscript,
+    Java,
+    Kotlin,
+    Swift,
 }
 
 impl Language {
@@ -36,6 +41,11 @@ impl Language {
             Language::Nix => super::LanguageId::new("nix"),
             Language::C => super::LanguageId::new("c"),
             Language::Cpp => super::LanguageId::new("cpp"),
+            Language::CSharp => super::LanguageId::new("csharp"),
+            Language::Gdscript => super::LanguageId::new("gdscript"),
+            Language::Java => super::LanguageId::new("java"),
+            Language::Kotlin => super::LanguageId::new("kotlin"),
+            Language::Swift => super::LanguageId::new("swift"),
         }
     }
 
@@ -54,6 +64,11 @@ impl Language {
             "nix" => Some(Language::Nix),
             "c" => Some(Language::C),
             "cpp" => Some(Language::Cpp),
+            "csharp" => Some(Language::CSharp),
+            "gdscript" => Some(Language::Gdscript),
+            "java" => Some(Language::Java),
+            "kotlin" => Some(Language::Kotlin),
+            "swift" => Some(Language::Swift),
             _ => None,
         }
     }
@@ -87,6 +102,11 @@ impl Language {
             "nix" => Some(Language::Nix),
             "c" | "h" => Some(Language::C),
             "cpp" | "hpp" | "cc" | "cxx" | "hxx" => Some(Language::Cpp),
+            "cs" | "csx" => Some(Language::CSharp),
+            "gd" => Some(Language::Gdscript),
+            "java" => Some(Language::Java),
+            "kt" | "kts" => Some(Language::Kotlin),
+            "swift" => Some(Language::Swift),
             _ => None,
         }
     }
@@ -112,6 +132,11 @@ impl Language {
             Language::Nix => &["nix"],
             Language::C => &["c", "h"],
             Language::Cpp => &["cpp", "hpp", "cc", "cxx", "hxx"],
+            Language::CSharp => &["cs", "csx"],
+            Language::Gdscript => &["gd"],
+            Language::Java => &["java"],
+            Language::Kotlin => &["kt", "kts"],
+            Language::Swift => &["swift"],
         }
     }
 
@@ -127,6 +152,11 @@ impl Language {
             Language::Nix => "nix",
             Language::C => "c",
             Language::Cpp => "cpp",
+            Language::CSharp => "csharp",
+            Language::Gdscript => "gdscript",
+            Language::Java => "java",
+            Language::Kotlin => "kotlin",
+            Language::Swift => "swift",
         }
     }
 
@@ -142,6 +172,11 @@ impl Language {
             Language::Nix => "Nix",
             Language::C => "C",
             Language::Cpp => "C++",
+            Language::CSharp => "C#",
+            Language::Gdscript => "GDScript",
+            Language::Java => "Java",
+            Language::Kotlin => "Kotlin",
+            Language::Swift => "Swift",
         }
     }
 }
@@ -176,6 +211,7 @@ mod tests {
         assert_eq!(Language::from_extension("go.sum"), Some(Language::Go));
         assert_eq!(Language::from_extension("nix"), Some(Language::Nix));
         assert_eq!(Language::from_extension("txt"), None);
+        assert_eq!(Language::from_extension("gd"), Some(Language::Gdscript));
     }
 
     #[test]
@@ -230,6 +266,10 @@ mod tests {
             Language::from_path(Path::new("header.hpp")),
             Some(Language::Cpp)
         );
+        assert_eq!(
+            Language::from_path(Path::new("player.gd")),
+            Some(Language::Gdscript)
+        );
         assert_eq!(Language::from_path(Path::new("README.md")), None);
     }
 
@@ -245,5 +285,6 @@ mod tests {
         assert!(Language::Go.extensions().contains(&"go"));
         assert!(Language::Go.extensions().contains(&"go.mod"));
         assert!(Language::Go.extensions().contains(&"go.sum"));
+        assert!(Language::Gdscript.extensions().contains(&"gd"));
     }
 }

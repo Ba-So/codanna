@@ -283,6 +283,16 @@ impl FileSystemWatcher {
                                                 eprintln!("  ✗ Failed to remove from index: {e}");
                                             } else {
                                                 eprintln!("  ✓ Removed from index successfully");
+
+                                                // Send notification to MCP clients
+                                                if let Some(ref broadcaster) = self.broadcaster {
+                                                    if self.mcp_debug {
+                                                        eprintln!("DEBUG: Sending FileDeleted notification for: {}", path.display());
+                                                    }
+                                                    broadcaster.send(FileChangeEvent::FileDeleted {
+                                                        path: path.clone(),
+                                                    });
+                                                }
                                             }
                                         }
                                         _ => {} // Ignore other event types
