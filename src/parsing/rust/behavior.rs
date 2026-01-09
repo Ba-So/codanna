@@ -9,14 +9,6 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 use tree_sitter::Language;
 
-/// Debug macro honoring global settings debug flag
-macro_rules! debug_global {
-    ($($arg:tt)*) => {
-        if crate::config::is_global_debug_enabled() {
-            eprintln!($($arg)*);
-        }
-    };
-}
 /// Rust language behavior implementation
 #[derive(Clone)]
 pub struct RustBehavior {
@@ -49,6 +41,10 @@ impl Default for RustBehavior {
 }
 
 impl LanguageBehavior for RustBehavior {
+    fn language_id(&self) -> crate::parsing::registry::LanguageId {
+        crate::parsing::registry::LanguageId::new("rust")
+    }
+
     fn format_module_path(&self, base_path: &str, symbol_name: &str) -> String {
         format!("{base_path}::{symbol_name}")
     }
@@ -292,10 +288,8 @@ impl LanguageBehavior for RustBehavior {
             if symbol_module_path.ends_with(&format!("::{import_name}")) {
                 // Direct prefix check
                 if symbol_module_path.starts_with(&format!("{import_prefix}::")) {
-                    debug_global!(
-                        "DEBUG: Rust re-export heuristic matched (direct): import='{}', symbol='{}'",
-                        import_path,
-                        symbol_module_path
+                    tracing::debug!(
+                        "[rust] re-export heuristic matched (direct): import='{import_path}', symbol='{symbol_module_path}'"
                     );
                     return true;
                 }
@@ -303,10 +297,8 @@ impl LanguageBehavior for RustBehavior {
                 // crate:: prefix normalization (import has crate::, symbol doesn't)
                 if let Some(without_crate) = import_prefix.strip_prefix("crate::") {
                     if symbol_module_path.starts_with(&format!("{without_crate}::")) {
-                        debug_global!(
-                            "DEBUG: Rust re-export heuristic matched (import had crate::): import='{}', symbol='{}'",
-                            import_path,
-                            symbol_module_path
+                        tracing::debug!(
+                            "[rust] re-export heuristic matched (import had crate::): import='{import_path}', symbol='{symbol_module_path}'"
                         );
                         return true;
                     }
@@ -318,10 +310,8 @@ impl LanguageBehavior for RustBehavior {
                 {
                     let symbol_without_crate = &symbol_module_path[7..];
                     if symbol_without_crate.starts_with(&format!("{import_prefix}::")) {
-                        debug_global!(
-                            "DEBUG: Rust re-export heuristic matched (symbol had crate::): import='{}', symbol='{}'",
-                            import_path,
-                            symbol_module_path
+                        tracing::debug!(
+                            "[rust] re-export heuristic matched (symbol had crate::): import='{import_path}', symbol='{symbol_module_path}'"
                         );
                         return true;
                     }
@@ -349,10 +339,8 @@ impl LanguageBehavior for RustBehavior {
                         && (symbol_module_path.starts_with(&format!("{}::", parent.0))
                             || symbol_module_path == parent.0)
                     {
-                        debug_global!(
-                            "DEBUG: Rust re-export heuristic matched (super): import='{}', symbol='{}'",
-                            import_path,
-                            symbol_module_path
+                        tracing::debug!(
+                            "[rust] re-export heuristic matched (super): import='{import_path}', symbol='{symbol_module_path}'"
                         );
                         return true;
                     }
@@ -382,10 +370,8 @@ impl LanguageBehavior for RustBehavior {
                         && (symbol_module_path.starts_with(&format!("{base}::"))
                             || symbol_module_path == base)
                     {
-                        debug_global!(
-                            "DEBUG: Rust re-export heuristic matched (relative): import='{}', symbol='{}'",
-                            import_path,
-                            symbol_module_path
+                        tracing::debug!(
+                            "[rust] re-export heuristic matched (relative): import='{import_path}', symbol='{symbol_module_path}'"
                         );
                         return true;
                     }
@@ -405,10 +391,8 @@ impl LanguageBehavior for RustBehavior {
                             && (symbol_module_path.starts_with(&format!("{base}::"))
                                 || symbol_module_path == base)
                         {
-                            debug_global!(
-                                "DEBUG: Rust re-export heuristic matched (sibling): import='{}', symbol='{}'",
-                                import_path,
-                                symbol_module_path
+                            tracing::debug!(
+                                "[rust] re-export heuristic matched (sibling): import='{import_path}', symbol='{symbol_module_path}'"
                             );
                             return true;
                         }
@@ -418,6 +402,39 @@ impl LanguageBehavior for RustBehavior {
         }
 
         false
+    }
+
+    fn disambiguate_symbol(
+        &self,
+        _name: &str,
+        candidates: &[(crate::SymbolId, crate::SymbolKind)],
+        rel_kind: crate::relationship::RelationKind,
+        role: crate::parsing::RelationRole,
+    ) -> Option<crate::SymbolId> {
+        use crate::SymbolKind::*;
+        use crate::parsing::RelationRole::*;
+        use crate::relationship::RelationKind::*;
+
+        // For Rust, determine preferred kinds based on relationship and role
+        let preferred_kinds: &[crate::SymbolKind] = match (rel_kind, role) {
+            // For Implements, the "from" should be Struct/Enum (implementors)
+            (Implements, From) => &[Struct, Enum],
+            // For Implements, the "to" should be Trait
+            (Implements, To) => &[Trait],
+            // For Calls, prefer Function/Method
+            (Calls, From) | (Calls, To) => &[Function, Method],
+            // For Extends (supertraits), prefer Trait
+            (Extends, From) | (Extends, To) => &[Trait],
+            // Default: accept first candidate
+            _ => return candidates.first().map(|(id, _)| *id),
+        };
+
+        // Find first candidate matching preferred kinds, fall back to first
+        candidates
+            .iter()
+            .find(|(_, kind)| preferred_kinds.contains(kind))
+            .or_else(|| candidates.first())
+            .map(|(id, _)| *id)
     }
 }
 

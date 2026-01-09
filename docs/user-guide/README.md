@@ -12,13 +12,14 @@ Complete documentation for using Codanna effectively.
 - **[MCP Tools](mcp-tools.md)** - Available tools when using the MCP server
 - **[Configuration](configuration.md)** - Lives in `.codanna/settings.toml`
 - **[Search Guide](search-guide.md)** - Semantic search best practices
+- **[Document Search](documents.md)** - Index markdown files for RAG
 
 ## Core Commands
 
 | Command | Description | Example |
 |---------|-------------|---------|
 | `codanna init` | Set up .codanna directory with default configuration | `codanna init --force` |
-| `codanna index <PATH>` | Build searchable index from your codebase | `codanna index src --progress` |
+| `codanna index <PATH>` | Build searchable index from your codebase | `codanna index src ` |
 | `codanna config` | Display active settings | `codanna config` |
 | `codanna serve` | Start MCP server for AI assistants | `codanna serve --watch` |
 

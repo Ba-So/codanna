@@ -27,6 +27,7 @@
 /contributing/tree-sitter/.cache/
 /contributing/tree-sitter/.env
 # Rust (additional)
+.cargo/config.toml
 **/target/
 *.rlib
 *.d
@@ -74,3 +75,13 @@ Icon?
 *.swo
 *.bak
 *.tmp
+# Generated index files
+index.db
+index.db-*
+index.scip
+vendors/fastembed-rs
+
+/scripts/*
+!/scripts/
+!/scripts/install.sh
+!/scripts/install.ps1

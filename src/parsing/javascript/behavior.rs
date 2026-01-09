@@ -1,16 +1,13 @@
 //! JavaScript-specific language behavior implementation
 
-use crate::debug_print;
 use crate::parsing::LanguageBehavior;
 use crate::parsing::behavior_state::{BehaviorState, StatefulBehavior};
 use crate::parsing::resolution::{InheritanceResolver, ResolutionScope};
-use crate::project_resolver::persist::{ResolutionPersistence, ResolutionRules};
+use crate::project_resolver::persist::ResolutionPersistence;
 use crate::storage::DocumentIndex;
 use crate::types::FileId;
 use crate::{SymbolId, Visibility};
-use std::cell::RefCell;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
 use tree_sitter::Language;
 
 use super::resolution::{JavaScriptInheritanceResolver, JavaScriptResolutionContext};
@@ -89,55 +86,6 @@ impl JavaScriptBehavior {
             state: BehaviorState::new(),
         }
     }
-
-    /// Load project resolution rules for a file from the persisted index
-    ///
-    /// Uses a thread-local cache to avoid repeated disk reads.
-    /// Cache is invalidated after 1 second to pick up changes.
-    fn load_project_rules_for_file(&self, file_id: FileId) -> Option<ResolutionRules> {
-        thread_local! {
-            static RULES_CACHE: RefCell<Option<(Instant, crate::project_resolver::persist::ResolutionIndex)>> = const { RefCell::new(None) };
-        }
-
-        RULES_CACHE.with(|cache| {
-            let mut cache = cache.borrow_mut();
-
-            // Check if cache is fresh (< 1 second old)
-            let needs_reload = if let Some((timestamp, _)) = *cache {
-                timestamp.elapsed() >= Duration::from_secs(1)
-            } else {
-                true
-            };
-
-            // Load fresh from disk if needed
-            if needs_reload {
-                let persistence =
-                    ResolutionPersistence::new(Path::new(crate::init::local_dir_name()));
-                if let Ok(index) = persistence.load("javascript") {
-                    *cache = Some((Instant::now(), index));
-                } else {
-                    // No index file exists yet - that's OK
-                    return None;
-                }
-            }
-
-            // Get rules for the file
-            if let Some((_, ref index)) = *cache {
-                // Get the file path for this FileId from our behavior state
-                if let Some(file_path) = self.state.get_file_path(file_id) {
-                    // Find the config that applies to this file
-                    if let Some(config_path) = index.get_config_for_file(&file_path) {
-                        return index.rules.get(config_path).cloned();
-                    }
-                }
-
-                // Fallback: return any rules we have (for tests without proper file registration)
-                index.rules.values().next().cloned()
-            } else {
-                None
-            }
-        })
-    }
 }
 
 impl Default for JavaScriptBehavior {
@@ -153,6 +101,10 @@ impl StatefulBehavior for JavaScriptBehavior {
 }
 
 impl LanguageBehavior for JavaScriptBehavior {
+    fn language_id(&self) -> crate::parsing::registry::LanguageId {
+        crate::parsing::registry::LanguageId::new("javascript")
+    }
+
     fn configure_symbol(&self, symbol: &mut crate::Symbol, module_path: Option<&str>) {
         // Preserve parser-derived visibility (export detection), only set module path.
         if let Some(path) = module_path {
@@ -192,20 +144,15 @@ impl LanguageBehavior for JavaScriptBehavior {
 
             // Find which jsconfig applies to this file
             if let Some(config_path) = index.get_config_for_file(relative_to_workspace) {
-                debug_print!(
-                    self,
-                    "[module_path_from_file] relative_to_workspace={:?} config_path={:?}",
-                    relative_to_workspace,
-                    config_path
+                tracing::debug!(
+                    "[javascript] module_path_from_file relative_to_workspace={relative_to_workspace:?} config_path={config_path:?}"
                 );
 
                 // Get the jsconfig's directory (the project root for this file)
                 if let Some(parent) = config_path.parent() {
                     let jsconfig_dir = project_root.join(parent);
-                    debug_print!(
-                        self,
-                        "[module_path_from_file] jsconfig_dir={:?}",
-                        jsconfig_dir
+                    tracing::debug!(
+                        "[javascript] module_path_from_file jsconfig_dir={jsconfig_dir:?}"
                     );
 
                     // Compute path relative to the jsconfig's directory
@@ -221,11 +168,8 @@ impl LanguageBehavior for JavaScriptBehavior {
 
                             let result = module_path.replace('/', ".");
 
-                            debug_print!(
-                                self,
-                                "[module_path_from_file] file_path={:?} -> module_path={}",
-                                file_path,
-                                result
+                            tracing::debug!(
+                                "[javascript] module_path_from_file file_path={file_path:?} -> module_path={result}"
                             );
 
                             return Some(result);
@@ -251,11 +195,8 @@ impl LanguageBehavior for JavaScriptBehavior {
         // Replace path separators with module separators
         let result = module_path.replace('/', ".");
 
-        debug_print!(
-            self,
-            "[module_path_from_file] file_path={:?} -> module_path={}",
-            file_path,
-            result
+        tracing::debug!(
+            "[javascript] module_path_from_file file_path={file_path:?} -> module_path={result}"
         );
 
         Some(result)
@@ -317,9 +258,8 @@ impl LanguageBehavior for JavaScriptBehavior {
 
     fn add_import(&self, import: crate::parsing::Import) {
         // Store the import path as-is for resolution
-        debug_print!(
-            self,
-            "[add_import] path='{}' alias={:?} file_id={:?}",
+        tracing::debug!(
+            "[javascript] add_import path='{}' alias={:?} file_id={:?}",
             import.path,
             import.alias,
             import.file_id
@@ -337,11 +277,9 @@ impl LanguageBehavior for JavaScriptBehavior {
         from_file: FileId,
     ) -> Option<(String, String)> {
         // Use tracked imports and module path to map unresolved calls to externals.
-        if crate::config::is_global_debug_enabled() {
-            eprintln!(
-                "DEBUG[JS]: resolve_external_call_target to='{to_name}' file_id={from_file:?}"
-            );
-        }
+        tracing::debug!(
+            "[javascript] resolve_external_call_target to='{to_name}' file_id={from_file:?}"
+        );
         // Cases:
         // - Namespace import: `import * as React from 'react'` -> React.useState
         // - Default import:  `import React from 'react'` -> React.useState
@@ -349,25 +287,22 @@ impl LanguageBehavior for JavaScriptBehavior {
 
         let imports = self.get_imports_for_file(from_file);
         if imports.is_empty() {
-            if crate::config::is_global_debug_enabled() {
-                eprintln!("DEBUG[JS]: no imports tracked for file {from_file:?}");
-            }
+            tracing::debug!("[javascript] no imports tracked for file {from_file:?}");
             return None;
         }
 
         let importing_module = self.get_module_path_for_file(from_file).unwrap_or_default();
-        if crate::config::is_global_debug_enabled() {
-            eprintln!(
-                "DEBUG[JS]: importing_module='{}', imports={}",
-                importing_module,
-                imports.len()
+        tracing::debug!(
+            "[javascript] importing_module='{importing_module}', imports={}",
+            imports.len()
+        );
+        for imp in &imports {
+            tracing::debug!(
+                "[javascript]   import path='{}' alias={:?} glob={}",
+                imp.path,
+                imp.alias,
+                imp.is_glob
             );
-            for imp in &imports {
-                eprintln!(
-                    "  import path='{}' alias={:?} glob={}",
-                    imp.path, imp.alias, imp.is_glob
-                );
-            }
         }
 
         // Namespace form only: Alias.member from `import * as Alias from 'module'`
@@ -378,11 +313,9 @@ impl LanguageBehavior for JavaScriptBehavior {
                     if let Some(a) = &import.alias {
                         if a == alias {
                             let module_path = normalize_js_import(&import.path, &importing_module);
-                            if crate::config::is_global_debug_enabled() {
-                                eprintln!(
-                                    "DEBUG[JS]: mapped namespace alias.member: {alias}.{member} -> module '{module_path}'"
-                                );
-                            }
+                            tracing::debug!(
+                                "[javascript] mapped namespace alias.member: {alias}.{member} -> module '{module_path}'"
+                            );
                             return Some((module_path, member.to_string()));
                         }
                     }
@@ -395,11 +328,9 @@ impl LanguageBehavior for JavaScriptBehavior {
                     if let Some(a) = &import.alias {
                         if a == to_name {
                             let module_path = normalize_js_import(&import.path, &importing_module);
-                            if crate::config::is_global_debug_enabled() {
-                                eprintln!(
-                                    "DEBUG[JS]: mapped named import: {to_name} -> module '{module_path}'"
-                                );
-                            }
+                            tracing::debug!(
+                                "[javascript] mapped named import: {to_name} -> module '{module_path}'"
+                            );
                             return Some((module_path, to_name.to_string()));
                         }
                     }
@@ -422,26 +353,23 @@ impl LanguageBehavior for JavaScriptBehavior {
 
         // If symbol already exists with same name and module_path, reuse it
         if let Ok(cands) = document_index.find_symbols_by_name(symbol_name, None) {
-            debug_print!(
-                self,
-                "Found {} existing symbols with name '{}'",
+            tracing::debug!(
+                "[javascript] found {} existing symbols with name '{}'",
                 cands.len(),
                 symbol_name
             );
             for s in cands {
                 if let Some(mp) = &s.module_path {
-                    debug_print!(
-                        self,
-                        "Checking symbol '{}' module '{}' vs '{}' (ID: {:?})",
+                    tracing::debug!(
+                        "[javascript] checking symbol '{}' module '{}' vs '{}' (ID: {:?})",
                         s.name,
                         mp.as_ref(),
                         module_path,
                         s.id
                     );
                     if mp.as_ref() == module_path {
-                        debug_print!(
-                            self,
-                            "Reusing existing external symbol '{}' in module '{}' with ID {:?}",
+                        tracing::debug!(
+                            "[javascript] reusing existing external symbol '{}' in module '{}' with ID {:?}",
                             symbol_name,
                             module_path,
                             s.id
@@ -459,7 +387,7 @@ impl LanguageBehavior for JavaScriptBehavior {
         let path_str = path_buf;
 
         // Ensure file_info exists
-        let file_id = if let Ok(Some((fid, _))) = document_index.get_file_info(&path_str) {
+        let file_id = if let Ok(Some((fid, _, _))) = document_index.get_file_info(&path_str) {
             fid
         } else {
             let next_file_id =
@@ -519,9 +447,8 @@ impl LanguageBehavior for JavaScriptBehavior {
                 cause: e.to_string(),
             })?;
 
-        debug_print!(
-            self,
-            "Created new external symbol '{}' in module '{}' with ID {:?}",
+        tracing::debug!(
+            "[javascript] created new external symbol '{}' in module '{}' with ID {:?}",
             symbol_name,
             module_path,
             symbol_id
@@ -706,241 +633,140 @@ impl LanguageBehavior for JavaScriptBehavior {
         Ok(Box::new(context))
     }
 
-    /// Build resolution context using symbol cache (fast path) with JavaScript semantics
-    fn build_resolution_context_with_cache(
+    /// Build resolution context for parallel pipeline (no Tantivy).
+    ///
+    /// Uses jsconfig path aliases via JavaScriptProjectEnhancer.
+    /// Returns (scope, enhanced_imports) where enhanced_imports have path aliases resolved.
+    ///
+    /// CRITICAL: Symbols from pipeline have `module_path: None`.
+    /// We compute module_path on-the-fly from `symbol.file_path` using rules.
+    fn build_resolution_context_with_pipeline_cache(
         &self,
         file_id: FileId,
-        cache: &crate::storage::symbol_cache::ConcurrentSymbolCache,
-        document_index: &DocumentIndex,
-    ) -> crate::error::IndexResult<Box<dyn ResolutionScope>> {
-        debug_print!(
-            self,
-            "[build_resolution_context_with_cache] file_id={:?}",
-            file_id
-        );
-        use crate::error::IndexError;
-        // Create JavaScript-specific resolution context
+        imports: &[crate::parsing::Import],
+        cache: &dyn crate::parsing::PipelineSymbolCache,
+    ) -> (
+        Box<dyn crate::parsing::ResolutionScope>,
+        Vec<crate::parsing::Import>,
+    ) {
+        use crate::parsing::ScopeLevel;
+        use crate::parsing::resolution::{ImportBinding, ImportOrigin, ProjectResolutionEnhancer};
+        use std::path::PathBuf;
+
         let mut context = JavaScriptResolutionContext::new(file_id);
 
-        // 1) Imports: prefer cache for imported names
-        let imports = self.get_imports_for_file(file_id);
-        if crate::config::is_global_debug_enabled() {
-            eprintln!("DEBUG: JS building context: {} imports", imports.len());
-        }
-        let importing_module = self.get_module_path_for_file(file_id).unwrap_or_default();
-        debug_print!(
-            self,
-            "[build_context] importing_module={} imports_count={}",
-            importing_module,
-            imports.len()
-        );
+        // Helper to compute module_path from file_path using rules
+        // Rules contain jsconfig paths; module_path_from_file extracts canonical module path
+        let compute_module_path = |file_path: &str| -> Option<String> {
+            let path = PathBuf::from(file_path);
+            // project_root is unused by JavaScript's module_path_from_file (uses rules instead)
+            self.module_path_from_file(&path, &PathBuf::new())
+        };
+
+        // Compute importing module from current file
+        let importing_module = cache
+            .symbols_in_file(file_id)
+            .first()
+            .and_then(|id| cache.get(*id))
+            .and_then(|sym| compute_module_path(&sym.file_path));
+
+        // Load project rules for path alias enhancement
+        let maybe_enhancer = self
+            .load_project_rules_for_file(file_id)
+            .map(super::resolution::JavaScriptProjectEnhancer::new);
+
+        // Build enhanced imports with path aliases resolved
+        let mut enhanced_imports = Vec::with_capacity(imports.len());
+
         for import in imports {
-            debug_print!(
-                self,
-                "[build_context] import path='{}' alias={:?}",
-                import.path,
-                import.alias
-            );
-            let Some(local_name) = import.alias.clone() else {
-                debug_print!(
-                    self,
-                    "[build_context] SKIPPED import without alias: '{}'",
-                    import.path
-                );
-                continue;
-            };
+            // Get the local name to bind (alias or last path segment)
+            let local_name = import.alias.clone().unwrap_or_else(|| {
+                import
+                    .path
+                    .split('/')
+                    .next_back()
+                    .or_else(|| import.path.split('.').next_back())
+                    .unwrap_or(&import.path)
+                    .to_string()
+            });
 
-            // Use jsconfig enhancer for path alias resolution (mirrors TypeScript)
-            let target_module = if let Some(rules) = self.load_project_rules_for_file(file_id) {
-                let enhancer = super::resolution::JavaScriptProjectEnhancer::new(rules);
-                use crate::parsing::resolution::ProjectResolutionEnhancer;
-
+            // Enhance import path if we have jsconfig rules
+            let target_module = if let Some(ref enhancer) = maybe_enhancer {
                 if let Some(enhanced_path) = enhancer.enhance_import_path(&import.path, file_id) {
-                    // Successfully enhanced - this is a jsconfig alias
-                    // Enhanced path is absolute from jsconfig root, convert to module path
-                    debug_print!(
-                        self,
-                        "[build_context] ENHANCED '{}' -> '{}'",
-                        import.path,
-                        enhanced_path
-                    );
+                    // Jsconfig alias - convert enhanced path to module format
                     enhanced_path.trim_start_matches("./").replace('/', ".")
                 } else {
-                    // Not a jsconfig alias - regular relative import
-                    debug_print!(
-                        self,
-                        "[build_context] NOT ENHANCED '{}' - using relative normalization",
-                        import.path
-                    );
-                    normalize_js_import(&import.path, &importing_module)
+                    // Regular import - normalize relative to importing module
+                    normalize_js_import(&import.path, &importing_module.clone().unwrap_or_default())
                 }
             } else {
-                // No jsconfig rules - treat as regular relative import
-                debug_print!(
-                    self,
-                    "[build_context] NO RULES for file - using relative normalization"
-                );
-                normalize_js_import(&import.path, &importing_module)
+                normalize_js_import(&import.path, &importing_module.clone().unwrap_or_default())
             };
-            debug_print!(
-                self,
-                "[build_context] local_name='{}' target_module='{}'",
-                local_name,
-                target_module
-            );
 
-            // Try cache candidates by local name
-            let mut matched: Option<SymbolId> = None;
-            let candidates = cache.lookup_candidates(&local_name, 16);
-            if crate::config::is_global_debug_enabled() {
-                eprintln!(
-                    "DEBUG: JS cache candidates for '{}': {}",
-                    local_name,
-                    candidates.len()
-                );
-            }
+            // Collect enhanced import with resolved path
+            enhanced_imports.push(crate::parsing::Import {
+                path: target_module.clone(),
+                file_id: import.file_id,
+                alias: import.alias.clone(),
+                is_glob: import.is_glob,
+                is_type_only: import.is_type_only,
+            });
+
+            // Look up candidates by local_name and match computed module_path
+            let mut resolved_symbol: Option<SymbolId> = None;
+            let candidates = cache.lookup_candidates(&local_name);
             for id in candidates {
-                if let Ok(Some(symbol)) = document_index.find_symbol_by_id(id) {
-                    if let Some(module_path) = &symbol.module_path {
-                        debug_print!(
-                            self,
-                            "[build_context] Checking candidate: symbol_module='{}' vs target='{}'",
-                            module_path.as_ref(),
-                            target_module
-                        );
-                        if module_path.as_ref() == target_module {
-                            debug_print!(
-                                self,
-                                "[build_context] MATCHED! Resolved '{}' to {:?}",
-                                local_name,
-                                id
-                            );
-                            matched = Some(id);
+                if let Some(symbol) = cache.get(id) {
+                    // Compute module_path from file_path using rules
+                    if let Some(computed_module) = compute_module_path(&symbol.file_path) {
+                        if computed_module == target_module
+                            || target_module.ends_with(&computed_module)
+                            || computed_module.ends_with(&target_module)
+                        {
+                            resolved_symbol = Some(id);
                             break;
                         }
                     }
                 }
             }
 
-            // Fallback to DB by name if cache path match not found
-            if matched.is_none() {
-                if crate::config::is_global_debug_enabled() {
-                    eprintln!("DEBUG: JS cache miss for '{local_name}', falling back to DB");
-                }
-                if let Ok(cands) = document_index.find_symbols_by_name(&local_name, None) {
-                    for s in cands {
-                        if let Some(module_path) = &s.module_path {
-                            if module_path.as_ref() == target_module {
-                                if crate::config::is_global_debug_enabled() {
-                                    eprintln!(
-                                        "DEBUG: JS DB match for '{}': {:?}",
-                                        local_name, s.id
-                                    );
-                                }
-                                matched = Some(s.id);
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-
-            if let Some(symbol_id) = matched {
-                // JavaScript doesn't have type-only imports
-                debug_print!(
-                    self,
-                    "[build_context] Adding to context: '{}' -> {:?}",
-                    local_name,
-                    symbol_id
-                );
-                context.add_import_symbol(local_name, symbol_id, false);
+            // Determine origin
+            let origin = if resolved_symbol.is_some() {
+                ImportOrigin::Internal
             } else {
-                debug_print!(
-                    self,
-                    "[build_context] UNRESOLVED: local='{}', target_module='{}'",
-                    local_name,
-                    target_module
-                );
+                ImportOrigin::External
+            };
+
+            // Register binding
+            context.register_import_binding(ImportBinding {
+                import: import.clone(),
+                exposed_name: local_name.clone(),
+                origin,
+                resolved_symbol,
+            });
+
+            if let (ImportOrigin::Internal, Some(symbol_id)) = (origin, resolved_symbol) {
+                context.add_symbol(local_name.clone(), symbol_id, ScopeLevel::Module);
             }
         }
 
-        // 2) File's own symbols (module-level, with scope context)
-        let file_symbols =
-            document_index
-                .find_symbols_by_file(file_id)
-                .map_err(|e| IndexError::TantivyError {
-                    operation: "find_symbols_by_file".to_string(),
-                    cause: e.to_string(),
-                })?;
+        // Populate context with enhanced imports
+        context.populate_imports(&enhanced_imports);
 
-        for symbol in file_symbols {
-            if self.is_resolvable_symbol(&symbol) {
-                context.add_symbol_with_context(
-                    symbol.name.to_string(),
-                    symbol.id,
-                    symbol.scope_context.as_ref(),
-                );
-
-                // CRITICAL: Also add by module_path for cross-module resolution
-                if let Some(ref module_path) = symbol.module_path {
-                    context.add_symbol(
-                        module_path.to_string(),
-                        symbol.id,
-                        crate::parsing::ScopeLevel::Global,
-                    );
-                }
-            }
-        }
-
-        // 3) Avoid global get_all_symbols; we rely on imported files where possible
-        let mut imported_files = std::collections::HashSet::new();
-        for import in self.get_imports_for_file(file_id) {
-            if let Some(alias) = &import.alias {
-                for id in cache.lookup_candidates(alias, 4) {
-                    if let Ok(Some(sym)) = document_index.find_symbol_by_id(id) {
-                        imported_files.insert(sym.file_id);
-                    }
-                }
-            }
-        }
-        if crate::config::is_global_debug_enabled() {
-            eprintln!(
-                "DEBUG: JS imported files discovered via cache: {}",
-                imported_files.len()
-            );
-        }
-
-        for imported_file_id in imported_files {
-            if imported_file_id == file_id {
-                continue;
-            }
-            let imported_syms = document_index
-                .find_symbols_by_file(imported_file_id)
-                .map_err(|e| IndexError::TantivyError {
-                    operation: "find_symbols_by_file for imports".to_string(),
-                    cause: e.to_string(),
-                })?;
-            for symbol in imported_syms {
-                if self.is_symbol_visible_from_file(&symbol, file_id) {
-                    context.add_symbol(
-                        symbol.name.to_string(),
-                        symbol.id,
-                        crate::parsing::ScopeLevel::Global,
-                    );
-
-                    // CRITICAL: Also add by module_path for cross-module resolution
-                    if let Some(ref module_path) = symbol.module_path {
-                        context.add_symbol(
-                            module_path.to_string(),
-                            symbol.id,
-                            crate::parsing::ScopeLevel::Global,
-                        );
+        // Add local symbols from this file with computed module_path
+        for sym_id in cache.symbols_in_file(file_id) {
+            if let Some(symbol) = cache.get(sym_id) {
+                if self.is_resolvable_symbol(&symbol) {
+                    context.add_symbol(symbol.name.to_string(), symbol.id, ScopeLevel::Module);
+                    // Compute module_path from file_path using rules
+                    if let Some(computed_module) = compute_module_path(&symbol.file_path) {
+                        context.add_symbol(computed_module, symbol.id, ScopeLevel::Module);
                     }
                 }
             }
         }
 
-        Ok(Box::new(context))
+        (Box::new(context), enhanced_imports)
     }
 
     // JavaScript-specific: Support hoisting
@@ -982,26 +808,12 @@ impl LanguageBehavior for JavaScriptBehavior {
         import: &crate::parsing::Import,
         document_index: &DocumentIndex,
     ) -> Option<SymbolId> {
-        debug_print!(
-            self,
-            "[resolve_import] path='{}' alias={:?} file_id={:?}",
+        tracing::debug!(
+            "[javascript] resolve_import path='{}' alias={:?} file_id={:?}",
             import.path,
             import.alias,
             import.file_id
         );
-
-        let debug = if let Ok(settings) = crate::config::Settings::load() {
-            settings.mcp.debug || settings.debug
-        } else {
-            false
-        };
-
-        if debug {
-            eprintln!("\n=== RESOLVING IMPORT ===");
-            eprintln!("  Path: {}", import.path);
-            eprintln!("  Alias: {:?}", import.alias);
-            eprintln!("  File ID: {:?}", import.file_id);
-        }
 
         let importing_module = self
             .get_module_path_for_file(import.file_id)
@@ -1010,50 +822,37 @@ impl LanguageBehavior for JavaScriptBehavior {
         let target_module = normalize_js_import(&import.path, &importing_module);
 
         if let Some(local_name) = &import.alias {
-            if debug {
-                eprintln!("  Looking up symbol by alias: {local_name}");
-            }
+            tracing::debug!("[javascript] looking up symbol by alias: {local_name}");
             if let Ok(cands) = document_index.find_symbols_by_name(local_name, None) {
-                if debug {
-                    eprintln!(
-                        "  Found {} candidates with name '{}'",
-                        cands.len(),
-                        local_name
-                    );
-                }
+                tracing::debug!(
+                    "[javascript] found {} candidates with name '{local_name}'",
+                    cands.len()
+                );
 
                 let mut checked = 0;
                 for s in cands {
                     if let Some(module_path) = &s.module_path {
                         if checked < 3 {
-                            debug_print!(
-                                self,
-                                "    [RESOLVE_DEBUG] Candidate module: {} vs target: {}",
-                                module_path.as_ref(),
-                                target_module
+                            tracing::debug!(
+                                "[javascript] candidate module: {} vs target: {target_module}",
+                                module_path.as_ref()
                             );
                             checked += 1;
                         }
                         if module_path.as_ref() == target_module {
-                            debug_print!(self, "  RESOLVED: Found symbol {:?}", s.id);
+                            tracing::debug!("[javascript] RESOLVED: found symbol {:?}", s.id);
                             return Some(s.id);
                         }
                     }
                 }
                 if checked > 0 {
-                    debug_print!(
-                        self,
-                        "    [RESOLVE_DEBUG] FAILED: No match for target '{}'",
-                        target_module
-                    );
+                    tracing::debug!("[javascript] FAILED: no match for target '{target_module}'");
                 }
             }
             None
         } else {
             // Namespace or side-effect import: cannot map to a single symbol reliably
-            if debug {
-                eprintln!("  No alias - namespace or side-effect import");
-            }
+            tracing::debug!("[javascript] no alias - namespace or side-effect import");
             None
         }
     }
@@ -1061,6 +860,10 @@ impl LanguageBehavior for JavaScriptBehavior {
     fn get_module_path_for_file(&self, file_id: FileId) -> Option<String> {
         // Use the BehaviorState to get module path (O(1) lookup)
         self.state.get_module_path(file_id)
+    }
+
+    fn get_file_path(&self, file_id: FileId) -> Option<PathBuf> {
+        self.state.get_file_path(file_id)
     }
 
     fn import_matches_symbol(

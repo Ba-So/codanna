@@ -122,6 +122,10 @@ impl Default for KotlinBehavior {
 }
 
 impl LanguageBehavior for KotlinBehavior {
+    fn language_id(&self) -> crate::parsing::registry::LanguageId {
+        crate::parsing::registry::LanguageId::new("kotlin")
+    }
+
     fn configure_symbol(&self, symbol: &mut Symbol, module_path: Option<&str>) {
         if let Some(path) = module_path {
             let full_path = self.format_module_path(path, &symbol.name);
@@ -243,13 +247,11 @@ impl LanguageBehavior for KotlinBehavior {
             map.insert(expr.clone(), ty.clone());
         }
         self.expression_types.write().insert(file_id, map);
-        if crate::config::is_global_debug_enabled() {
-            eprintln!(
-                "[KOTLIN-RESOLVE] Registered {} expression types for file {:?}",
-                entries.len(),
-                file_id
-            );
-        }
+        tracing::debug!(
+            "[kotlin] registered {} expression types for file {:?}",
+            entries.len(),
+            file_id
+        );
     }
 
     fn initialize_resolution_context(&self, context: &mut dyn ResolutionScope, file_id: FileId) {

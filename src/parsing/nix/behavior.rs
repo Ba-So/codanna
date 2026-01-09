@@ -38,6 +38,10 @@ impl Default for NixBehavior {
 }
 
 impl LanguageBehavior for NixBehavior {
+    fn language_id(&self) -> crate::parsing::registry::LanguageId {
+        crate::parsing::registry::LanguageId::new("nix")
+    }
+
     /// Format module path using Nix attribute access patterns
     ///
     /// Nix uses '.' for attribute access, so module paths follow this convention.

@@ -5,6 +5,228 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.10] - 2026-01-07
+
+### Changed
+
+- Bump version to 0.9.10
+- Update serde_json from 1.0.148 to 1.0.149
+- Disable ort dev-dependency (commented out)
+
+### Fixed
+
+- Pipeline wall_time tracking (aa01269)
+- Add EMBED to pipeline metrics (aa01269)
+
+### Documentation
+
+- Fix JSON examples in MCP tools
+- Add lang parameter to tools documentation
+- Update architecture for v0.9.0
+- Add install methods documentation
+
+### CI
+
+- Add standalone brew-update workflow
+
+## [0.9.0] - 2026-01-05
+
+### Added
+
+- Parallel indexing pipeline with 5-stage architecture (DISCOVER, READ, PARSE, COLLECT, INDEX)
+- SemanticEmbedStage for parallel embedding generation
+- EmbeddingPool with configurable model instances for parallel embedding
+- Progress bars for Phase 1 and Phase 2 indexing with dual progress bar support
+- Pipeline metrics with stage timing, memory tracking, and bottleneck detection
+- GPU execution provider feature flags (CUDA, TensorRT, CoreML, DirectML, OpenVINO, ROCm)
+- GPU embedding benchmarks for CPU vs accelerator comparison
+- Incremental file-level change detection with mtime fast path
+- Document search auto-sync with mtime-based change detection
+- Install scripts for curl-based installation (install.sh, install.ps1)
+- IndexFacade as unified interface wrapping DocumentIndex, Pipeline, and SemanticSearch
+- `--watch` flag to mcp command for pre-tool reindex
+- `--no-progress` flag (progress enabled by default)
+
+### Changed
+
+- Replaced SimpleIndexer with IndexFacade across codebase
+- Consolidated thread settings into single parallelism value (derives stage threads)
+- Batch embeddings in groups of 64 for throughput
+- DocumentIndex.writer uses RwLock instead of Mutex for concurrent writes
+- Release workflow: removed slim variants (8 builds to 4 builds)
+- Release workflow: use macos-latest for both macOS targets
+- Manifest format simplified (removed variant field)
+
+### Removed
+
+- SimpleIndexer (6000+ lines, replaced by IndexFacade)
+- SymbolCache and related cache methods
+- Slim build variants from release pipeline
+- Unused retrieve commands: Uses, Defines, Dependencies
+
+### Fixed
+
+- Multi-directory symbol ID collisions by querying IDs before spawning threads
+- Pipeline metrics logging race with StatusLine
+- Child paths incorrectly processed when parent already indexed
+
+## [0.8.9] - 2025-12-30
+
+### Changed
+
+- Extracted 14 CLI command handlers from main.rs to src/cli/commands/
+- Moved Clap argument definitions to src/cli/args.rs
+- Replaced unreachable!() arms with single exhaustive match pattern
+- Made indexer optional for commands that don't require index access
+
+### Removed
+
+- Unused rkyv dependency
+- Unused bincode dependency
+
+### Fixed
+
+- Parse command tests failing without index directory
+- Added index.db and index.scip to .gitignore
+
+## [0.8.8] - 2025-12-30
+
+### Added
+
+- `language_id()` method to LanguageBehavior trait for cross-language resolution filtering
+- `RelationRole` enum for relationship disambiguation (From/To)
+- `resolve_instance_method()` and `resolve_method_call()` methods to LanguageBehavior
+- `MethodCallResolver` struct for per-file variable types and method call storage
+- `CapturedIncomingRelationship` for relationship preservation during file reindex
+- `get_implemented_traits()` query for symmetric trait display
+- Bidirectional relationship display in MCP (implements/implemented_by, extends/extended_by)
+- `symbol_id:XXX` format support in find_symbol for direct lookup
+- Calculator example files for method call resolution testing
+
+### Changed
+
+- Replaced `variable_types` + `method_calls_by_file` with unified `method_call_resolvers`
+- Simplified `resolve_symbol_for_relationship()` - kind filtering moved to behavior layer
+- Language filtering added to `build_resolution_context_with_cache` candidate verification
+- `find_symbol` MCP tool includes all ContextIncludes flags
+- Upgraded serde_json from 1.0.145 to 1.0.148
+- Upgraded tempfile from 3.23.0 to 3.24.0
+- Upgraded testcontainers from 0.26.2 to 0.26.3
+
+### Removed
+
+- Legacy conversion methods from MethodCall (`to_simple_call`, `from_legacy_format`)
+
+## [0.8.7] - 2025-12-20
+
+### Added
+
+- Custom MCP requests: `requests/codanna/index-stats`, `requests/codanna/force-reindex`
+- Custom MCP notifications: `file-reindexed`, `file-deleted`, `index-reloaded`
+- HotReloadWatcher for external index changes (CI/CD, other processes)
+- Debug logging for unmatched file watcher events
+
+### Changed
+
+- Renamed IndexWatcher to HotReloadWatcher with clearer purpose
+- Moved hot reload watcher from `mcp/watcher.rs` to `watcher/hot_reload.rs`
+- Removed source file polling from HotReloadWatcher (UnifiedWatcher handles this)
+- Notification listener now spawned in HTTPS server for client notifications
+- Simplified async fn signature for `on_custom_request`
+
+### Removed
+
+- `check_and_reindex_source_files()` from hot reload watcher (redundant with UnifiedWatcher)
+- `with_mcp_server()` method (notifications now use broadcaster pattern)
+
+## [0.8.6] - 2025-12-20
+
+### Added
+
+- Unified watcher module replacing three separate implementations
+- Path registry for tracking monitored files across multiple watchers
+- Debouncer module to prevent duplicate event processing
+- Handler trait with code, config, and document implementations
+- Logging module with tracing-subscriber and per-module level support
+- RUST_LOG environment variable support for runtime log level control
+- Documents command documentation in CLI reference
+- Logging configuration section in configuration guide
+
+### Changed
+
+- Replaced debug_print macros with tracing calls across indexer and parsers
+- MCP servers now use unified watcher and structured logging
+- Language parsers updated to use tracing
+- README restructured with Quick Start moved to top
+- Features presented as table with documentation links
+- Advanced features (Profiles, Documents) moved to collapsible sections
+
+### Removed
+
+- documents/watcher.rs (replaced by unified watcher)
+- indexing/fs_watcher.rs (replaced by unified watcher)
+- indexing/config_watcher.rs (replaced by unified watcher)
+
+## [0.8.5] - 2025-12-18
+
+### Added
+
+- Document embedding system for RAG (Retrieval-Augmented Generation)
+- Document chunking with hybrid strategy (paragraph-based sizing with merge/split)
+- DocumentStore with tantivy metadata index and mmap vector storage
+- Semantic search for documents filtered by collection and path
+- File watcher for automatic document re-indexing on changes
+- CLI commands: `documents add-collection`, `remove-collection`, `index`, `search`, `list`, `stats`
+- MCP tool `search_documents` for AI assistant integration
+- Settings section `[documents]` with chunking and search configuration
+- Documentation in `docs/user-guide/documents.md`
+- KWIC (Keyword In Context) preview mode with highlighting
+
+### Changed
+
+- Upgraded rmcp from 0.11.0 to 0.12.0
+- Upgraded fastembed from 5.4.0 to 5.5.0
+- Upgraded tree-sitter from 0.26.2 to 0.26.3
+- Upgraded console from 0.16.1 to 0.16.2
+- Upgraded rcgen from 0.14.5 to 0.14.6
+- Settings save now preserves inline comments via `add_config_comments`
+
+### Fixed
+
+- `add-dir` command now handles already-indexed paths gracefully (shows message instead of error)
+- `add-dir`/`remove-dir`/`list-dirs` skip index loading and semantic search initialization
+- `-c` short flag conflict resolved (removed from `--collection` in documents commands)
+- `documents index` now syncs stale collections even when no collections configured
+
+## [0.8.4] - 2025-12-12
+
+### Changed
+
+- Migrated from rmcp 0.9.1 to 0.11.0
+- Replaced SSE transport with streamable HTTP transport
+- Updated MCP HTTP/HTTPS server to use StreamableHttpService
+- Updated tree-sitter from 0.25.10 to 0.26.2
+- Fixed tree-sitter Node API calls to use u32 instead of usize
+- Updated fastembed from 5.3.1 to 5.4.0
+- Updated axum-server from 0.7.3 to 0.8.0
+- Updated tower-http from 0.6.7 to 0.6.8
+- Updated git2 from 0.20.2 to 0.20.3
+- Updated criterion from 0.8.0 to 0.8.1
+- Updated testcontainers from 0.25.2 to 0.26.0
+- MCP endpoint changed from `/mcp/sse` to `/mcp`
+- MCP client config type changed from `"sse"` to `"http"`
+- Updated HTTP server documentation with new transport configuration
+
+### Removed
+
+- Removed `transport-sse-server` feature from rmcp
+- Removed SSE-specific transport code
+- Removed early address parsing in HTTPS server
+
+### Fixed
+
+- Fixed clippy unnecessary_unwrap warnings in Swift test files
+
 ## [0.8.3] - 2025-11-30
 
 ### Added

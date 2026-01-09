@@ -94,6 +94,10 @@ impl StatefulBehavior for CSharpBehavior {
 }
 
 impl LanguageBehavior for CSharpBehavior {
+    fn language_id(&self) -> crate::parsing::registry::LanguageId {
+        crate::parsing::registry::LanguageId::new("csharp")
+    }
+
     fn configure_symbol(&self, symbol: &mut crate::Symbol, module_path: Option<&str>) {
         // Set namespace as module path for C# symbols
         if let Some(path) = module_path {
@@ -285,7 +289,7 @@ impl LanguageBehavior for CSharpBehavior {
         let path_str = path_buf;
 
         // Ensure file_info exists
-        let file_id = if let Ok(Some((fid, _))) = document_index.get_file_info(&path_str) {
+        let file_id = if let Ok(Some((fid, _, _))) = document_index.get_file_info(&path_str) {
             fid
         } else {
             let next_file_id =

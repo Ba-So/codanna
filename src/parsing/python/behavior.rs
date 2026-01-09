@@ -79,6 +79,10 @@ impl Default for PythonBehavior {
 }
 
 impl LanguageBehavior for PythonBehavior {
+    fn language_id(&self) -> crate::parsing::registry::LanguageId {
+        crate::parsing::registry::LanguageId::new("python")
+    }
+
     fn configure_symbol(&self, symbol: &mut crate::Symbol, module_path: Option<&str>) {
         // Apply default behavior: set module_path and parse visibility
         if let Some(path) = module_path {
@@ -234,7 +238,7 @@ impl LanguageBehavior for PythonBehavior {
         let path_str = path_buf;
 
         // Ensure file_info exists
-        let file_id = if let Ok(Some((fid, _))) = document_index.get_file_info(&path_str) {
+        let file_id = if let Ok(Some((fid, _, _))) = document_index.get_file_info(&path_str) {
             fid
         } else {
             let next_file_id =
@@ -371,19 +375,15 @@ impl LanguageBehavior for PythonBehavior {
     ) -> bool {
         // 1. Always check exact match first (performance)
         if import_path == symbol_module_path {
-            if crate::config::is_global_debug_enabled() {
-                eprintln!("DEBUG: Python exact match: {import_path} == {symbol_module_path}");
-            }
+            tracing::debug!("[python] exact match: {import_path} == {symbol_module_path}");
             return true;
         }
 
         // 2. Handle Python-specific import patterns
         if let Some(importing_mod) = importing_module {
-            if crate::config::is_global_debug_enabled() {
-                eprintln!(
-                    "DEBUG: Python import_matches_symbol: import='{import_path}', symbol='{symbol_module_path}', from='{importing_mod}'"
-                );
-            }
+            tracing::debug!(
+                "[python] import_matches_symbol: import='{import_path}', symbol='{symbol_module_path}', from='{importing_mod}'"
+            );
             // Handle relative imports starting with dots
             if import_path.starts_with('.') {
                 let resolved = self.resolve_python_relative_import(import_path, importing_mod);

@@ -1,6 +1,5 @@
 //! TypeScript-specific language behavior implementation
 
-use crate::debug_print;
 use crate::parsing::LanguageBehavior;
 use crate::parsing::behavior_state::{BehaviorState, StatefulBehavior};
 use crate::parsing::resolution::{InheritanceResolver, ResolutionScope};
@@ -92,6 +91,10 @@ impl StatefulBehavior for TypeScriptBehavior {
 }
 
 impl LanguageBehavior for TypeScriptBehavior {
+    fn language_id(&self) -> crate::parsing::registry::LanguageId {
+        crate::parsing::registry::LanguageId::new("typescript")
+    }
+
     fn configure_symbol(&self, symbol: &mut crate::Symbol, module_path: Option<&str>) {
         // Preserve parser-derived visibility (export detection), only set module path.
         if let Some(path) = module_path {
@@ -129,20 +132,13 @@ impl LanguageBehavior for TypeScriptBehavior {
 
         // Find which tsconfig applies to this file
         let config_path = index.get_config_for_file(relative_to_workspace)?;
-        debug_print!(
-            self,
-            "[module_path_from_file] relative_to_workspace={:?} config_path={:?}",
-            relative_to_workspace,
-            config_path
+        tracing::debug!(
+            "[typescript] module_path_from_file relative_to_workspace={relative_to_workspace:?} config_path={config_path:?}"
         );
 
         // Get the tsconfig's directory (the project root for this file)
         let tsconfig_dir = project_root.join(config_path.parent()?);
-        debug_print!(
-            self,
-            "[module_path_from_file] tsconfig_dir={:?}",
-            tsconfig_dir
-        );
+        tracing::debug!("[typescript] module_path_from_file tsconfig_dir={tsconfig_dir:?}");
 
         // Compute path relative to the tsconfig's directory
         let relative_path = file_path.strip_prefix(&tsconfig_dir).ok()?;
@@ -162,11 +158,8 @@ impl LanguageBehavior for TypeScriptBehavior {
         // Replace path separators with module separators
         let result = module_path.replace('/', ".");
 
-        debug_print!(
-            self,
-            "[module_path_from_file] file_path={:?} -> module_path={}",
-            file_path,
-            result
+        tracing::debug!(
+            "[typescript] module_path_from_file file_path={file_path:?} -> module_path={result}"
         );
 
         Some(result)
@@ -236,9 +229,8 @@ impl LanguageBehavior for TypeScriptBehavior {
         // Store the ORIGINAL import path (including path aliases like @/components)
         // Enhancement will happen on-demand during resolution in build_resolution_context_with_cache()
         // This preserves the semantic information about whether a path was a tsconfig alias or a relative import
-        debug_print!(
-            self,
-            "[add_import] path='{}' alias={:?} file_id={:?}",
+        tracing::debug!(
+            "[typescript] add_import path='{}' alias={:?} file_id={:?}",
             import.path,
             import.alias,
             import.file_id
@@ -256,11 +248,9 @@ impl LanguageBehavior for TypeScriptBehavior {
         from_file: FileId,
     ) -> Option<(String, String)> {
         // Use tracked imports and module path to map unresolved calls to externals.
-        if crate::config::is_global_debug_enabled() {
-            eprintln!(
-                "DEBUG[TS]: resolve_external_call_target to='{to_name}' file_id={from_file:?}"
-            );
-        }
+        tracing::debug!(
+            "[typescript] resolve_external_call_target to='{to_name}' file_id={from_file:?}"
+        );
         // Cases:
         // - Namespace import: `import * as React from 'react'` -> React.useState
         // - Default import:  `import React from 'react'` -> React.useState
@@ -268,9 +258,7 @@ impl LanguageBehavior for TypeScriptBehavior {
 
         let imports = self.get_imports_for_file(from_file);
         if imports.is_empty() {
-            if crate::config::is_global_debug_enabled() {
-                eprintln!("DEBUG[TS]: no imports tracked for file {from_file:?}");
-            }
+            tracing::debug!("[typescript] no imports tracked for file {from_file:?}");
             return None;
         }
 
@@ -322,18 +310,18 @@ impl LanguageBehavior for TypeScriptBehavior {
         }
 
         let importing_module = self.get_module_path_for_file(from_file).unwrap_or_default();
-        if crate::config::is_global_debug_enabled() {
-            eprintln!(
-                "DEBUG[TS]: importing_module='{}', imports={}",
-                importing_module,
-                imports.len()
+        tracing::debug!(
+            "[typescript] importing_module='{importing_module}', imports={}",
+            imports.len()
+        );
+        for imp in &imports {
+            tracing::debug!(
+                "[typescript]   import path='{}' alias={:?} glob={} type_only={}",
+                imp.path,
+                imp.alias,
+                imp.is_glob,
+                imp.is_type_only
             );
-            for imp in &imports {
-                eprintln!(
-                    "  import path='{}' alias={:?} glob={} type_only={}",
-                    imp.path, imp.alias, imp.is_glob, imp.is_type_only
-                );
-            }
         }
 
         // Namespace form only: Alias.member from `import * as Alias from 'module'`
@@ -344,11 +332,9 @@ impl LanguageBehavior for TypeScriptBehavior {
                     if let Some(a) = &import.alias {
                         if a == alias {
                             let module_path = normalize_ts_import(&import.path, &importing_module);
-                            if crate::config::is_global_debug_enabled() {
-                                eprintln!(
-                                    "DEBUG[TS]: mapped namespace alias.member: {alias}.{member} -> module '{module_path}'"
-                                );
-                            }
+                            tracing::debug!(
+                                "[typescript] mapped namespace alias.member: {alias}.{member} -> module '{module_path}'"
+                            );
                             return Some((module_path, member.to_string()));
                         }
                     }
@@ -361,11 +347,9 @@ impl LanguageBehavior for TypeScriptBehavior {
                     if let Some(a) = &import.alias {
                         if a == to_name {
                             let module_path = normalize_ts_import(&import.path, &importing_module);
-                            if crate::config::is_global_debug_enabled() {
-                                eprintln!(
-                                    "DEBUG[TS]: mapped named import: {to_name} -> module '{module_path}'"
-                                );
-                            }
+                            tracing::debug!(
+                                "[typescript] mapped named import: {to_name} -> module '{module_path}'"
+                            );
                             return Some((module_path, to_name.to_string()));
                         }
                     }
@@ -388,28 +372,21 @@ impl LanguageBehavior for TypeScriptBehavior {
 
         // If symbol already exists with same name and module_path, reuse it
         if let Ok(cands) = document_index.find_symbols_by_name(symbol_name, None) {
-            debug_print!(
-                self,
-                "Found {} existing symbols with name '{}'",
-                cands.len(),
-                symbol_name
+            tracing::debug!(
+                "[typescript] found {} existing symbols with name '{symbol_name}'",
+                cands.len()
             );
             for s in cands {
                 if let Some(mp) = &s.module_path {
-                    debug_print!(
-                        self,
-                        "Checking symbol '{}' module '{}' vs '{}' (ID: {:?})",
+                    tracing::debug!(
+                        "[typescript] checking symbol '{}' module '{}' vs '{module_path}' (ID: {:?})",
                         s.name,
                         mp.as_ref(),
-                        module_path,
                         s.id
                     );
                     if mp.as_ref() == module_path {
-                        debug_print!(
-                            self,
-                            "Reusing existing external symbol '{}' in module '{}' with ID {:?}",
-                            symbol_name,
-                            module_path,
+                        tracing::debug!(
+                            "[typescript] reusing existing external symbol '{symbol_name}' in module '{module_path}' with ID {:?}",
                             s.id
                         );
                         return Ok(s.id);
@@ -425,7 +402,7 @@ impl LanguageBehavior for TypeScriptBehavior {
         let path_str = path_buf;
 
         // Ensure file_info exists
-        let file_id = if let Ok(Some((fid, _))) = document_index.get_file_info(&path_str) {
+        let file_id = if let Ok(Some((fid, _, _))) = document_index.get_file_info(&path_str) {
             fid
         } else {
             let next_file_id =
@@ -485,12 +462,8 @@ impl LanguageBehavior for TypeScriptBehavior {
                 cause: e.to_string(),
             })?;
 
-        debug_print!(
-            self,
-            "Created new external symbol '{}' in module '{}' with ID {:?}",
-            symbol_name,
-            module_path,
-            symbol_id
+        tracing::debug!(
+            "[typescript] created new external symbol '{symbol_name}' in module '{module_path}' with ID {symbol_id:?}"
         );
 
         Ok(symbol_id)
@@ -673,300 +646,146 @@ impl LanguageBehavior for TypeScriptBehavior {
         Ok(Box::new(context))
     }
 
-    /// Build resolution context using symbol cache (fast path) with TypeScript semantics
-    fn build_resolution_context_with_cache(
+    /// Build resolution context for parallel pipeline (no Tantivy).
+    ///
+    /// Uses tsconfig path aliases via TypeScriptProjectEnhancer.
+    /// Returns (scope, enhanced_imports) where enhanced_imports have path aliases resolved.
+    fn build_resolution_context_with_pipeline_cache(
         &self,
         file_id: FileId,
-        cache: &crate::storage::symbol_cache::ConcurrentSymbolCache,
-        document_index: &DocumentIndex,
-    ) -> crate::error::IndexResult<Box<dyn ResolutionScope>> {
-        debug_print!(
-            self,
-            "[build_resolution_context_with_cache] file_id={:?}",
-            file_id
-        );
-        use crate::error::IndexError;
-        // Create TypeScript-specific resolution context
-        let mut context = TypeScriptResolutionContext::new(file_id);
+        imports: &[crate::parsing::Import],
+        cache: &dyn crate::parsing::PipelineSymbolCache,
+    ) -> (
+        Box<dyn crate::parsing::ResolutionScope>,
+        Vec<crate::parsing::Import>,
+    ) {
+        use crate::parsing::ScopeLevel;
+        use crate::parsing::resolution::{ImportBinding, ImportOrigin, ProjectResolutionEnhancer};
 
-        // Helper: normalize TS import to module path relative to importing module
-        fn normalize_ts_import(import_path: &str, importing_mod: &str) -> String {
-            // Helper: parent module (drop the last segment of the importing module)
-            fn parent_module(m: &str) -> String {
-                let mut parts: Vec<&str> = if m.is_empty() {
-                    Vec::new()
-                } else {
-                    m.split('.').collect()
-                };
-                if !parts.is_empty() {
-                    parts.pop();
-                }
-                parts.join(".")
-            }
-
+        // Helper to normalize relative imports
+        fn normalize_import(import_path: &str, importing_mod: &str) -> String {
             if import_path.starts_with("./") {
-                // Same directory as the file: use parent of importing module
-                let base_owned = parent_module(importing_mod);
-                let base = base_owned.as_str();
                 let rel = import_path.trim_start_matches("./").replace('/', ".");
-                if base.is_empty() {
+                if importing_mod.is_empty() {
                     rel
                 } else {
-                    format!("{base}.{rel}")
+                    // Get parent of importing module
+                    let parts: Vec<&str> = importing_mod.split('.').collect();
+                    let parent = parts[..parts.len().saturating_sub(1)].join(".");
+                    if parent.is_empty() {
+                        rel
+                    } else {
+                        format!("{parent}.{rel}")
+                    }
                 }
             } else if import_path.starts_with("../") {
-                // Walk up segments from the importing module's parent
-                let base_owned = parent_module(importing_mod);
-                let mut parts: Vec<&str> = base_owned.split('.').collect();
-                let mut rest = import_path;
-                while rest.starts_with("../") {
-                    if !parts.is_empty() {
-                        parts.pop();
-                    }
-                    rest = &rest[3..];
-                }
-                let rest = rest.trim_start_matches("./").replace('/', ".");
-                let mut combined = parts.join(".");
-                if !rest.is_empty() {
-                    combined = if combined.is_empty() {
-                        rest
-                    } else {
-                        format!("{combined}.{rest}")
-                    };
-                }
-                combined
+                // Just use the path as-is for now
+                import_path.replace('/', ".")
             } else {
-                // Bare module or path alias; leave as-is (converted separators)
+                // External or absolute
                 import_path.replace('/', ".")
             }
         }
 
-        // 1) Imports: prefer cache for imported names; skip side-effect and unnamed named imports
-        let imports = self.get_imports_for_file(file_id);
-        if crate::config::is_global_debug_enabled() {
-            eprintln!("DEBUG: TS building context: {} imports", imports.len());
-        }
-        let importing_module = self.get_module_path_for_file(file_id).unwrap_or_default();
-        debug_print!(
-            self,
-            "[build_context] importing_module={} imports_count={}",
-            importing_module,
-            imports.len()
-        );
+        let mut context = TypeScriptResolutionContext::new(file_id);
+
+        let importing_module = self.get_module_path_for_file(file_id);
+
+        // Load project rules for path alias enhancement
+        let maybe_enhancer = self
+            .load_project_rules_for_file(file_id)
+            .map(super::resolution::TypeScriptProjectEnhancer::new);
+
+        // Build enhanced imports with path aliases resolved
+        let mut enhanced_imports = Vec::with_capacity(imports.len());
+
         for import in imports {
-            debug_print!(
-                self,
-                "[build_context] import path='{}' alias={:?}",
-                import.path,
-                import.alias
-            );
-            // Determine the local name to bind in this file (alias or named import).
-            let Some(local_name) = import.alias.clone() else {
-                // Named imports without explicit alias are not captured individually yet.
-                // Fall back to database resolution which may still assist via module-level usage.
-                debug_print!(
-                    self,
-                    "[build_context] SKIPPED import without alias: '{}'",
-                    import.path
-                );
-                continue;
-            };
+            // Get the local name to bind (alias or last path segment)
+            let local_name = import.alias.clone().unwrap_or_else(|| {
+                import
+                    .path
+                    .split('/')
+                    .next_back()
+                    .or_else(|| import.path.split('.').next_back())
+                    .unwrap_or(&import.path)
+                    .to_string()
+            });
 
-            // Try to enhance using tsconfig infrastructure
-            // If enhancement succeeds, the path is absolute from tsconfig root
-            // If it fails, it's a regular relative import
-            let target_module = if let Some(rules) = self.load_project_rules_for_file(file_id) {
-                let enhancer = super::resolution::TypeScriptProjectEnhancer::new(rules);
-                use crate::parsing::resolution::ProjectResolutionEnhancer;
-
+            // Enhance import path if we have tsconfig rules
+            let target_module = if let Some(ref enhancer) = maybe_enhancer {
                 if let Some(enhanced_path) = enhancer.enhance_import_path(&import.path, file_id) {
-                    // Successfully enhanced - this is a tsconfig alias
-                    // Enhanced path is absolute from tsconfig root, convert directly to module path
-                    debug_print!(
-                        self,
-                        "[build_context] ENHANCED '{}' -> '{}'",
-                        import.path,
-                        enhanced_path
-                    );
+                    // Tsconfig alias - convert enhanced path to module format
                     enhanced_path.trim_start_matches("./").replace('/', ".")
                 } else {
-                    // Not a tsconfig alias - regular relative import
-                    // Normalize relative to importing module
-                    debug_print!(
-                        self,
-                        "[build_context] NOT ENHANCED '{}' - using relative normalization",
-                        import.path
-                    );
-                    normalize_ts_import(&import.path, &importing_module)
+                    // Regular import - normalize relative to importing module
+                    normalize_import(&import.path, &importing_module.clone().unwrap_or_default())
                 }
             } else {
-                // No tsconfig rules - treat as regular relative import
-                debug_print!(
-                    self,
-                    "[build_context] NO RULES for file - using relative normalization"
-                );
-                normalize_ts_import(&import.path, &importing_module)
+                normalize_import(&import.path, &importing_module.clone().unwrap_or_default())
             };
-            debug_print!(
-                self,
-                "[build_context] local_name='{}' target_module='{}'",
-                local_name,
-                target_module
-            );
 
-            // Try cache candidates by local name
-            let mut matched: Option<SymbolId> = None;
-            let candidates = cache.lookup_candidates(&local_name, 16);
-            if crate::config::is_global_debug_enabled() {
-                eprintln!(
-                    "DEBUG: TS cache candidates for '{}': {}",
-                    local_name,
-                    candidates.len()
-                );
-            }
+            // Collect enhanced import with resolved path
+            enhanced_imports.push(crate::parsing::Import {
+                path: target_module.clone(),
+                file_id: import.file_id,
+                alias: import.alias.clone(),
+                is_glob: import.is_glob,
+                is_type_only: import.is_type_only,
+            });
+
+            // Look up candidates by local_name and match module_path
+            let mut resolved_symbol: Option<SymbolId> = None;
+            let candidates = cache.lookup_candidates(&local_name);
             for id in candidates {
-                if let Ok(Some(symbol)) = document_index.find_symbol_by_id(id) {
-                    if let Some(module_path) = &symbol.module_path {
-                        debug_print!(
-                            self,
-                            "[build_context] Checking candidate: symbol_module='{}' vs target='{}'",
-                            module_path.as_ref(),
-                            target_module
-                        );
-                        if module_path.as_ref() == target_module {
-                            debug_print!(
-                                self,
-                                "[build_context] MATCHED! Resolved '{}' to {:?}",
-                                local_name,
-                                id
-                            );
-                            matched = Some(id);
+                if let Some(symbol) = cache.get(id) {
+                    if let Some(ref module_path) = symbol.module_path {
+                        if module_path.as_ref() == target_module
+                            || target_module.ends_with(module_path.as_ref())
+                            || module_path.ends_with(&target_module)
+                        {
+                            resolved_symbol = Some(id);
                             break;
                         }
                     }
                 }
             }
 
-            // Fallback to DB by name if cache path match not found
-            if matched.is_none() {
-                if crate::config::is_global_debug_enabled() {
-                    eprintln!("DEBUG: TS cache miss for '{local_name}', falling back to DB");
-                }
-                if let Ok(cands) = document_index.find_symbols_by_name(&local_name, None) {
-                    for s in cands {
-                        if let Some(module_path) = &s.module_path {
-                            if module_path.as_ref() == target_module {
-                                if crate::config::is_global_debug_enabled() {
-                                    eprintln!(
-                                        "DEBUG: TS DB match for '{}': {:?}",
-                                        local_name, s.id
-                                    );
-                                }
-                                matched = Some(s.id);
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-
-            if let Some(symbol_id) = matched {
-                // Respect type-only imports for proper space placement
-                debug_print!(
-                    self,
-                    "[build_context] Adding to context: '{}' -> {:?}",
-                    local_name,
-                    symbol_id
-                );
-                context.add_import_symbol(local_name, symbol_id, import.is_type_only);
+            // Determine origin
+            let origin = if resolved_symbol.is_some() {
+                ImportOrigin::Internal
             } else {
-                debug_print!(
-                    self,
-                    "[build_context] UNRESOLVED: local='{}', target_module='{}'",
-                    local_name,
-                    target_module
-                );
+                ImportOrigin::External
+            };
+
+            // Register binding
+            context.register_import_binding(ImportBinding {
+                import: import.clone(),
+                exposed_name: local_name.clone(),
+                origin,
+                resolved_symbol,
+            });
+
+            if let (ImportOrigin::Internal, Some(symbol_id)) = (origin, resolved_symbol) {
+                context.add_symbol(local_name.clone(), symbol_id, ScopeLevel::Module);
             }
         }
 
-        // 2) File's own symbols (module-level, with scope context)
-        let file_symbols =
-            document_index
-                .find_symbols_by_file(file_id)
-                .map_err(|e| IndexError::TantivyError {
-                    operation: "find_symbols_by_file".to_string(),
-                    cause: e.to_string(),
-                })?;
+        // Populate context with enhanced imports
+        context.populate_imports(&enhanced_imports);
 
-        for symbol in file_symbols {
-            if self.is_resolvable_symbol(&symbol) {
-                context.add_symbol_with_context(
-                    symbol.name.to_string(),
-                    symbol.id,
-                    symbol.scope_context.as_ref(),
-                );
-
-                // CRITICAL: Also add by module_path for cross-module resolution
-                if let Some(ref module_path) = symbol.module_path {
-                    context.add_symbol(
-                        module_path.to_string(),
-                        symbol.id,
-                        crate::parsing::ScopeLevel::Global,
-                    );
-                }
-            }
-        }
-
-        // 3) Avoid global get_all_symbols; we rely on imported files where possible
-        // Collect imported files via cache to add visible symbols sparingly
-        let mut imported_files = std::collections::HashSet::new();
-        for import in self.get_imports_for_file(file_id) {
-            if let Some(alias) = &import.alias {
-                for id in cache.lookup_candidates(alias, 4) {
-                    if let Ok(Some(sym)) = document_index.find_symbol_by_id(id) {
-                        imported_files.insert(sym.file_id);
-                    }
-                }
-            }
-        }
-        if crate::config::is_global_debug_enabled() {
-            eprintln!(
-                "DEBUG: TS imported files discovered via cache: {}",
-                imported_files.len()
-            );
-        }
-
-        for imported_file_id in imported_files {
-            if imported_file_id == file_id {
-                continue;
-            }
-            let imported_syms = document_index
-                .find_symbols_by_file(imported_file_id)
-                .map_err(|e| IndexError::TantivyError {
-                    operation: "find_symbols_by_file for imports".to_string(),
-                    cause: e.to_string(),
-                })?;
-            for symbol in imported_syms {
-                if self.is_symbol_visible_from_file(&symbol, file_id) {
-                    context.add_symbol(
-                        symbol.name.to_string(),
-                        symbol.id,
-                        crate::parsing::ScopeLevel::Global,
-                    );
-
-                    // CRITICAL: Also add by module_path for cross-module resolution
+        // Add local symbols from this file
+        for sym_id in cache.symbols_in_file(file_id) {
+            if let Some(symbol) = cache.get(sym_id) {
+                if self.is_resolvable_symbol(&symbol) {
+                    context.add_symbol(symbol.name.to_string(), symbol.id, ScopeLevel::Module);
                     if let Some(ref module_path) = symbol.module_path {
-                        context.add_symbol(
-                            module_path.to_string(),
-                            symbol.id,
-                            crate::parsing::ScopeLevel::Global,
-                        );
+                        context.add_symbol(module_path.to_string(), symbol.id, ScopeLevel::Module);
                     }
                 }
             }
         }
 
-        Ok(Box::new(context))
+        (Box::new(context), enhanced_imports)
     }
 
     // TypeScript-specific: Support hoisting
@@ -1015,27 +834,19 @@ impl LanguageBehavior for TypeScriptBehavior {
         import: &crate::parsing::Import,
         document_index: &DocumentIndex,
     ) -> Option<SymbolId> {
-        debug_print!(
-            self,
-            "[resolve_import] path='{}' alias={:?} file_id={:?}",
+        tracing::debug!(
+            "[typescript] resolve_import path='{}' alias={:?} file_id={:?}",
             import.path,
             import.alias,
             import.file_id
         );
 
-        // Debug: Log the import we're trying to resolve
-        let debug = if let Ok(settings) = crate::config::Settings::load() {
-            settings.mcp.debug || settings.debug
-        } else {
-            false
-        };
-
-        if debug {
-            eprintln!("\n=== RESOLVING IMPORT ===");
-            eprintln!("  Path: {}", import.path);
-            eprintln!("  Alias: {:?}", import.alias);
-            eprintln!("  File ID: {:?}", import.file_id);
-        }
+        tracing::debug!(
+            "[typescript] resolving import path='{}' alias={:?} file_id={:?}",
+            import.path,
+            import.alias,
+            import.file_id
+        );
 
         // Note: Import paths are already enhanced in add_import(), so we use them directly
         let enhanced_path = import.path.clone();
@@ -1109,69 +920,53 @@ impl LanguageBehavior for TypeScriptBehavior {
                 .trim_start_matches("/")
                 .replace('/', ".");
 
-            if debug {
-                eprintln!("  Module path computation:");
-                eprintln!("    Importing module: {importing_module}");
-                eprintln!("    Enhanced path: {enhanced_path}");
-                eprintln!("    Target module: {result}");
-            }
+            tracing::debug!(
+                "[typescript] module path computation: importing_module={importing_module}, enhanced_path={enhanced_path}, target_module={result}"
+            );
 
             result
         } else {
             // Normal path resolution relative to importing module
             let normal = normalize_ts_import(&enhanced_path, &importing_module);
-            if debug {
-                eprintln!("  Normal resolution: {enhanced_path} -> {normal}");
-            }
+            tracing::debug!("[typescript] normal resolution: {enhanced_path} -> {normal}");
             normal
         };
 
         if let Some(local_name) = &import.alias {
-            if debug {
-                eprintln!("  Looking up symbol by alias: {local_name}");
-            }
+            tracing::debug!("[typescript] looking up symbol by alias: {local_name}");
             if let Ok(cands) = document_index.find_symbols_by_name(local_name, None) {
-                if debug {
-                    eprintln!(
-                        "  Found {} candidates with name '{}'",
-                        cands.len(),
-                        local_name
-                    );
-                }
+                tracing::debug!(
+                    "[typescript] found {} candidates with name '{local_name}'",
+                    cands.len()
+                );
 
                 // Always print first few candidates for debugging
                 let mut checked = 0;
                 for s in cands {
                     if let Some(module_path) = &s.module_path {
                         if checked < 3 {
-                            debug_print!(
-                                self,
-                                "    [RESOLVE_DEBUG] Candidate module: {} vs target: {}",
-                                module_path.as_ref(),
-                                target_module
+                            tracing::debug!(
+                                "[typescript] resolve candidate module: {} vs target: {target_module}",
+                                module_path.as_ref()
                             );
                             checked += 1;
                         }
                         if module_path.as_ref() == target_module {
-                            debug_print!(self, "  RESOLVED: Found symbol {:?}", s.id);
+                            tracing::debug!("[typescript] resolved: found symbol {:?}", s.id);
                             return Some(s.id);
                         }
                     }
                 }
                 if checked > 0 {
-                    debug_print!(
-                        self,
-                        "    [RESOLVE_DEBUG] FAILED: No match for target '{}'",
-                        target_module
+                    tracing::debug!(
+                        "[typescript] resolve failed: no match for target '{target_module}'"
                     );
                 }
             }
             None
         } else {
             // Namespace or side-effect import: cannot map to a single symbol reliably
-            if debug {
-                eprintln!("  No alias - namespace or side-effect import");
-            }
+            tracing::debug!("[typescript] no alias - namespace or side-effect import");
             None
         }
     }
@@ -1179,6 +974,10 @@ impl LanguageBehavior for TypeScriptBehavior {
     fn get_module_path_for_file(&self, file_id: FileId) -> Option<String> {
         // Use the BehaviorState to get module path (O(1) lookup)
         self.state.get_module_path(file_id)
+    }
+
+    fn get_file_path(&self, file_id: FileId) -> Option<PathBuf> {
+        self.state.get_file_path(file_id)
     }
 
     fn import_matches_symbol(

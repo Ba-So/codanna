@@ -35,8 +35,10 @@ pub use java::{JavaBehavior, JavaParser};
 pub use javascript::{JavaScriptBehavior, JavaScriptParser};
 pub use kotlin::{KotlinBehavior, KotlinParser};
 pub use language::Language;
-pub use language_behavior::{LanguageBehavior, LanguageMetadata};
-pub use method_call::MethodCall;
+pub use language_behavior::{
+    LanguageBehavior, LanguageMetadata, RelationRole, default_relationship_compatibility,
+};
+pub use method_call::{MethodCall, MethodCallResolver};
 pub use nix::{NixBehavior, NixParser};
 pub use parser::{
     HandledNode, LanguageParser, NodeTracker, NodeTrackingState, safe_substring_window,
@@ -46,8 +48,8 @@ pub use php::{PhpBehavior, PhpParser};
 pub use python::{PythonBehavior, PythonParser};
 pub use registry::{LanguageDefinition, LanguageId, LanguageRegistry, RegistryError, get_registry};
 pub use resolution::{
-    GenericInheritanceResolver, GenericResolutionContext, InheritanceResolver, ResolutionScope,
-    ScopeLevel,
+    CallerContext, GenericInheritanceResolver, GenericResolutionContext, InheritanceResolver,
+    PipelineSymbolCache, ResolutionScope, ResolveResult, ScopeLevel,
 };
 pub use rust::{RustBehavior, RustParser};
 pub use swift::{SwiftBehavior, SwiftParser};

@@ -10,9 +10,11 @@
 //!
 //! Environment variables must be prefixed with `CI_` and use double underscores
 //! to separate nested levels:
-//! - `CI_INDEXING__PARALLEL_THREADS=8` sets `indexing.parallel_threads`
-//! - `CI_MCP__DEBUG=true` sets `mcp.debug`
+//! - `CI_INDEXING__PARALLELISM=8` sets `indexing.parallelism`
+//! - `CI_LOGGING__DEFAULT=debug` sets `logging.default`
 //! - `CI_INDEXING__INCLUDE_TESTS=false` sets `indexing.include_tests`
+//!
+//! For logging, use `RUST_LOG` environment variable directly (standard Rust pattern).
 
 use figment::{
     Figment,
@@ -21,7 +23,6 @@ use figment::{
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct Settings {
@@ -36,10 +37,6 @@ pub struct Settings {
     /// Workspace root directory (where .codanna is located)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub workspace_root: Option<PathBuf>,
-
-    /// Global debug mode
-    #[serde(default = "default_false")]
-    pub debug: bool,
 
     /// Indexing configuration
     #[serde(default)]
@@ -69,16 +66,25 @@ pub struct Settings {
     #[serde(default)]
     pub server: ServerConfig,
 
+    /// Logging configuration
+    #[serde(default)]
+    pub logging: LoggingConfig,
+
     /// AI guidance settings for multi-hop queries
     #[serde(default)]
     pub guidance: GuidanceConfig,
+
+    /// Document embedding settings for RAG
+    #[serde(default)]
+    pub documents: crate::documents::DocumentsConfig,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct IndexingConfig {
-    /// Number of parallel threads for indexing
-    #[serde(default = "default_parallel_threads")]
-    pub parallel_threads: usize,
+    /// CPU cores to use for indexing (0 = auto-detect all cores)
+    /// Thread counts for each stage are derived from this value
+    #[serde(default = "default_parallelism")]
+    pub parallelism: usize,
 
     /// Tantivy heap size in megabytes
     /// Controls memory usage before flushing to disk
@@ -103,6 +109,24 @@ pub struct IndexingConfig {
     /// This list is managed by the add-dir and remove-dir commands
     #[serde(default)]
     pub indexed_paths: Vec<PathBuf>,
+
+    // Pipeline settings (parallel indexer)
+    /// Symbols per batch before flushing to Tantivy
+    #[serde(default = "default_batch_size")]
+    pub batch_size: usize,
+
+    /// Batches to accumulate before Tantivy commit
+    #[serde(default = "default_batches_per_commit")]
+    pub batches_per_commit: usize,
+
+    /// Enable detailed pipeline stage tracing (timing, memory, throughput)
+    /// Set logging.modules.pipeline = "info" to see output
+    #[serde(default)]
+    pub pipeline_tracing: bool,
+
+    /// Show progress bars during indexing (default: true)
+    #[serde(default = "default_true")]
+    pub show_progress: bool,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -130,10 +154,6 @@ pub struct McpConfig {
     /// Maximum context size in bytes
     #[serde(default = "default_max_context_size")]
     pub max_context_size: usize,
-
-    /// Enable debug logging
-    #[serde(default = "default_false")]
-    pub debug: bool,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -149,6 +169,10 @@ pub struct SemanticSearchConfig {
     /// Similarity threshold for search results
     #[serde(default = "default_similarity_threshold")]
     pub threshold: f32,
+
+    /// Number of parallel embedding model instances
+    #[serde(default = "default_embedding_threads")]
+    pub embedding_threads: usize,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -175,6 +199,41 @@ pub struct ServerConfig {
     /// Watch interval for stdio mode (seconds)
     #[serde(default = "default_watch_interval")]
     pub watch_interval: u64,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct LoggingConfig {
+    /// Default log level for all modules
+    /// Valid values: "error", "warn", "info", "debug", "trace"
+    #[serde(default = "default_log_level")]
+    pub default: String,
+
+    /// Per-module log level overrides
+    /// Example: { "tantivy" = "warn", "watcher" = "debug" }
+    #[serde(default)]
+    pub modules: HashMap<String, String>,
+}
+
+impl Default for LoggingConfig {
+    fn default() -> Self {
+        Self {
+            default: default_log_level(),
+            modules: default_logging_modules(),
+        }
+    }
+}
+
+fn default_log_level() -> String {
+    "warn".to_string() // Quiet by default, use RUST_LOG=info for normal output
+}
+
+fn default_logging_modules() -> HashMap<String, String> {
+    let mut modules = HashMap::new();
+    // Suppress verbose Tantivy internal logs by default
+    modules.insert("tantivy".to_string(), "warn".to_string());
+    // Pipeline logs at warn by default (use "info" to see progress)
+    modules.insert("pipeline".to_string(), "warn".to_string());
+    modules
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -230,7 +289,7 @@ fn default_index_path() -> PathBuf {
     let local_dir = crate::init::local_dir_name();
     PathBuf::from(local_dir).join("index")
 }
-fn default_parallel_threads() -> usize {
+fn default_parallelism() -> usize {
     num_cpus::get()
 }
 fn default_tantivy_heap_mb() -> usize {
@@ -238,6 +297,12 @@ fn default_tantivy_heap_mb() -> usize {
 }
 fn default_max_retry_attempts() -> u32 {
     3 // Exponential backoff: 100ms, 200ms, 400ms
+}
+fn default_batch_size() -> usize {
+    5000 // Symbols per batch before Tantivy flush
+}
+fn default_batches_per_commit() -> usize {
+    10 // Commit every 10 batches (~50K symbols)
 }
 fn default_true() -> bool {
     true
@@ -253,6 +318,9 @@ fn default_embedding_model() -> String {
 }
 fn default_similarity_threshold() -> f32 {
     0.6
+}
+fn default_embedding_threads() -> usize {
+    3
 }
 fn default_debounce_ms() -> u64 {
     500
@@ -273,7 +341,6 @@ impl Default for Settings {
             version: default_version(),
             index_path: default_index_path(),
             workspace_root: None,
-            debug: false,
             indexing: IndexingConfig::default(),
             indexed_paths_cache: Vec::new(),
             languages: generate_language_defaults(), // Now uses registry
@@ -281,7 +348,9 @@ impl Default for Settings {
             semantic_search: SemanticSearchConfig::default(),
             file_watch: FileWatchConfig::default(),
             server: ServerConfig::default(),
+            logging: LoggingConfig::default(),
             guidance: GuidanceConfig::default(),
+            documents: crate::documents::DocumentsConfig::default(),
         }
     }
 }
@@ -289,7 +358,7 @@ impl Default for Settings {
 impl Default for IndexingConfig {
     fn default() -> Self {
         Self {
-            parallel_threads: default_parallel_threads(),
+            parallelism: default_parallelism(),
             tantivy_heap_mb: default_tantivy_heap_mb(),
             max_retry_attempts: default_max_retry_attempts(),
             project_root: None,
@@ -300,6 +369,10 @@ impl Default for IndexingConfig {
                 "*.generated.*".to_string(),
             ],
             indexed_paths: Vec::new(),
+            batch_size: default_batch_size(),
+            batches_per_commit: default_batches_per_commit(),
+            pipeline_tracing: false,
+            show_progress: true,
         }
     }
 }
@@ -308,7 +381,6 @@ impl Default for McpConfig {
     fn default() -> Self {
         Self {
             max_context_size: default_max_context_size(),
-            debug: false,
         }
     }
 }
@@ -319,6 +391,7 @@ impl Default for SemanticSearchConfig {
             enabled: true, // Enabled by default for better code intelligence
             model: default_embedding_model(),
             threshold: default_similarity_threshold(),
+            embedding_threads: default_embedding_threads(),
         }
     }
 }
@@ -639,7 +712,8 @@ impl Settings {
         std::fs::create_dir_all(parent)?;
 
         let toml_string = toml::to_string_pretty(self)?;
-        std::fs::write(path, toml_string)?;
+        let toml_with_comments = Self::add_config_comments(toml_string);
+        std::fs::write(path, toml_with_comments)?;
 
         Ok(())
     }
@@ -751,16 +825,13 @@ impl Settings {
                 result.push_str("\n# Path to the index directory (relative to workspace root)\n");
             } else if line.starts_with("workspace_root = ") {
                 result.push_str("\n# Workspace root directory (automatically detected)\n");
-            } else if line.starts_with("debug = ") && !in_languages_section {
-                result.push_str("\n# Global debug mode\n");
             } else if line == "[indexing]" {
                 result.push_str("\n[indexing]\n");
                 prev_line_was_section = true;
                 continue;
-            } else if line.starts_with("parallel_threads = ") {
-                result.push_str(
-                    "# Number of parallel threads for indexing (defaults to CPU count)\n",
-                );
+            } else if line.starts_with("parallelism = ") {
+                result.push_str("# CPU cores to use for indexing (default: all cores)\n");
+                result.push_str("# Thread counts for each stage are derived from this value\n");
             } else if line.starts_with("tantivy_heap_mb = ") {
                 result.push_str("\n# Tantivy heap size in megabytes\n");
                 result.push_str("# Reduce to 15-25MB if you have permission issues (antivirus, SELinux, containers)\n");
@@ -777,19 +848,23 @@ impl Settings {
                 result.push_str("# Add folders using: codanna add-dir <path>\n");
                 result.push_str("# Remove folders using: codanna remove-dir <path>\n");
                 result.push_str("# List all folders using: codanna list-dirs\n");
+            } else if line.starts_with("batch_size = ") {
+                result.push_str("\n# Items per batch before flushing to index (default: 5000)\n");
+            } else if line.starts_with("batches_per_commit = ") {
+                result.push_str("\n# Number of batches before committing to disk (default: 10)\n");
+            } else if line.starts_with("pipeline_tracing = ") {
+                result.push_str("\n# Enable detailed pipeline stage tracing\n");
+                result.push_str("# Shows timing, throughput, and memory for each stage\n");
+                result.push_str("# Requires: logging.modules.pipeline = \"info\"\n");
+            } else if line.starts_with("show_progress = ") {
+                result.push_str("\n# Show progress bars during indexing (default: true)\n");
+                result.push_str("# Use --no-progress CLI flag to override\n");
             } else if line == "[mcp]" {
                 result.push_str("\n[mcp]\n");
                 prev_line_was_section = true;
                 continue;
             } else if line.starts_with("max_context_size = ") {
                 result.push_str("# Maximum context size in bytes for MCP server\n");
-            } else if line.starts_with("debug = ")
-                && !line.contains("false")
-                && in_languages_section
-            {
-                // Skip MCP debug comment if in languages section
-            } else if line.starts_with("debug = ") && line.contains("false") {
-                result.push_str("\n# Enable debug logging for MCP server\n");
             } else if line == "[semantic_search]" {
                 result.push_str("\n[semantic_search]\n");
                 result.push_str("# Semantic search for natural language code queries\n");
@@ -814,6 +889,11 @@ impl Settings {
                 result.push_str("# - See documentation for full list of available models\n");
             } else if line.starts_with("threshold = ") {
                 result.push_str("\n# Similarity threshold for search results (0.0 to 1.0)\n");
+            } else if line.starts_with("embedding_threads = ") {
+                result.push_str("\n# Number of parallel embedding model instances (default: 3)\n");
+                result
+                    .push_str("# Each instance uses ~86MB RAM. Higher values = faster indexing.\n");
+                result.push_str("# Set to 1 for low-memory systems, 4-6 for high-end machines.\n");
             } else if line == "[file_watch]" {
                 result.push_str("\n[file_watch]\n");
                 result.push_str("# Enable automatic file watching for indexed files\n");
@@ -841,10 +921,79 @@ impl Settings {
                 result.push_str("\n# HTTP server bind address (only used when mode = \"http\" or --http flag)\n");
             } else if line.starts_with("watch_interval = ") {
                 result.push_str("\n# Watch interval for stdio mode in seconds (how often to check for file changes)\n");
+            } else if line == "[logging]" {
+                result.push_str("\n[logging]\n");
+                result.push_str("# Logging configuration\n");
+                result.push_str("# Levels: \"error\", \"warn\" (default/quiet), \"info\", \"debug\", \"trace\"\n");
+                result.push_str("# Override with RUST_LOG env var: RUST_LOG=debug codanna index\n");
+                prev_line_was_section = true;
+                continue;
+            } else if line.starts_with("default = ") && !in_languages_section {
+                result.push_str("# Default log level (\"warn\" = quiet, \"info\" = normal, \"debug\" = verbose)\n");
+            } else if line == "[logging.modules]" {
+                result.push_str("\n[logging.modules]\n");
+                result.push_str("# Per-module log level overrides\n");
+                result.push_str("# Internal modules (auto-prefixed with codanna::): watcher, mcp, indexing, storage\n");
+                result.push_str(
+                    "# External targets (used as-is): cli, tantivy, pipeline, semantic, rag\n",
+                );
+                result.push_str("# Examples (uncomment to enable):\n");
+                result.push_str("# pipeline = \"info\"   # Code indexing stages and progress\n");
+                result.push_str("# semantic = \"info\"   # Embedding pool and code embeddings\n");
+                result.push_str("# rag = \"info\"        # Document collections and chunks\n");
+                result.push_str("# watcher = \"debug\"   # File watcher events\n");
+                result.push_str("# mcp = \"debug\"       # MCP server operations\n");
+                prev_line_was_section = true;
+                continue;
+            } else if line == "[documents]" {
+                result.push_str("\n[documents]\n");
+                result.push_str("# Document embedding for RAG (Retrieval-Augmented Generation)\n");
+                result.push_str("# Index markdown and text files for semantic search\n");
+                prev_line_was_section = true;
+                continue;
+            } else if line == "[documents.defaults]" {
+                result.push_str("\n[documents.defaults]\n");
+                result.push_str("# Default chunking settings for all collections\n");
+                prev_line_was_section = true;
+                continue;
+            } else if line.starts_with("strategy = ") {
+                result.push_str(
+                    "# Chunking strategy: \"hybrid\" (paragraph-based with size constraints)\n",
+                );
+            } else if line.starts_with("min_chunk_chars = ") {
+                result.push_str("\n# Minimum characters per chunk (small chunks merged)\n");
+            } else if line.starts_with("max_chunk_chars = ") {
+                result.push_str("\n# Maximum characters per chunk (large chunks split)\n");
+            } else if line.starts_with("overlap_chars = ") {
+                result.push_str("\n# Overlap between chunks when splitting\n");
+            } else if line == "[documents.search]" {
+                result.push_str("\n[documents.search]\n");
+                result.push_str("# Search result display settings\n");
+                prev_line_was_section = true;
+                continue;
+            } else if line.starts_with("preview_mode = ") {
+                result.push_str("# Preview mode: \"kwic\" (Keyword In Context) or \"full\"\n");
+                result.push_str("# kwic: Centers preview around keyword match (recommended)\n");
+                result.push_str("# full: Shows entire chunk content\n");
+            } else if line.starts_with("preview_chars = ") {
+                result.push_str("\n# Number of characters to show in preview (for kwic mode)\n");
+            } else if line.starts_with("highlight = ") {
+                result.push_str("\n# Highlight matching keywords with **markers**\n");
+            } else if line == "[documents.collections]" {
+                result.push_str("\n[documents.collections]\n");
+                result.push_str("# Add document collections to index. Example:\n");
+                result.push_str("# [documents.collections.my-docs]\n");
+                result.push_str("# paths = [\"docs/\"]\n");
+                result.push_str("# patterns = [\"**/*.md\"]\n");
+                prev_line_was_section = true;
+                continue;
+            } else if line.starts_with("[documents.collections.") {
+                result.push_str("\n# Collection configuration\n");
+                result.push_str("# paths: directories or files to include\n");
+                result.push_str("# patterns: glob patterns to match (default: [\"**/*.md\"])\n");
             } else if line.starts_with("[languages.") {
                 if !in_languages_section {
                     result.push_str("\n# Language-specific settings\n");
-                    result.push_str("# Currently supported: Rust, Python, PHP, TypeScript, Go, C, C++, CSharp, Gdscript\n");
                     in_languages_section = true;
                 }
                 result.push('\n');
@@ -1022,13 +1171,6 @@ __pycache__/
     }
 }
 
-/// Global check for whether debug logging is enabled.
-/// Uses settings from .codanna/settings.toml and caches the result.
-pub fn is_global_debug_enabled() -> bool {
-    static DEBUG_FLAG: OnceLock<bool> = OnceLock::new();
-    *DEBUG_FLAG.get_or_init(|| Settings::load().map(|s| s.debug).unwrap_or(false))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1042,7 +1184,7 @@ mod tests {
         // Use the correct local dir name for test mode
         let expected_index_path = PathBuf::from(format!("{}/index", crate::init::local_dir_name()));
         assert_eq!(settings.index_path, expected_index_path);
-        assert!(settings.indexing.parallel_threads > 0);
+        assert!(settings.indexing.parallelism > 0);
         assert!(settings.languages.contains_key("rust"));
     }
 
@@ -1055,12 +1197,12 @@ mod tests {
 version = 2
 
 [indexing]
-parallel_threads = 4
+parallelism = 4
 ignore_patterns = ["custom/**"]
 include_tests = false
 
 [mcp]
-debug = true
+max_context_size = 200000
 
 [languages.rust]
 enabled = false
@@ -1070,11 +1212,11 @@ enabled = false
 
         let settings = Settings::load_from(&config_path).unwrap();
         assert_eq!(settings.version, 2);
-        assert_eq!(settings.indexing.parallel_threads, 4);
+        assert_eq!(settings.indexing.parallelism, 4);
         assert_eq!(settings.indexing.ignore_patterns, vec!["custom/**"]);
         // Default ignore patterns should be replaced by custom ones
         assert_eq!(settings.indexing.ignore_patterns.len(), 1);
-        assert!(settings.mcp.debug);
+        assert_eq!(settings.mcp.max_context_size, 200000);
         assert!(!settings.languages["rust"].enabled);
     }
 
@@ -1084,14 +1226,14 @@ enabled = false
         let config_path = temp_dir.path().join("settings.toml");
 
         let mut settings = Settings::default();
-        settings.indexing.parallel_threads = 2;
-        settings.mcp.debug = true;
+        settings.indexing.parallelism = 2;
+        settings.mcp.max_context_size = 50000;
 
         settings.save(&config_path).unwrap();
 
         let loaded = Settings::load_from(&config_path).unwrap();
-        assert_eq!(loaded.indexing.parallel_threads, 2);
-        assert!(loaded.mcp.debug);
+        assert_eq!(loaded.indexing.parallelism, 2);
+        assert_eq!(loaded.mcp.max_context_size, 50000);
     }
 
     #[test]
@@ -1102,7 +1244,7 @@ enabled = false
         // Only specify a few settings
         let toml_content = r#"
 [indexing]
-parallel_threads = 16
+parallelism = 16
 
 [languages.python]
 enabled = true
@@ -1113,7 +1255,7 @@ enabled = true
         let settings = Settings::load_from(&config_path).unwrap();
 
         // Modified values
-        assert_eq!(settings.indexing.parallel_threads, 16);
+        assert_eq!(settings.indexing.parallelism, 16);
         assert!(settings.languages["python"].enabled);
 
         // Default values should still be present
@@ -1136,36 +1278,38 @@ enabled = true
         // Create a config file
         let toml_content = r#"
 [indexing]
-parallel_threads = 8
+parallelism = 8
 include_tests = true
 
 [mcp]
 max_context_size = 50000
+
+[logging]
+default = "info"
 "#;
         fs::write(config_dir.join("settings.toml"), toml_content).unwrap();
 
         // Set environment variables that should override config file
         unsafe {
-            std::env::set_var("CI_INDEXING__PARALLEL_THREADS", "16");
-            std::env::set_var("CI_MCP__DEBUG", "true");
+            std::env::set_var("CI_INDEXING__PARALLELISM", "16");
+            std::env::set_var("CI_LOGGING__DEFAULT", "debug");
         }
 
         let settings = Settings::load().unwrap();
 
         // Environment variable should override config file
-        assert_eq!(settings.indexing.parallel_threads, 16);
+        assert_eq!(settings.indexing.parallelism, 16);
         // Config file value should be used when no env var
         assert_eq!(settings.mcp.max_context_size, 50000);
-        // Env var adds new value not in config
-        assert!(settings.mcp.debug);
-        // Config file value remains
+        // Env var overrides logging default
+        assert_eq!(settings.logging.default, "debug");
         // Default ignore patterns should be present
         assert!(!settings.indexing.ignore_patterns.is_empty());
 
         // Clean up
         unsafe {
-            std::env::remove_var("CI_INDEXING__PARALLEL_THREADS");
-            std::env::remove_var("CI_MCP__DEBUG");
+            std::env::remove_var("CI_INDEXING__PARALLELISM");
+            std::env::remove_var("CI_LOGGING__DEFAULT");
         }
         std::env::set_current_dir(original_dir).unwrap();
     }
@@ -1454,5 +1598,67 @@ indexed_paths = ["{path1_str}", "{path2_str}"]
             .canonicalize()
             .unwrap();
         assert_eq!(canonical_loaded, canonical_test);
+    }
+
+    #[test]
+    fn test_documents_config_loading() {
+        let temp_dir = TempDir::new().unwrap();
+        let config_path = temp_dir.path().join("settings.toml");
+
+        let toml_content = r#"
+[documents]
+enabled = true
+
+[documents.defaults]
+min_chunk_chars = 300
+max_chunk_chars = 2000
+overlap_chars = 150
+
+[documents.collections.project-docs]
+paths = ["docs/", "README.md"]
+patterns = ["**/*.md"]
+
+[documents.collections.external-books]
+paths = ["/path/to/books"]
+max_chunk_chars = 2500
+"#;
+
+        fs::write(&config_path, toml_content).unwrap();
+
+        let settings = Settings::load_from(&config_path).unwrap();
+
+        // Check enabled
+        assert!(settings.documents.enabled);
+
+        // Check defaults
+        assert_eq!(settings.documents.defaults.min_chunk_chars, 300);
+        assert_eq!(settings.documents.defaults.max_chunk_chars, 2000);
+        assert_eq!(settings.documents.defaults.overlap_chars, 150);
+
+        // Check collections
+        assert_eq!(settings.documents.collections.len(), 2);
+
+        let project_docs = settings.documents.collections.get("project-docs").unwrap();
+        assert_eq!(project_docs.paths.len(), 2);
+        assert_eq!(project_docs.patterns, vec!["**/*.md"]);
+
+        let external = settings
+            .documents
+            .collections
+            .get("external-books")
+            .unwrap();
+        assert_eq!(external.max_chunk_chars, Some(2500));
+    }
+
+    #[test]
+    fn test_documents_config_defaults() {
+        // When no [documents] section exists, defaults should apply
+        let settings = Settings::default();
+
+        assert!(!settings.documents.enabled);
+        assert_eq!(settings.documents.defaults.min_chunk_chars, 200);
+        assert_eq!(settings.documents.defaults.max_chunk_chars, 1500);
+        assert_eq!(settings.documents.defaults.overlap_chars, 100);
+        assert!(settings.documents.collections.is_empty());
     }
 }

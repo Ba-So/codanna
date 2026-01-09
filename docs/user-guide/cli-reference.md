@@ -27,6 +27,7 @@ Available for all commands:
 | `codanna benchmark` | Benchmark parser performance |
 | `codanna parse` | Output AST nodes in JSONL format |
 | `codanna plugin` | Manage Claude Code plugins |
+| `codanna documents` | Index and search document collections |
 | `codanna profile` | Manage workspace profiles and providers |
 
 ## Command Details
@@ -47,20 +48,19 @@ Build searchable index from codebase
 **Options:**
 - `-t, --threads <THREADS>` - Number of threads to use (overrides config)
 - `-f, --force` - Force re-indexing even if index exists
-- `-p, --progress` - Show progress during indexing
 - `--dry-run` - Dry run - show what would be indexed without indexing
 - `--max-files <MAX_FILES>` - Maximum number of files to index
 
 **Examples:**
 ```bash
 # Index a single directory
-codanna index src --progress
+codanna index src 
 
 # Index multiple directories at once
-codanna index src lib tests --progress
+codanna index src lib tests 
 
 # Use configured indexed paths
-codanna index --progress
+codanna index 
 ```
 
 **Behavior:**
@@ -139,15 +139,16 @@ Query indexed symbols, relationships, and dependencies
 **Subcommands:**
 | Subcommand | Description |
 |------------|-------------|
-| `retrieve symbol` | Find a symbol by name or `symbol_id:ID` |
+| `retrieve symbol` | Find a symbol (accepts `<name>` or `symbol_id:ID`) |
 | `retrieve calls` | Show what functions a given function calls (accepts `<name>` or `symbol_id:ID`) |
 | `retrieve callers` | Show what functions call a given function (accepts `<name>` or `symbol_id:ID`) |
-| `retrieve implementations` | Show what types implement a given trait |
-| `retrieve search` | Search for symbols using full-text search |
-| `retrieve describe` | Show information about a symbol (accepts `<name>` or `symbol_id:ID`) |
+| `retrieve implementations` | Show what types implement a given trait (accepts `<trait_name>` or `trait:NAME`) |
+| `retrieve search` | Search for symbols using full-text search (accepts `query:TEXT` with optional `kind:`, `limit:`, `module:`) |
+| `retrieve describe` | Show symbol signature, location, documentation, dependencies, and relationships (accepts `<name>` or `symbol_id:ID`) |
 
 **All retrieve subcommands support:**
 - `--json` - Output in JSON format
+- `lang:LANGUAGE` - Filter results by language (e.g., `lang:rust`, `lang:typescript`)
 
 **Using symbol_id:**
 ```bash
@@ -222,6 +223,61 @@ Parse file and output AST as JSON Lines
 - `-d, --max-depth <MAX_DEPTH>` - Maximum depth to traverse
 - `-a, --all-nodes` - Include all nodes (by default only named nodes are shown)
 
+`codanna documents <SUBCOMMAND>`
+Index markdown and text documents for semantic search
+
+> **Full Documentation:** See [Document Search](documents.md) for detailed usage, chunking strategies, and configuration.
+
+**Subcommands:**
+| Subcommand | Description |
+|------------|-------------|
+| `documents add-collection` | Add a document collection to settings.toml |
+| `documents remove-collection` | Remove a document collection from settings.toml |
+| `documents index` | Index documents from configured collections |
+| `documents search` | Search indexed documents using natural language |
+| `documents list` | List all document collections |
+| `documents stats` | Show statistics for a collection |
+
+`documents add-collection <NAME> <PATH>`
+Add a document collection to settings.toml
+
+**Arguments:**
+- `<NAME>` - Collection name
+- `<PATH>` - Path to directory containing documents
+
+`documents remove-collection <NAME>`
+Remove a document collection from settings.toml
+
+**Arguments:**
+- `<NAME>` - Collection name to remove
+
+`documents index`
+Index documents from all configured collections
+
+**Options:**
+- `--collection <NAME>` - Index only this collection
+- `-f, --force` - Force re-indexing even if documents haven't changed
+
+`documents search <QUERY>`
+Search indexed documents using natural language
+
+**Arguments:**
+- `<QUERY>` - Natural language search query
+
+**Options:**
+- `--collection <NAME>` - Search only within this collection
+- `-l, --limit <LIMIT>` - Maximum number of results (default: 5)
+- `--json` - Output in JSON format
+
+`documents list`
+List all configured document collections
+
+`documents stats <NAME>`
+Show statistics for a collection
+
+**Arguments:**
+- `<NAME>` - Collection name
+
 `codanna plugin <SUBCOMMAND>`
 Manage Claude Code plugins by installing from Git-based marketplaces
 
@@ -248,7 +304,7 @@ Install a plugin from a marketplace repository
 - `-f, --force` - Force installation even if conflicts exist
 - `--dry-run` - Perform a dry run without making changes
 
-#`plugin remove <PLUGIN_NAME>`
+`plugin remove <PLUGIN_NAME>`
 Remove an installed plugin and clean up its files
 
 **Arguments:**
