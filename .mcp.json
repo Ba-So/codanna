@@ -45,6 +45,15 @@
       ],
       "command": "codanna",
       "type": "stdio"
+    },
+    "qdrant-docs": {
+      "args": [],
+      "command": "mcp-server-qdrant",
+      "env": {
+        "EMBEDDING_MODEL": "sentence-transformers/all-MiniLM-L6-v2",
+        "QDRANT_URL": "http://localhost:6333"
+      },
+      "type": "stdio"
     }
   }
 }
