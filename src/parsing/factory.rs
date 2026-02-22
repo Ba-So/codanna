@@ -4,12 +4,12 @@
 //! Validates language enablement and provides discovery of supported languages.
 
 use super::{
-    CBehavior, CParser, CSharpBehavior, CSharpParser, CppBehavior, CppParser, GdscriptBehavior,
-    GdscriptParser, GoBehavior, GoParser, JavaBehavior, JavaParser, JavaScriptBehavior,
-    JavaScriptParser, KotlinBehavior, KotlinParser, Language, LanguageBehavior, LanguageId,
-    LanguageParser, NixBehavior, NixParser, PhpBehavior, PhpParser, PythonBehavior, PythonParser,
-    RustBehavior, RustParser, SwiftBehavior, SwiftParser, TypeScriptBehavior, TypeScriptParser,
-    get_registry,
+    get_registry, CBehavior, CParser, CSharpBehavior, CSharpParser, CppBehavior, CppParser,
+    GdscriptBehavior, GdscriptParser, GoBehavior, GoParser, JavaBehavior, JavaParser,
+    JavaScriptBehavior, JavaScriptParser, KotlinBehavior, KotlinParser, Language, LanguageBehavior,
+    LanguageId, LanguageParser, LuaBehavior, LuaParser, NixBehavior, NixParser, PhpBehavior,
+    PhpParser, PythonBehavior, PythonParser, RustBehavior, RustParser, SwiftBehavior, SwiftParser,
+    TypeScriptBehavior, TypeScriptParser,
 };
 use crate::{IndexError, IndexResult, Settings};
 use std::sync::Arc;
@@ -181,6 +181,10 @@ impl ParserFactory {
                 let parser = KotlinParser::new().map_err(|e| IndexError::General(e.to_string()))?;
                 Ok(Box::new(parser))
             }
+            Language::Lua => {
+                let parser = LuaParser::new().map_err(|e| IndexError::General(e.to_string()))?;
+                Ok(Box::new(parser))
+            }
             Language::Swift => {
                 let parser = SwiftParser::new().map_err(|e| IndexError::General(e.to_string()))?;
                 Ok(Box::new(parser))
@@ -316,6 +320,13 @@ impl ParserFactory {
                     behavior: Box::new(KotlinBehavior::new()),
                 }
             }
+            Language::Lua => {
+                let parser = LuaParser::new().map_err(|e| IndexError::General(e.to_string()))?;
+                ParserWithBehavior {
+                    parser: Box::new(parser),
+                    behavior: Box::new(LuaBehavior::new()),
+                }
+            }
             Language::Swift => {
                 let parser = SwiftParser::new().map_err(|e| IndexError::General(e.to_string()))?;
                 ParserWithBehavior {
@@ -350,16 +361,21 @@ impl ParserFactory {
     /// Filters all supported languages against settings.languages map.
     pub fn enabled_languages(&self) -> Vec<Language> {
         vec![
-            Language::Rust,
-            Language::Python,
-            Language::JavaScript,
-            Language::TypeScript,
-            Language::Php,
-            Language::Go,
-            Language::Nix,
             Language::C,
             Language::Cpp,
+            Language::CSharp,
             Language::Gdscript,
+            Language::Go,
+            Language::Java,
+            Language::JavaScript,
+            Language::Kotlin,
+            Language::Lua,
+            Language::Nix,
+            Language::Php,
+            Language::Python,
+            Language::Rust,
+            Language::Swift,
+            Language::TypeScript,
         ]
         .into_iter()
         .filter(|&lang| self.is_language_enabled(lang))
@@ -471,11 +487,12 @@ mod tests {
     #[test]
     fn test_create_parser_with_behavior() {
         use crate::config::LanguageConfig;
+        use indexmap::IndexMap;
         use std::collections::HashMap;
 
         // Create settings with all languages enabled
         let mut settings = Settings::default();
-        let mut languages = HashMap::new();
+        let mut languages = IndexMap::new();
 
         // Enable Rust (already enabled by default, but be explicit)
         languages.insert(
@@ -485,6 +502,7 @@ mod tests {
                 extensions: vec!["rs".to_string()],
                 parser_options: HashMap::new(),
                 config_files: Vec::new(),
+                projects: Vec::new(),
             },
         );
 
@@ -496,6 +514,7 @@ mod tests {
                 extensions: vec!["py".to_string()],
                 parser_options: HashMap::new(),
                 config_files: Vec::new(),
+                projects: Vec::new(),
             },
         );
 
@@ -507,6 +526,7 @@ mod tests {
                 extensions: vec!["php".to_string()],
                 parser_options: HashMap::new(),
                 config_files: Vec::new(),
+                projects: Vec::new(),
             },
         );
 
@@ -518,6 +538,7 @@ mod tests {
                 extensions: vec!["gd".to_string()],
                 parser_options: HashMap::new(),
                 config_files: Vec::new(),
+                projects: Vec::new(),
             },
         );
 
@@ -622,10 +643,11 @@ mod tests {
     #[test]
     fn test_create_python_parser() {
         use crate::config::LanguageConfig;
+        use indexmap::IndexMap;
         use std::collections::HashMap;
 
         let mut settings = Settings::default();
-        let mut languages = HashMap::new();
+        let mut languages = IndexMap::new();
         languages.insert(
             "python".to_string(),
             LanguageConfig {
@@ -633,6 +655,7 @@ mod tests {
                 extensions: vec!["py".to_string()],
                 parser_options: HashMap::new(),
                 config_files: Vec::new(),
+                projects: Vec::new(),
             },
         );
         settings.languages = languages;

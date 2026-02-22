@@ -2,8 +2,7 @@
 
 use crate::parsing::LanguageBehavior;
 use crate::parsing::behavior_state::{BehaviorState, StatefulBehavior};
-use crate::storage::DocumentIndex;
-use crate::{FileId, SymbolId, Visibility};
+use crate::{FileId, Visibility};
 use std::path::{Path, PathBuf};
 use tree_sitter::Language;
 
@@ -83,15 +82,115 @@ impl LanguageBehavior for PhpBehavior {
         false // PHP methods are always in classes/traits
     }
 
+    fn format_path_as_module(&self, components: &[&str]) -> Option<String> {
+        if components.is_empty() {
+            None
+        } else {
+            // PHP uses backslash for namespaces with leading backslash
+            Some(format!("\\{}", components.join("\\")))
+        }
+    }
+
     fn get_language(&self) -> Language {
         self.language.clone()
     }
 
-    fn module_path_from_file(&self, file_path: &Path, project_root: &Path) -> Option<String> {
-        // Get relative path from project root
-        let relative_path = file_path.strip_prefix(project_root).ok()?;
+    fn module_path_from_file(
+        &self,
+        file_path: &Path,
+        project_root: &Path,
+        extensions: &[&str],
+    ) -> Option<String> {
+        use crate::parsing::paths::strip_extension;
+        use crate::project_resolver::persist::{ResolutionIndex, ResolutionPersistence};
+        use std::cell::RefCell;
+        use std::time::{Duration, Instant};
 
-        // Convert path to string
+        // Thread-local cache for resolution rules (1-second TTL)
+        thread_local! {
+            static RULES_CACHE: RefCell<Option<(Instant, ResolutionIndex)>> = const { RefCell::new(None) };
+        }
+
+        // Try to resolve using PSR-4 rules from composer.json
+        let cached_result = RULES_CACHE.with(|cache| {
+            let mut cache_ref = cache.borrow_mut();
+
+            // Reload if >1 second old
+            let needs_reload = cache_ref
+                .as_ref()
+                .map(|(ts, _)| ts.elapsed() >= Duration::from_secs(1))
+                .unwrap_or(true);
+
+            if needs_reload {
+                let persistence = ResolutionPersistence::new(Path::new(".codanna"));
+                if let Ok(index) = persistence.load("php") {
+                    *cache_ref = Some((Instant::now(), index));
+                }
+            }
+
+            // Use rules to compute namespace
+            if let Some((_, ref index)) = *cache_ref {
+                if let Ok(canon_file) = file_path.canonicalize() {
+                    if let Some(config_path) = index.get_config_for_file(&canon_file) {
+                        if let Some(rules) = index.rules.get(config_path) {
+                            // Sort paths by length (longest first) to match most specific path
+                            // This ensures src/Illuminate/Macroable/ matches before src/Illuminate/
+                            let mut sorted_paths: Vec<_> = rules.paths.iter().collect();
+                            sorted_paths.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
+
+                            // Try each source root to find the matching namespace prefix
+                            for (source_root_str, namespace_prefixes) in sorted_paths {
+                                let source_root = Path::new(source_root_str);
+                                let canon_root = source_root
+                                    .canonicalize()
+                                    .unwrap_or_else(|_| source_root.to_path_buf());
+
+                                if let Ok(relative) = canon_file.strip_prefix(&canon_root) {
+                                    // Remove .php extension
+                                    let relative_str = relative.to_string_lossy();
+                                    let without_ext = relative_str
+                                        .strip_suffix(".php")
+                                        .or_else(|| relative_str.strip_suffix(".class.php"))
+                                        .unwrap_or(&relative_str);
+
+                                    // Convert path separators to namespace separators
+                                    let namespace_suffix = without_ext.replace('/', "\\");
+
+                                    // Get namespace prefix (first element in prefixes array)
+                                    let namespace_prefix = namespace_prefixes
+                                        .first()
+                                        .map(|s| s.as_str())
+                                        .unwrap_or("");
+
+                                    // Combine prefix + suffix
+                                    let prefix_trimmed = namespace_prefix.trim_end_matches('\\');
+                                    if namespace_suffix.is_empty() {
+                                        if prefix_trimmed.is_empty() {
+                                            return None;
+                                        }
+                                        return Some(format!("\\{prefix_trimmed}"));
+                                    } else if prefix_trimmed.is_empty() {
+                                        return Some(format!("\\{namespace_suffix}"));
+                                    } else {
+                                        return Some(format!(
+                                            "\\{prefix_trimmed}\\{namespace_suffix}"
+                                        ));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            None
+        });
+
+        if cached_result.is_some() {
+            return cached_result;
+        }
+
+        // Fallback: directory-based path resolution (original behavior)
+        let relative_path = file_path.strip_prefix(project_root).ok()?;
         let path_str = relative_path.to_str()?;
 
         // Remove common PHP source directories if present (PSR-4 style)
@@ -102,12 +201,8 @@ impl LanguageBehavior for PhpBehavior {
             .or_else(|| path_str.strip_prefix("classes/"))
             .unwrap_or(path_str);
 
-        // Remove the .php extension (check .class.php first since it's longer)
-        let path_without_ext = path_without_src
-            .strip_suffix(".class.php")
-            .or_else(|| path_without_src.strip_suffix(".php"))
-            .or_else(|| path_without_src.strip_suffix(".inc"))
-            .unwrap_or(path_without_src);
+        // Remove extension using passed extensions from settings.toml
+        let path_without_ext = strip_extension(path_without_src, extensions);
 
         // Skip special files that aren't typically namespaced
         if path_without_ext == "index"
@@ -118,7 +213,6 @@ impl LanguageBehavior for PhpBehavior {
         }
 
         // Convert path separators to PHP namespace separators
-        // PHP uses backslash for namespaces
         let namespace_path = path_without_ext.replace('/', "\\");
 
         // Add leading backslash for fully qualified namespace
@@ -205,64 +299,6 @@ impl LanguageBehavior for PhpBehavior {
         }
 
         false
-    }
-
-    fn resolve_import_path_with_context(
-        &self,
-        import_path: &str,
-        importing_module: Option<&str>,
-        document_index: &DocumentIndex,
-    ) -> Option<SymbolId> {
-        // Split the path using PHP's namespace separator
-        let separator = self.module_separator();
-        let segments: Vec<&str> = import_path.split(separator).collect();
-
-        if segments.is_empty() {
-            return None;
-        }
-
-        // The symbol name is the last segment
-        let symbol_name = segments.last()?;
-
-        // Find symbols with this name (using index for performance)
-        let candidates = document_index
-            .find_symbols_by_name(symbol_name, None)
-            .ok()?;
-
-        // Find the one with matching module path using PHP-specific rules
-        for candidate in &candidates {
-            if let Some(module_path) = &candidate.module_path {
-                if self.import_matches_symbol(import_path, module_path.as_ref(), importing_module) {
-                    return Some(candidate.id);
-                }
-            }
-        }
-
-        None
-    }
-
-    // PHP-specific: Handle PHP use statements and namespace imports
-    fn resolve_import(
-        &self,
-        import: &crate::parsing::Import,
-        document_index: &DocumentIndex,
-    ) -> Option<SymbolId> {
-        // PHP imports can be:
-        // 1. Use statements: use App\Controllers\UserController;
-        // 2. Aliased use: use App\Models\User as UserModel;
-        // 3. Function/const imports: use function array_map;
-        // 4. Grouped imports: use App\{Model, Controller};
-
-        // Get the importing module path for context
-        let importing_module = self.get_module_path_for_file(import.file_id);
-
-        // Use enhanced resolution with module context
-        // This will use our import_matches_symbol method for PHP-specific matching
-        self.resolve_import_path_with_context(
-            &import.path,
-            importing_module.as_deref(),
-            document_index,
-        )
     }
 
     // PHP-specific: Check visibility based on access modifiers
@@ -354,47 +390,54 @@ mod tests {
     fn test_module_path_from_file() {
         let behavior = PhpBehavior::new();
         let root = Path::new("/project");
+        let extensions = &["class.php", "php"];
 
         // Test PSR-4 style namespace
         let class_path = Path::new("/project/src/App/Controllers/UserController.php");
         assert_eq!(
-            behavior.module_path_from_file(class_path, root),
+            behavior.module_path_from_file(class_path, root, extensions),
             Some("\\App\\Controllers\\UserController".to_string())
         );
 
         // Test without src directory
         let no_src_path = Path::new("/project/Models/User.php");
         assert_eq!(
-            behavior.module_path_from_file(no_src_path, root),
+            behavior.module_path_from_file(no_src_path, root, extensions),
             Some("\\Models\\User".to_string())
         );
 
         // Test nested namespace
         let nested_path = Path::new("/project/src/App/Http/Middleware/Auth.php");
         assert_eq!(
-            behavior.module_path_from_file(nested_path, root),
+            behavior.module_path_from_file(nested_path, root, extensions),
             Some("\\App\\Http\\Middleware\\Auth".to_string())
         );
 
         // Test index.php (should return None)
         let index_path = Path::new("/project/index.php");
-        assert_eq!(behavior.module_path_from_file(index_path, root), None);
+        assert_eq!(
+            behavior.module_path_from_file(index_path, root, extensions),
+            None
+        );
 
         // Test config.php (should return None)
         let config_path = Path::new("/project/config.php");
-        assert_eq!(behavior.module_path_from_file(config_path, root), None);
+        assert_eq!(
+            behavior.module_path_from_file(config_path, root, extensions),
+            None
+        );
 
         // Test class.php extension
         let class_ext_path = Path::new("/project/src/MyClass.class.php");
         assert_eq!(
-            behavior.module_path_from_file(class_ext_path, root),
+            behavior.module_path_from_file(class_ext_path, root, extensions),
             Some("\\MyClass".to_string())
         );
 
         // Test app directory
         let app_path = Path::new("/project/app/Services/PaymentService.php");
         assert_eq!(
-            behavior.module_path_from_file(app_path, root),
+            behavior.module_path_from_file(app_path, root, extensions),
             Some("\\Services\\PaymentService".to_string())
         );
     }

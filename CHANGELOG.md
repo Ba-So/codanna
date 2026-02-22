@@ -5,6 +5,96 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.14] - 2026-01-29
+
+### Added
+
+- Lua language support: parser, behavior, definition, resolution modules
+- Lua test fixtures and comprehensive examples
+- Lua grammar analysis and audit report documentation
+
+### Changed
+
+- Updated rmcp to 0.14.0 (CallToolRequestParams, InitializeRequestParams, StreamableHttpServerConfig API)
+- Updated clap to 4.5.56, chrono to 0.4.43, thiserror to 2.0.18, rcgen to 0.14.7, sysinfo to 0.38.0
+
+### Fixed
+
+- Vector storage clippy panicking_unwrap false positive
+
+## [0.9.13] - 2026-01-16
+
+### Added
+
+- Go project resolver provider for go.mod parsing and module path resolution
+- Python project resolver with multi-backend support (Poetry, Hatch, Maturin, Setuptools, PDM, Flit)
+- Kotlin project resolver with source layout config (jvm, standard-kmp, flat-kmp)
+- PHP PSR-4 provider for composer.json autoload namespace resolution
+- C# project resolver for .csproj SDK-style projects (RootNamespace, AssemblyName extraction)
+- Shared helper functions in helpers.rs for provider implementations
+- `[[languages.X.projects]]` config block for per-project source layout override
+- PHP method call tracking (member_call_expression, scoped_call_expression)
+- Animated spinner during pipeline warmup phase (DISCOVER/READ/PARSE/COLLECT)
+
+### Changed
+
+- Settings.languages uses IndexMap for alphabetical ordering in init output
+- LoggingConfig.modules uses IndexMap for consistent ordering
+- Empty indexes now auto-trigger force mode for dual EMBED+INDEX progress bars
+- DualProgressBar shows preparing spinner when both bars at 0%
+
+### Fixed
+
+- Languages without providers no longer show empty config_files in settings.toml
+- Rustdoc invalid-html-tags error in C# provider doc comments
+
+## [0.9.12] - 2026-01-14
+
+### Added
+
+- Unified JSON envelope format (Envelope type) with schema_version, status, code, exit_code, message, hint, data, meta
+- `--fields` flag for JSON field filtering on data payload (mcp and retrieve commands)
+- QueryContext abstraction for symbol resolution and error handling in retrieve commands
+- `lang` field to Meta struct with `with_lang()` builder method
+- `paths.rs` module with normalize_for_module_path, strip_source_root, strip_extension helpers
+- `format_path_as_module` as required trait method for language-specific path formatting
+- Document collections info to get_index_info output
+
+### Changed
+
+- Migrated all 9 MCP tool commands to unified Envelope format for --json output
+- Migrated retrieve symbol/callers/calls/describe/search/implementations to Envelope format
+- Lazy load ML model for embedding generation (deferred until first semantic search)
+- Flattened tuple output in get_calls/find_callers to avoid nested array waste
+- Standardized search_symbols output with nested symbol object
+- Unified logging to stderr for all commands
+- Skip embedding pool loading for retrieve commands via load_facade_lite()
+- `module_path_from_file` now accepts `extensions: &[&str]` parameter (fixes deadlock when registry lock held)
+
+### Removed
+
+- `file_extensions()` method from LanguageBehavior trait (duplicated LanguageDefinition::extensions())
+- `file_extensions()` implementations from all 12 language behaviors
+- `init_with_config_stderr` function (replaced by unified init_with_config)
+- Tantivy-based resolution methods from trait: `resolve_import`, `build_resolution_context`, `resolve_import_path`, `classify_import_origin`, `resolve_import_path_with_context`
+- Dead Go behavior methods: `get_current_package_path_for_file`, `get_project_root_for_file`
+- `store_file_info` from DocumentIndex (replaced by `store_file_registration`)
+
+### Breaking
+
+- `--json` output format changed for mcp and retrieve commands (now uses Envelope schema)
+
+## [0.9.11] - 2026-01-12
+
+### Fixed
+
+- MCP servers now load document store on all transports (stdio, HTTP, HTTPS)
+- Consolidated document store loading into reusable helper
+
+### Documentation
+
+- Added transport notes to MCP Persistent and MCP Network docs
+
 ## [0.9.10] - 2026-01-07
 
 ### Changed

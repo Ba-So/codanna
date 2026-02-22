@@ -8,7 +8,8 @@ use codanna::cli::{Cli, Commands, RetrieveQuery};
 use codanna::indexing::facade::IndexFacade;
 use codanna::project_resolver::{
     providers::{
-        java::JavaProvider, javascript::JavaScriptProvider, swift::SwiftProvider,
+        csharp::CSharpProvider, go::GoProvider, java::JavaProvider, javascript::JavaScriptProvider,
+        kotlin::KotlinProvider, php::PhpProvider, python::PythonProvider, swift::SwiftProvider,
         typescript::TypeScriptProvider,
     },
     registry::SimpleProviderRegistry,
@@ -36,6 +37,21 @@ fn create_provider_registry() -> SimpleProviderRegistry {
 
     // Add Swift provider for Package.swift resolution
     registry.add(Arc::new(SwiftProvider::new()));
+
+    // Add Go provider for go.mod resolution
+    registry.add(Arc::new(GoProvider::new()));
+
+    // Add Python provider for pyproject.toml resolution
+    registry.add(Arc::new(PythonProvider::new()));
+
+    // Add Kotlin provider for build.gradle.kts resolution
+    registry.add(Arc::new(KotlinProvider::new()));
+
+    // Add PHP provider for composer.json resolution
+    registry.add(Arc::new(PhpProvider::new()));
+
+    // Add C# provider for .csproj resolution
+    registry.add(Arc::new(CSharpProvider::new()));
 
     registry
 }
@@ -222,20 +238,8 @@ async fn main() {
     };
 
     // Initialize logging with config (supports RUST_LOG env var override)
-    // Use stderr for: MCP stdio mode (JSON-RPC protocol) and mcp --json (clean JSON output)
-    let use_stderr_logging = matches!(
-        &cli.command,
-        Commands::Serve {
-            http: false,
-            https: false,
-            ..
-        } | Commands::Mcp { json: true, .. }
-    );
-    if use_stderr_logging {
-        codanna::logging::init_with_config_stderr(&config.logging);
-    } else {
-        codanna::logging::init_with_config(&config.logging);
-    }
+    // All logging goes to stderr to avoid polluting stdout (JSON output, piping)
+    codanna::logging::init_with_config(&config.logging);
 
     // Determine resource requirements based on command type
     // Commands are categorized by what infrastructure they need:
@@ -314,6 +318,17 @@ async fn main() {
             | Commands::Serve { .. }
     );
 
+    // Determine if we need semantic search (ML model loading)
+    // Retrieve commands use Tantivy text search only - no ML model needed
+    let needs_semantic_search = match &cli.command {
+        Commands::Mcp { tool, .. } => {
+            // Only these MCP tools need semantic search
+            ["semantic_search_docs", "semantic_search_with_context"].contains(&tool.as_str())
+        }
+        Commands::Index { .. } | Commands::Serve { .. } => true,
+        _ => false,
+    };
+
     // Load existing index or create new one (only if command needs it)
     let settings = Arc::new(config.clone());
     let mut indexer: Option<IndexFacade> = if !needs_indexer {
@@ -330,7 +345,15 @@ async fn main() {
                     tracing::debug!(target: "cli", "using lazy initialization (skipping trait resolver)");
                 }
 
-                match persistence.load_facade(settings.clone()) {
+                // Use lite loading for commands that don't need semantic search
+                let load_result = if needs_semantic_search {
+                    persistence.load_facade(settings.clone())
+                } else {
+                    tracing::debug!(target: "cli", "using lite loading (skipping semantic search)");
+                    persistence.load_facade_lite(settings.clone())
+                };
+
+                match load_result {
                     Ok(loaded) => {
                         tracing::debug!(target: "cli", "successfully loaded index from disk");
                         if cli.info {
@@ -382,7 +405,8 @@ async fn main() {
     };
 
     if let Some(ref mut idx) = indexer {
-        if config.semantic_search.enabled && !idx.has_semantic_search() {
+        // Only enable semantic search for commands that need it
+        if needs_semantic_search && config.semantic_search.enabled && !idx.has_semantic_search() {
             if let Err(e) = idx.enable_semantic_search() {
                 eprintln!("Warning: Failed to enable semantic search: {e}");
             } else {
@@ -665,6 +689,7 @@ async fn main() {
             positional,
             args,
             json,
+            fields,
             watch,
         } => {
             let mut indexer = indexer.expect("mcp requires indexer");
@@ -699,7 +724,10 @@ async fn main() {
                 }
             }
 
-            codanna::cli::commands::mcp::run(tool, positional, args, json, indexer, &config).await;
+            codanna::cli::commands::mcp::run(
+                tool, positional, args, json, fields, indexer, &config,
+            )
+            .await;
         }
 
         Commands::Benchmark { language, file } => {

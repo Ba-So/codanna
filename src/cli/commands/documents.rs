@@ -1,13 +1,27 @@
 //! Documents management command.
 
 use std::path::PathBuf;
+use std::time::Instant;
 
 use crate::cli::DocumentAction;
 use crate::config::Settings;
 use crate::documents::{CollectionConfig, DocumentStore, IndexProgress, SearchQuery};
+use crate::io::EnvelopeEntityType;
+use crate::io::envelope::{Envelope, ResultCode};
 use crate::io::status_line::StatusLine;
 use crate::io::{ProgressBar, ProgressBarOptions, ProgressBarStyle};
 use crate::vector::{FastEmbedGenerator, VectorDimension};
+
+/// Print JSON or error message if serialization fails.
+fn print_json<T: serde::Serialize>(value: &T) {
+    match serde_json::to_string_pretty(value) {
+        Ok(json) => println!("{json}"),
+        Err(e) => {
+            eprintln!("JSON serialization error: {e}");
+            std::process::exit(2);
+        }
+    }
+}
 
 /// Run documents management command.
 pub fn run(action: DocumentAction, config: &Settings, cli_config: Option<&PathBuf>) {
@@ -50,34 +64,97 @@ pub fn run(action: DocumentAction, config: &Settings, cli_config: Option<&PathBu
         }
 
         DocumentAction::Search {
-            query,
+            args,
             collection,
             limit,
             json,
+            fields,
         } => {
+            use crate::io::args::parse_positional_args;
+
+            // Parse positional arguments for query and key:value pairs
+            let (positional_query, params) = parse_positional_args(&args);
+
+            // Determine query source (priority: positional > key:value)
+            let final_query = positional_query
+                .or_else(|| params.get("query").cloned())
+                .unwrap_or_else(|| {
+                    eprintln!("Error: search requires a query");
+                    eprintln!("Usage: codanna documents search \"query\" [options]");
+                    eprintln!("   or: codanna documents search query:\"search text\" [options]");
+                    std::process::exit(1);
+                });
+
+            // Merge parameters (flags take precedence over key:value)
+            let final_limit = limit.unwrap_or_else(|| {
+                params
+                    .get("limit")
+                    .and_then(|s| s.parse::<usize>().ok())
+                    .unwrap_or(10)
+            });
+
+            // Collection can come from --collection flag or collection:name
+            let final_collection = collection.or_else(|| params.get("collection").cloned());
+
             let mut store = match create_store_with_embeddings() {
                 Ok(s) => s,
                 Err(e) => {
+                    if json {
+                        let envelope: Envelope<()> = Envelope::error(ResultCode::IndexError, &e)
+                            .with_hint("Run 'codanna documents index' to create the index");
+                        print_json(&envelope);
+                        std::process::exit(2);
+                    }
                     eprintln!("{e}");
                     std::process::exit(1);
                 }
             };
 
+            let query_text = final_query.clone();
             let search_query = SearchQuery {
-                text: query,
-                collection,
+                text: final_query,
+                collection: final_collection,
                 document: None,
-                limit,
+                limit: final_limit,
                 preview_config: Some(config.documents.search.clone()),
             };
 
+            let start = Instant::now();
             match store.search(search_query) {
                 Ok(results) => {
+                    let duration_ms = start.elapsed().as_millis() as u64;
+                    let count = results.len();
+
                     if json {
-                        println!(
-                            "{}",
-                            serde_json::to_string_pretty(&results).unwrap_or_default()
-                        );
+                        let envelope = if results.is_empty() {
+                            Envelope::<Vec<_>>::not_found("No documents matched the query")
+                                .with_query(&query_text)
+                                .with_duration_ms(duration_ms)
+                                .with_entity_type(EnvelopeEntityType::Document)
+                                .with_hint("Try a different query or check indexed collections with 'codanna documents list'")
+                        } else {
+                            Envelope::success(results)
+                                .with_message(format!("Found {count} matching documents"))
+                                .with_entity_type(EnvelopeEntityType::Document)
+                                .with_count(count)
+                                .with_query(&query_text)
+                                .with_duration_ms(duration_ms)
+                                .with_hint(
+                                    "Use the file paths and byte ranges to read specific sections",
+                                )
+                        };
+                        let output = if let Some(ref field_list) = fields {
+                            envelope.to_json_with_fields(field_list)
+                        } else {
+                            envelope.to_json()
+                        };
+                        match output {
+                            Ok(json) => println!("{json}"),
+                            Err(e) => {
+                                eprintln!("JSON serialization error: {e}");
+                                std::process::exit(2);
+                            }
+                        }
                     } else if results.is_empty() {
                         eprintln!("No results found.");
                     } else {
@@ -96,6 +173,14 @@ pub fn run(action: DocumentAction, config: &Settings, cli_config: Option<&PathBu
                     }
                 }
                 Err(e) => {
+                    if json {
+                        let envelope: Envelope<()> = Envelope::error(
+                            ResultCode::InternalError,
+                            format!("Search failed: {e}"),
+                        );
+                        print_json(&envelope);
+                        std::process::exit(2);
+                    }
                     eprintln!("Search failed: {e}");
                     std::process::exit(1);
                 }
@@ -113,10 +198,7 @@ pub fn run(action: DocumentAction, config: &Settings, cli_config: Option<&PathBu
 
             let collections = store.list_collections();
             if json {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&collections).unwrap_or_default()
-                );
+                print_json(&collections);
             } else if collections.is_empty() {
                 eprintln!("No collections indexed.");
                 eprintln!("\nConfigured collections in settings.toml:");
@@ -143,10 +225,7 @@ pub fn run(action: DocumentAction, config: &Settings, cli_config: Option<&PathBu
             match store.collection_stats(&collection) {
                 Ok(stats) => {
                     if json {
-                        println!(
-                            "{}",
-                            serde_json::to_string_pretty(&stats).unwrap_or_default()
-                        );
+                        print_json(&stats);
                     } else {
                         println!("Collection: {}", stats.name);
                         println!("  Chunks: {}", stats.chunk_count);

@@ -12,11 +12,11 @@
 
 use crate::parsing::LanguageBehavior;
 use crate::parsing::behavior_state::{BehaviorState, StatefulBehavior};
+use crate::parsing::paths::strip_extension;
 use crate::parsing::resolution::ResolutionScope;
-use crate::storage::DocumentIndex;
 use crate::symbol::ScopeContext;
 use crate::types::FileId;
-use crate::{Symbol, SymbolId, Visibility};
+use crate::{Symbol, Visibility};
 use std::path::{Path, PathBuf};
 use tree_sitter::Language;
 
@@ -116,15 +116,107 @@ impl LanguageBehavior for CSharpBehavior {
         tree_sitter_c_sharp::LANGUAGE.into()
     }
 
+    fn format_path_as_module(&self, components: &[&str]) -> Option<String> {
+        if components.is_empty() {
+            None
+        } else {
+            Some(components.join("."))
+        }
+    }
+
     fn module_separator(&self) -> &'static str {
         "." // C# uses dots for namespace separation
     }
 
-    fn module_path_from_file(&self, file_path: &Path, project_root: &Path) -> Option<String> {
-        // Convert file path to namespace path relative to project root
-        // e.g., src/Services/UserService.cs -> MyApp.Services.UserService
+    fn module_path_from_file(
+        &self,
+        file_path: &Path,
+        project_root: &Path,
+        extensions: &[&str],
+    ) -> Option<String> {
+        use crate::project_resolver::persist::ResolutionPersistence;
+        use std::cell::RefCell;
+        use std::time::{Duration, Instant};
 
-        // Get relative path from project root
+        // Thread-local cache with 1-second TTL (per Go/Python/TypeScript pattern)
+        thread_local! {
+            static RULES_CACHE: RefCell<Option<(Instant, crate::project_resolver::persist::ResolutionIndex)>> = const { RefCell::new(None) };
+        }
+
+        // Try cached resolution first
+        let cached_result = RULES_CACHE.with(|cache| {
+            let mut cache_ref = cache.borrow_mut();
+
+            // Check if cache needs reload (>1 second old or empty)
+            let needs_reload = cache_ref
+                .as_ref()
+                .map(|(ts, _)| ts.elapsed() >= Duration::from_secs(1))
+                .unwrap_or(true);
+
+            // Load from disk if needed
+            if needs_reload {
+                let persistence =
+                    ResolutionPersistence::new(std::path::Path::new(crate::init::local_dir_name()));
+                if let Ok(index) = persistence.load("csharp") {
+                    *cache_ref = Some((Instant::now(), index));
+                } else {
+                    *cache_ref = None;
+                }
+            }
+
+            // Get module path from cached rules
+            if let Some((_, ref index)) = *cache_ref {
+                // Canonicalize file path for matching
+                if let Ok(canon_file) = file_path.canonicalize() {
+                    // Find config that applies to this file
+                    if let Some(config_path) = index.get_config_for_file(&canon_file) {
+                        if let Some(rules) = index.rules.get(config_path) {
+                            // Get baseUrl (RootNamespace from .csproj)
+                            if let Some(ref base_url) = rules.base_url {
+                                // Find matching source root
+                                for root_path in rules.paths.keys() {
+                                    let root = std::path::Path::new(root_path);
+                                    let canon_root =
+                                        root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+
+                                    if let Ok(relative) = canon_file.strip_prefix(&canon_root) {
+                                        // Get directory path (C# namespaces follow folder structure)
+                                        let relative_str = relative.to_str()?;
+                                        let path_without_ext =
+                                            strip_extension(relative_str, extensions);
+                                        let dir_path = if let Some(parent) =
+                                            Path::new(path_without_ext).parent()
+                                        {
+                                            parent.to_str().unwrap_or("")
+                                        } else {
+                                            ""
+                                        };
+
+                                        // Combine baseUrl with relative directory (dots for C#)
+                                        if dir_path.is_empty() {
+                                            return Some(base_url.clone());
+                                        } else {
+                                            let namespace_suffix =
+                                                dir_path.replace(['/', '\\'], ".");
+                                            return Some(format!("{base_url}.{namespace_suffix}"));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            None
+        });
+
+        // Return cached result if found
+        if cached_result.is_some() {
+            return cached_result;
+        }
+
+        // Fallback: directory-based path (original behavior)
         let relative_path = file_path
             .strip_prefix(project_root)
             .ok()
@@ -132,21 +224,14 @@ impl LanguageBehavior for CSharpBehavior {
             .unwrap_or(file_path);
 
         let path = relative_path.to_str()?;
-
-        // Remove common directory prefixes and file extensions
-        let module_path = path
+        let path_without_prefix = path
             .trim_start_matches("./")
             .trim_start_matches("src/")
-            .trim_start_matches("lib/")
-            .trim_end_matches(".cs")
-            .trim_end_matches(".csx");
+            .trim_start_matches("lib/");
 
-        // Replace path separators with namespace separators
-        // Remove the filename part to get the directory-based namespace
+        let module_path = strip_extension(path_without_prefix, extensions);
         let namespace_path = module_path.replace(['/', '\\'], ".");
 
-        // For C#, we typically want the directory structure as namespace
-        // but we might need to extract from actual namespace declarations in the file
         Some(namespace_path)
     }
 
@@ -215,229 +300,6 @@ impl LanguageBehavior for CSharpBehavior {
         self.get_imports_from_state(file_id)
     }
 
-    fn resolve_external_call_target(
-        &self,
-        to_name: &str,
-        from_file: FileId,
-    ) -> Option<(String, String)> {
-        // C# external call resolution
-        // Cases:
-        // - Qualified call: System.Console.WriteLine -> System.Console
-        // - Using alias: using Alias = System.Collections.Generic.List; -> Alias.Add
-        // - Using directive: using System; -> Console.WriteLine
-
-        let imports = self.get_imports_for_file(from_file);
-        if imports.is_empty() {
-            return None;
-        }
-
-        // Check for qualified names (Namespace.Type.Member)
-        if let Some((qualifier, member)) = to_name.rsplit_once('.') {
-            for import in &imports {
-                // Check if this is a using alias that matches the qualifier
-                if let Some(alias) = &import.alias {
-                    if alias == qualifier {
-                        // Map alias to its full namespace
-                        return Some((import.path.clone(), member.to_string()));
-                    }
-                }
-
-                // Check if the qualifier matches an imported namespace
-                if import.path == qualifier || import.path.ends_with(&format!(".{qualifier}")) {
-                    return Some((import.path.clone(), member.to_string()));
-                }
-            }
-        } else {
-            // Unqualified name - check using directives
-            for import in &imports {
-                if !import.is_glob && import.alias.is_none() {
-                    // This is a "using Namespace;" directive
-                    // The symbol could be Namespace.SymbolName
-                    return Some((import.path.clone(), to_name.to_string()));
-                }
-            }
-        }
-
-        None
-    }
-
-    fn create_external_symbol(
-        &self,
-        document_index: &mut DocumentIndex,
-        module_path: &str,
-        symbol_name: &str,
-        language_id: crate::parsing::LanguageId,
-    ) -> crate::IndexResult<SymbolId> {
-        use crate::storage::MetadataKey;
-        use crate::{IndexError, Symbol, SymbolId, SymbolKind, Visibility};
-
-        // Check if symbol already exists
-        if let Ok(cands) = document_index.find_symbols_by_name(symbol_name, None) {
-            for s in cands {
-                if let Some(mp) = &s.module_path {
-                    if mp.as_ref() == module_path {
-                        return Ok(s.id);
-                    }
-                }
-            }
-        }
-
-        // Create virtual file path for external C# symbol
-        let mut path_buf = String::from(".codanna/external/");
-        path_buf.push_str(&module_path.replace('.', "/"));
-        path_buf.push_str(".cs");
-        let path_str = path_buf;
-
-        // Ensure file_info exists
-        let file_id = if let Ok(Some((fid, _, _))) = document_index.get_file_info(&path_str) {
-            fid
-        } else {
-            let next_file_id =
-                document_index
-                    .get_next_file_id()
-                    .map_err(|e| IndexError::TantivyError {
-                        operation: "get_next_file_id".to_string(),
-                        cause: e.to_string(),
-                    })?;
-            let file_id = crate::FileId::new(next_file_id).ok_or(IndexError::FileIdExhausted)?;
-            let hash = format!("external:{module_path}");
-            let ts = crate::indexing::get_utc_timestamp();
-            document_index
-                .store_file_info(file_id, &path_str, &hash, ts)
-                .map_err(|e| IndexError::TantivyError {
-                    operation: "store_file_info".to_string(),
-                    cause: e.to_string(),
-                })?;
-            file_id
-        };
-
-        // Allocate symbol ID
-        let next_id =
-            document_index
-                .get_next_symbol_id()
-                .map_err(|e| IndexError::TantivyError {
-                    operation: "get_next_symbol_id".to_string(),
-                    cause: e.to_string(),
-                })?;
-        let symbol_id = SymbolId::new(next_id).ok_or(IndexError::SymbolIdExhausted)?;
-
-        // Create external symbol
-        let mut symbol = Symbol::new(
-            symbol_id,
-            symbol_name.to_string(),
-            SymbolKind::Class, // Default to class for C# external symbols
-            file_id,
-            crate::Range::new(0, 0, 0, 0),
-        )
-        .with_visibility(Visibility::Public);
-        symbol.module_path = Some(module_path.to_string().into());
-        symbol.scope_context = Some(crate::symbol::ScopeContext::Global);
-        symbol.language_id = Some(language_id);
-
-        document_index
-            .index_symbol(&symbol, &path_str)
-            .map_err(|e| IndexError::TantivyError {
-                operation: "index_symbol".to_string(),
-                cause: e.to_string(),
-            })?;
-
-        // Update symbol counter
-        document_index
-            .store_metadata(MetadataKey::SymbolCounter, symbol_id.value() as u64)
-            .map_err(|e| IndexError::TantivyError {
-                operation: "store_metadata(SymbolCounter)".to_string(),
-                cause: e.to_string(),
-            })?;
-
-        Ok(symbol_id)
-    }
-
-    fn build_resolution_context(
-        &self,
-        file_id: FileId,
-        document_index: &DocumentIndex,
-    ) -> crate::error::IndexResult<Box<dyn ResolutionScope>> {
-        use crate::error::IndexError;
-
-        let mut context = CSharpResolutionContext::new(file_id);
-
-        // Add imported symbols from using directives
-        let imports = self.get_imports_for_file(file_id);
-        for import in imports {
-            if let Some(symbol_id) = self.resolve_import(&import, document_index) {
-                let name = if let Some(alias) = &import.alias {
-                    alias.clone()
-                } else {
-                    import
-                        .path
-                        .split('.')
-                        .next_back()
-                        .unwrap_or(&import.path)
-                        .to_string()
-                };
-                context.add_import_symbol(name, symbol_id, false); // C# doesn't have type-only imports
-            }
-        }
-
-        // Add file's own symbols
-        let file_symbols =
-            document_index
-                .find_symbols_by_file(file_id)
-                .map_err(|e| IndexError::TantivyError {
-                    operation: "find_symbols_by_file".to_string(),
-                    cause: e.to_string(),
-                })?;
-
-        for symbol in file_symbols {
-            if self.is_resolvable_symbol(&symbol) {
-                context.add_symbol_with_context(
-                    symbol.name.to_string(),
-                    symbol.id,
-                    symbol.scope_context.as_ref(),
-                );
-
-                // Add by module path for cross-module resolution
-                if let Some(ref module_path) = symbol.module_path {
-                    context.add_symbol(
-                        module_path.to_string(),
-                        symbol.id,
-                        crate::parsing::ScopeLevel::Global,
-                    );
-                }
-            }
-        }
-
-        // Add visible symbols from other files
-        let all_symbols =
-            document_index
-                .get_all_symbols(10000)
-                .map_err(|e| IndexError::TantivyError {
-                    operation: "get_all_symbols".to_string(),
-                    cause: e.to_string(),
-                })?;
-
-        for symbol in all_symbols {
-            if symbol.file_id != file_id && self.is_symbol_visible_from_file(&symbol, file_id) {
-                let scope_level = match symbol.visibility {
-                    Visibility::Public => crate::parsing::ScopeLevel::Global,
-                    _ => crate::parsing::ScopeLevel::Module,
-                };
-
-                context.add_symbol(symbol.name.to_string(), symbol.id, scope_level);
-
-                if let Some(ref module_path) = symbol.module_path {
-                    context.add_symbol(
-                        module_path.to_string(),
-                        symbol.id,
-                        crate::parsing::ScopeLevel::Global,
-                    );
-                }
-            }
-        }
-
-        Ok(Box::new(context))
-    }
-
     fn is_resolvable_symbol(&self, symbol: &crate::Symbol) -> bool {
         use crate::SymbolKind;
         use crate::symbol::ScopeContext;
@@ -473,44 +335,6 @@ impl LanguageBehavior for CSharpBehavior {
                 SymbolKind::TypeAlias | SymbolKind::Constant | SymbolKind::Variable
             )
         }
-    }
-
-    fn resolve_import(
-        &self,
-        import: &crate::parsing::Import,
-        document_index: &DocumentIndex,
-    ) -> Option<SymbolId> {
-        // C# import resolution for using directives
-        // using System.Collections.Generic; -> look for symbols in that namespace
-        // using Alias = System.Collections.Generic.List; -> look for List in that namespace
-
-        if let Some(alias) = &import.alias {
-            // Using alias - look for the specific symbol
-            if let Ok(cands) = document_index.find_symbols_by_name(alias, None) {
-                for s in cands {
-                    if let Some(module_path) = &s.module_path {
-                        if module_path.as_ref() == import.path {
-                            return Some(s.id);
-                        }
-                    }
-                }
-            }
-        } else {
-            // Regular using directive - look for any public symbol in that namespace
-            if let Ok(symbols) = document_index.get_all_symbols(10000) {
-                for symbol in symbols {
-                    if let Some(module_path) = &symbol.module_path {
-                        if module_path.as_ref().starts_with(&import.path)
-                            && matches!(symbol.visibility, Visibility::Public)
-                        {
-                            return Some(symbol.id);
-                        }
-                    }
-                }
-            }
-        }
-
-        None
     }
 
     fn get_module_path_for_file(&self, file_id: FileId) -> Option<String> {

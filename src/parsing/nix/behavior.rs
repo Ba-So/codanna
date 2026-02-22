@@ -80,6 +80,21 @@ impl LanguageBehavior for NixBehavior {
         "."
     }
 
+    /// Format path components as a Nix module path
+    ///
+    /// Nix uses '.' for attribute access, so path components are joined with dots.
+    ///
+    /// # Examples
+    /// - `["lib", "utils"]` → `"lib.utils"`
+    /// - `["pkgs", "development", "tools"]` → `"pkgs.development.tools"`
+    fn format_path_as_module(&self, components: &[&str]) -> Option<String> {
+        if components.is_empty() {
+            Some("default".to_string())
+        } else {
+            Some(components.join("."))
+        }
+    }
+
     /// Get the tree-sitter Language for Nix
     ///
     /// Uses the tree-sitter-nix language constant for AST metadata access.
@@ -96,7 +111,12 @@ impl LanguageBehavior for NixBehavior {
     /// - `"lib/utils.nix"` → `"lib.utils"`
     /// - `"default.nix"` → `"default"`
     /// - `"pkgs/development/tools/build.nix"` → `"pkgs.development.tools.build"`
-    fn module_path_from_file(&self, file_path: &Path, project_root: &Path) -> Option<String> {
+    fn module_path_from_file(
+        &self,
+        file_path: &Path,
+        project_root: &Path,
+        _extensions: &[&str],
+    ) -> Option<String> {
         // Get relative path from project root
         let relative_path = file_path
             .strip_prefix(project_root)
@@ -336,32 +356,33 @@ mod tests {
     fn test_module_path_from_file() {
         let behavior = NixBehavior::new();
         let project_root = Path::new("/home/user/project");
+        let extensions: &[&str] = &[".nix"];
 
         // Test basic Nix file
         let file_path = Path::new("/home/user/project/lib/utils.nix");
         assert_eq!(
-            behavior.module_path_from_file(file_path, project_root),
+            behavior.module_path_from_file(file_path, project_root, extensions),
             Some("lib.utils".to_string())
         );
 
         // Test root level file
         let file_path = Path::new("/home/user/project/default.nix");
         assert_eq!(
-            behavior.module_path_from_file(file_path, project_root),
+            behavior.module_path_from_file(file_path, project_root, extensions),
             Some("default".to_string())
         );
 
         // Test nested package
         let file_path = Path::new("/home/user/project/pkgs/development/tools/build.nix");
         assert_eq!(
-            behavior.module_path_from_file(file_path, project_root),
+            behavior.module_path_from_file(file_path, project_root, extensions),
             Some("pkgs.development.tools.build".to_string())
         );
 
         // Test file without .nix extension (edge case)
         let file_path = Path::new("/home/user/project/flake");
         assert_eq!(
-            behavior.module_path_from_file(file_path, project_root),
+            behavior.module_path_from_file(file_path, project_root, extensions),
             Some("flake".to_string())
         );
     }
