@@ -14,7 +14,7 @@
 
           codanna = pkgs.rustPlatform.buildRustPackage {
             pname = "codanna";
-            version = "0.9.10-nix";
+            version = "0.9.14-nix";
 
             src = ./.;
 
